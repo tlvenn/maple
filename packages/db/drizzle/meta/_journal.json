@@ -43,6 +43,20 @@
       "when": 1771286980788,
       "tag": "0005_crazy_joshua_kane",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1772369753295,
+      "tag": "0006_hesitant_shiva",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1772390142197,
+      "tag": "0007_busy_juggernaut",
+      "breakpoints": true
     }
   ]
 }

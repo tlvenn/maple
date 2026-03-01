@@ -1,4 +1,6 @@
+export * from "./anomalies"
 export * from "./api-keys"
 export * from "./dashboards"
+export * from "./github-integrations"
 export * from "./org-ingest-keys"
 export * from "./scrape-targets"

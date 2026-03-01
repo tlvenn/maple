@@ -10,6 +10,25 @@
         "typescript": "^5.9.3",
       },
     },
+    "apps/agent": {
+      "name": "@maple/agent",
+      "dependencies": {
+        "@effect/platform-bun": "^0.87.1",
+        "@effect/sql-drizzle": "^0.48.1",
+        "@effect/sql-libsql": "^0.39.0",
+        "@maple/db": "workspace:*",
+        "@maple/domain": "workspace:*",
+        "@tinybirdco/sdk": "0.0.54",
+        "drizzle-orm": "^0.45.1",
+        "effect": "^3.19.16",
+      },
+      "devDependencies": {
+        "@effect/language-service": "^0.73.0",
+        "@types/bun": "^1.3.8",
+        "@types/node": "^22.10.2",
+        "typescript": "^5.9.3",
+      },
+    },
     "apps/api": {
       "name": "@maple/api",
       "dependencies": {
@@ -701,6 +720,8 @@
     "@libsql/linux-x64-musl": ["@libsql/linux-x64-musl@0.5.22", "", { "os": "linux", "cpu": "x64" }, "sha512-UZ4Xdxm4pu3pQXjvfJiyCzZop/9j/eA2JjmhMaAhe3EVLH2g11Fy4fwyUp9sT1QJYR1kpc2JLuybPM0kuXv/Tg=="],
 
     "@libsql/win32-x64-msvc": ["@libsql/win32-x64-msvc@0.5.22", "", { "os": "win32", "cpu": "x64" }, "sha512-Fj0j8RnBpo43tVZUVoNK6BV/9AtDUM5S7DF3LB4qTYg1LMSZqi3yeCneUTLJD6XomQJlZzbI4mst89yspVSAnA=="],
+
+    "@maple/agent": ["@maple/agent@workspace:apps/agent"],
 
     "@maple/api": ["@maple/api@workspace:apps/api"],
 

@@ -4,6 +4,7 @@ import { Layer } from "effect"
 import { HttpApiKeysLive } from "./routes/api-keys.http"
 import { HttpAuthLive, HttpAuthPublicLive } from "./routes/auth.http"
 import { HttpDashboardsLive } from "./routes/dashboards.http"
+import { HttpGitHubIntegrationsLive } from "./routes/github-integrations.http"
 import { HttpIngestKeysLive } from "./routes/ingest-keys.http"
 import { HttpQueryEngineLive } from "./routes/query-engine.http"
 import { HttpScrapeTargetsLive } from "./routes/scrape-targets.http"
@@ -15,6 +16,7 @@ export const HttpApiRoutes = HttpLayerRouter.addHttpApi(MapleApi).pipe(
   Layer.provideMerge(HttpAuthLive),
   Layer.provideMerge(HttpApiKeysLive),
   Layer.provideMerge(HttpDashboardsLive),
+  Layer.provideMerge(HttpGitHubIntegrationsLive),
   Layer.provideMerge(HttpIngestKeysLive),
   Layer.provideMerge(HttpScrapeTargetsLive),
   Layer.provideMerge(HttpServiceDiscoveryLive),

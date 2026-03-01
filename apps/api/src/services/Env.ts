@@ -22,6 +22,11 @@ export class Env extends Effect.Service<Env>()("Env", {
       AUTUMN_SECRET_KEY: yield* Config.string("AUTUMN_SECRET_KEY").pipe(Config.withDefault("")),
       SD_INTERNAL_TOKEN: yield* Config.string("SD_INTERNAL_TOKEN").pipe(Config.withDefault("")),
       INTERNAL_SERVICE_TOKEN: yield* Config.string("INTERNAL_SERVICE_TOKEN").pipe(Config.withDefault("")),
+      GITHUB_APP_ID: yield* Config.string("GITHUB_APP_ID").pipe(Config.withDefault("")),
+      GITHUB_APP_PRIVATE_KEY: yield* Config.string("GITHUB_APP_PRIVATE_KEY").pipe(Config.withDefault("")),
+      GITHUB_APP_CLIENT_ID: yield* Config.string("GITHUB_APP_CLIENT_ID").pipe(Config.withDefault("")),
+      GITHUB_APP_CLIENT_SECRET: yield* Config.string("GITHUB_APP_CLIENT_SECRET").pipe(Config.withDefault("")),
+      GITHUB_APP_WEBHOOK_SECRET: yield* Config.string("GITHUB_APP_WEBHOOK_SECRET").pipe(Config.withDefault("")),
     } as const
 
     if (env.MAPLE_AUTH_MODE.toLowerCase() !== "clerk" && env.MAPLE_ROOT_PASSWORD.trim().length === 0) {

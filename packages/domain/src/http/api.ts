@@ -2,6 +2,7 @@ import { HttpApi, OpenApi } from "@effect/platform"
 import { ApiKeysApiGroup } from "./api-keys"
 import { AuthApiGroup, AuthPublicApiGroup } from "./auth"
 import { DashboardsApiGroup } from "./dashboards"
+import { GitHubIntegrationsApiGroup } from "./github-integrations"
 import { IngestKeysApiGroup } from "./ingest-keys"
 import { QueryEngineApiGroup } from "./query-engine"
 import { ScrapeTargetsApiGroup } from "./scrape-targets"
@@ -13,6 +14,7 @@ export class MapleApi extends HttpApi.make("MapleApi")
   .add(AuthApiGroup)
   .add(ApiKeysApiGroup)
   .add(DashboardsApiGroup)
+  .add(GitHubIntegrationsApiGroup)
   .add(IngestKeysApiGroup)
   .add(QueryEngineApiGroup)
   .add(ScrapeTargetsApiGroup)

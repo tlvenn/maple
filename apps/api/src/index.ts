@@ -9,6 +9,7 @@ import { ApiKeysService } from "./services/ApiKeysService"
 import { AuthorizationLive } from "./services/AuthorizationLive"
 import { DashboardPersistenceService } from "./services/DashboardPersistenceService"
 import { Env } from "./services/Env"
+import { GitHubIntegrationService } from "./services/GitHubIntegrationService"
 import { OrgIngestKeysService } from "./services/OrgIngestKeysService"
 import { QueryEngineService } from "./services/QueryEngineService"
 import { ScrapeTargetsService } from "./services/ScrapeTargetsService"
@@ -48,6 +49,7 @@ const MainLive = Layer.mergeAll(
   AuthService.Default,
   ApiKeysService.Live,
   DashboardPersistenceService.Live,
+  GitHubIntegrationService.Live,
   OrgIngestKeysService.Live,
   ScrapeTargetsService.Live,
 )

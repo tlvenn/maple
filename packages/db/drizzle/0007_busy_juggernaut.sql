@@ -1,0 +1,1 @@
+ALTER TABLE `github_integrations` ADD `service_repo_mappings` text DEFAULT '[]' NOT NULL;
