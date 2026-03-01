@@ -5,9 +5,9 @@ export class AgentEnv extends Effect.Service<AgentEnv>()("AgentEnv", {
   accessors: true,
   effect: Effect.gen(function* () {
     const env = {
-      // Tinybird
-      TINYBIRD_HOST: yield* Config.string("TINYBIRD_HOST"),
-      TINYBIRD_TOKEN: yield* Config.redacted("TINYBIRD_TOKEN"),
+      // Maple API
+      MAPLE_API_URL: yield* Config.string("MAPLE_API_URL"),
+      MAPLE_ROOT_PASSWORD: yield* Config.string("MAPLE_ROOT_PASSWORD"),
 
       // Database (shared with API)
       MAPLE_DB_URL: yield* Config.string("MAPLE_DB_URL").pipe(Config.withDefault("")),

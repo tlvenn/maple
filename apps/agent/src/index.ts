@@ -3,14 +3,16 @@ import { Duration, Effect, Layer, Schedule } from "effect"
 import { runAgentLoop } from "./loop"
 import { AgentEnv } from "./services/AgentEnv"
 import { AnomalyDetectionService } from "./services/AnomalyDetectionService"
-import { AgentDatabaseLive, AnomalyStateService } from "./services/AnomalyStateService"
+import { AnomalyStateService, AgentDatabaseLive } from "./services/AnomalyStateService"
 import { GitHubIssueService } from "./services/GitHubIssueService"
+import { MapleApiClient } from "./services/MapleApiClient"
 
 // Build layers bottom-up: AgentEnv → Database → Services
 const MainLive = Layer.mergeAll(
   AnomalyDetectionService.Default,
   AnomalyStateService.Live,
   GitHubIssueService.Default,
+  MapleApiClient.Default,
 ).pipe(
   Layer.provideMerge(AgentDatabaseLive),
   Layer.provideMerge(AgentEnv.Default),

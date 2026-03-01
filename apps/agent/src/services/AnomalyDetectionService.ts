@@ -1,33 +1,16 @@
-import {
-  errorsByType,
-  errorsSummary,
-  serviceApdexTimeSeries,
-  serviceOverview,
-} from "@maple/domain/tinybird"
-import { Tinybird } from "@tinybirdco/sdk"
-import { Effect, Redacted } from "effect"
+import { Effect } from "effect"
 import { DetectedAnomaly } from "../lib/anomaly-types"
 import { AgentEnv } from "./AgentEnv"
+import { MapleApiClient } from "./MapleApiClient"
 
 export class AnomalyDetectionService extends Effect.Service<AnomalyDetectionService>()(
   "AnomalyDetectionService",
   {
     accessors: true,
-    dependencies: [AgentEnv.Default],
+    dependencies: [AgentEnv.Default, MapleApiClient.Default],
     effect: Effect.gen(function* () {
       const env = yield* AgentEnv
-
-      const client = new Tinybird({
-        baseUrl: env.TINYBIRD_HOST,
-        token: Redacted.value(env.TINYBIRD_TOKEN),
-        datasources: {},
-        pipes: {
-          errors_summary: errorsSummary,
-          errors_by_type: errorsByType,
-          service_overview: serviceOverview,
-          service_apdex_time_series: serviceApdexTimeSeries,
-        },
-      })
+      const api = yield* MapleApiClient
 
       const detectForOrg = Effect.fn("AnomalyDetectionService.detectForOrg")(
         function* (orgId: string) {
@@ -65,28 +48,20 @@ export class AnomalyDetectionService extends Effect.Service<AnomalyDetectionServ
           baselineEnd: Date,
         ) {
           const [currentResult, baselineResult] = yield* Effect.all([
-            Effect.tryPromise({
-              try: () =>
-                client.errors_summary.query({
-                  org_id: orgId,
-                  start_time: currentStart.toISOString(),
-                  end_time: currentEnd.toISOString(),
-                }),
-              catch: () => new Error("Failed to query current error summary"),
+            api.queryTinybird(orgId, "errors_summary", {
+              start_time: currentStart.toISOString(),
+              end_time: currentEnd.toISOString(),
             }),
-            Effect.tryPromise({
-              try: () =>
-                client.errors_summary.query({
-                  org_id: orgId,
-                  start_time: baselineStart.toISOString(),
-                  end_time: baselineEnd.toISOString(),
-                }),
-              catch: () => new Error("Failed to query baseline error summary"),
+            api.queryTinybird(orgId, "errors_summary", {
+              start_time: baselineStart.toISOString(),
+              end_time: baselineEnd.toISOString(),
             }),
           ])
 
-          const current = currentResult.data[0]
-          const baseline = baselineResult.data[0]
+          const current = currentResult.data[0] as
+            | { errorRate: number; totalErrors: number; affectedServicesCount: number }
+            | undefined
+          const baseline = baselineResult.data[0] as { errorRate: number } | undefined
           if (!current) return []
 
           const currentRate = Number(current.errorRate)
@@ -128,30 +103,24 @@ export class AnomalyDetectionService extends Effect.Service<AnomalyDetectionServ
           baselineEnd: Date,
         ) {
           const [currentResult, baselineResult] = yield* Effect.all([
-            Effect.tryPromise({
-              try: () =>
-                client.errors_by_type.query({
-                  org_id: orgId,
-                  start_time: currentStart.toISOString(),
-                  end_time: currentEnd.toISOString(),
-                }),
-              catch: () => new Error("Failed to query current errors by type"),
+            api.queryTinybird(orgId, "errors_by_type", {
+              start_time: currentStart.toISOString(),
+              end_time: currentEnd.toISOString(),
             }),
-            Effect.tryPromise({
-              try: () =>
-                client.errors_by_type.query({
-                  org_id: orgId,
-                  start_time: baselineStart.toISOString(),
-                  end_time: baselineEnd.toISOString(),
-                }),
-              catch: () => new Error("Failed to query baseline errors by type"),
+            api.queryTinybird(orgId, "errors_by_type", {
+              start_time: baselineStart.toISOString(),
+              end_time: baselineEnd.toISOString(),
             }),
           ])
 
-          const baselineTypes = new Set(baselineResult.data.map((e) => e.errorType))
+          type ErrorByType = { errorType: string; count: number; affectedServices: string[] }
+          const currentData = currentResult.data as ErrorByType[]
+          const baselineData = baselineResult.data as ErrorByType[]
+
+          const baselineTypes = new Set(baselineData.map((e) => e.errorType))
           const anomalies: DetectedAnomaly[] = []
 
-          for (const error of currentResult.data) {
+          for (const error of currentData) {
             if (!baselineTypes.has(error.errorType) && Number(error.count) >= 3) {
               anomalies.push(
                 new DetectedAnomaly({
@@ -182,34 +151,28 @@ export class AnomalyDetectionService extends Effect.Service<AnomalyDetectionServ
           baselineEnd: Date,
         ) {
           const [currentResult, baselineResult] = yield* Effect.all([
-            Effect.tryPromise({
-              try: () =>
-                client.service_overview.query({
-                  org_id: orgId,
-                  start_time: currentStart.toISOString(),
-                  end_time: currentEnd.toISOString(),
-                }),
-              catch: () => new Error("Failed to query current service overview"),
+            api.queryTinybird(orgId, "service_overview", {
+              start_time: currentStart.toISOString(),
+              end_time: currentEnd.toISOString(),
             }),
-            Effect.tryPromise({
-              try: () =>
-                client.service_overview.query({
-                  org_id: orgId,
-                  start_time: baselineStart.toISOString(),
-                  end_time: baselineEnd.toISOString(),
-                }),
-              catch: () => new Error("Failed to query baseline service overview"),
+            api.queryTinybird(orgId, "service_overview", {
+              start_time: baselineStart.toISOString(),
+              end_time: baselineEnd.toISOString(),
             }),
           ])
 
+          type ServiceOverviewRow = { serviceName: string; p99LatencyMs: number }
+          const currentData = currentResult.data as ServiceOverviewRow[]
+          const baselineData = baselineResult.data as ServiceOverviewRow[]
+
           const baselineByService = new Map(
-            baselineResult.data.map((s) => [s.serviceName, s]),
+            baselineData.map((s) => [s.serviceName, s]),
           )
 
           const anomalies: DetectedAnomaly[] = []
           const multiplier = env.AGENT_LATENCY_SPIKE_MULTIPLIER
 
-          for (const service of currentResult.data) {
+          for (const service of currentData) {
             const baseline = baselineByService.get(service.serviceName)
             if (!baseline) continue
 
@@ -241,41 +204,33 @@ export class AnomalyDetectionService extends Effect.Service<AnomalyDetectionServ
 
       const detectApdexDrop = Effect.fn("AnomalyDetectionService.detectApdexDrop")(
         function* (orgId: string, currentStart: Date, currentEnd: Date) {
-          // First get list of services
-          const servicesResult = yield* Effect.tryPromise({
-            try: () =>
-              client.service_overview.query({
-                org_id: orgId,
-                start_time: currentStart.toISOString(),
-                end_time: currentEnd.toISOString(),
-              }),
-            catch: () => new Error("Failed to query services for Apdex check"),
+          type ServiceOverviewRow = { serviceName: string }
+          type ApdexRow = { apdexScore: number; totalCount: number }
+
+          const servicesResult = yield* api.queryTinybird(orgId, "service_overview", {
+            start_time: currentStart.toISOString(),
+            end_time: currentEnd.toISOString(),
           })
 
           const anomalies: DetectedAnomaly[] = []
           const threshold = env.AGENT_APDEX_THRESHOLD
 
-          // Check Apdex for each service
-          for (const service of servicesResult.data) {
-            const apdexResult = yield* Effect.tryPromise({
-              try: () =>
-                client.service_apdex_time_series.query({
-                  org_id: orgId,
-                  service_name: service.serviceName,
-                  start_time: currentStart.toISOString(),
-                  end_time: currentEnd.toISOString(),
-                  bucket_seconds: env.AGENT_DETECTION_WINDOW_MINUTES * 60,
-                }),
-              catch: () => new Error(`Failed to query Apdex for ${service.serviceName}`),
-            }).pipe(Effect.catchAll(() => Effect.succeed({ data: [] as Array<{ apdexScore: number; totalCount: number }> })))
+          for (const service of servicesResult.data as ServiceOverviewRow[]) {
+            const apdexResult = yield* api.queryTinybird(orgId, "service_apdex_time_series", {
+              service_name: service.serviceName,
+              start_time: currentStart.toISOString(),
+              end_time: currentEnd.toISOString(),
+              bucket_seconds: env.AGENT_DETECTION_WINDOW_MINUTES * 60,
+            }).pipe(Effect.catchAll(() => Effect.succeed({ data: [] as ApdexRow[] })))
 
-            if (apdexResult.data.length === 0) continue
+            const apdexData = apdexResult.data as ApdexRow[]
+            if (apdexData.length === 0) continue
 
             const avgApdex =
-              apdexResult.data.reduce((sum, b) => sum + Number(b.apdexScore), 0) /
-              apdexResult.data.length
+              apdexData.reduce((sum, b) => sum + Number(b.apdexScore), 0) /
+              apdexData.length
 
-            const totalCount = apdexResult.data.reduce((sum, b) => sum + Number(b.totalCount), 0)
+            const totalCount = apdexData.reduce((sum, b) => sum + Number(b.totalCount), 0)
 
             if (avgApdex < threshold && totalCount > 10) {
               anomalies.push(
