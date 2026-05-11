@@ -20,16 +20,33 @@ import { Route as OrgRequiredRouteImport } from './routes/org-required'
 import { Route as MetricsRouteImport } from './routes/metrics'
 import { Route as McpRouteImport } from './routes/mcp'
 import { Route as LogsRouteImport } from './routes/logs'
-import { Route as ErrorsRouteImport } from './routes/errors'
 import { Route as DeveloperRouteImport } from './routes/developer'
-import { Route as DashboardsRouteImport } from './routes/dashboards'
 import { Route as ConnectorsRouteImport } from './routes/connectors'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as TracesIndexRouteImport } from './routes/traces/index'
 import { Route as ServicesIndexRouteImport } from './routes/services/index'
+import { Route as InfraIndexRouteImport } from './routes/infra/index'
+import { Route as ErrorsIndexRouteImport } from './routes/errors/index'
+import { Route as DashboardsIndexRouteImport } from './routes/dashboards/index'
+import { Route as AlertsIndexRouteImport } from './routes/alerts/index'
 import { Route as TracesTraceIdRouteImport } from './routes/traces/$traceId'
 import { Route as ServicesServiceNameRouteImport } from './routes/services/$serviceName'
+import { Route as InfraHostNameRouteImport } from './routes/infra/$hostName'
+import { Route as ErrorsErrorTypeRouteImport } from './routes/errors/$errorType'
+import { Route as DashboardsTemplatesRouteImport } from './routes/dashboards/templates'
+import { Route as DashboardsDashboardIdRouteImport } from './routes/dashboards/$dashboardId'
+import { Route as AlertsCreateRouteImport } from './routes/alerts/create'
+import { Route as AlertsRuleIdRouteImport } from './routes/alerts/$ruleId'
+import { Route as ErrorsIssuesIndexRouteImport } from './routes/errors/issues/index'
+import { Route as ErrorsIssuesIssueIdRouteImport } from './routes/errors/issues/$issueId'
+import { Route as InfraKubernetesWorkloadsIndexRouteImport } from './routes/infra/kubernetes/workloads/index'
+import { Route as InfraKubernetesPodsIndexRouteImport } from './routes/infra/kubernetes/pods/index'
+import { Route as InfraKubernetesNodesIndexRouteImport } from './routes/infra/kubernetes/nodes/index'
+import { Route as InfraKubernetesPodsPodNameRouteImport } from './routes/infra/kubernetes/pods/$podName'
+import { Route as InfraKubernetesNodesNodeNameRouteImport } from './routes/infra/kubernetes/nodes/$nodeName'
+import { Route as DashboardsDashboardIdWidgetsWidgetIdRouteImport } from './routes/dashboards/$dashboardId_.widgets.$widgetId'
+import { Route as InfraKubernetesWorkloadsKindWorkloadNameRouteImport } from './routes/infra/kubernetes/workloads/$kind/$workloadName'
 
 const SignUpRoute = SignUpRouteImport.update({
   id: '/sign-up',
@@ -86,19 +103,9 @@ const LogsRoute = LogsRouteImport.update({
   path: '/logs',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ErrorsRoute = ErrorsRouteImport.update({
-  id: '/errors',
-  path: '/errors',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const DeveloperRoute = DeveloperRouteImport.update({
   id: '/developer',
   path: '/developer',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DashboardsRoute = DashboardsRouteImport.update({
-  id: '/dashboards',
-  path: '/dashboards',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ConnectorsRoute = ConnectorsRouteImport.update({
@@ -126,6 +133,26 @@ const ServicesIndexRoute = ServicesIndexRouteImport.update({
   path: '/services/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InfraIndexRoute = InfraIndexRouteImport.update({
+  id: '/infra/',
+  path: '/infra/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ErrorsIndexRoute = ErrorsIndexRouteImport.update({
+  id: '/errors/',
+  path: '/errors/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardsIndexRoute = DashboardsIndexRouteImport.update({
+  id: '/dashboards/',
+  path: '/dashboards/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AlertsIndexRoute = AlertsIndexRouteImport.update({
+  id: '/alerts/',
+  path: '/alerts/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TracesTraceIdRoute = TracesTraceIdRouteImport.update({
   id: '/traces/$traceId',
   path: '/traces/$traceId',
@@ -136,14 +163,94 @@ const ServicesServiceNameRoute = ServicesServiceNameRouteImport.update({
   path: '/services/$serviceName',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InfraHostNameRoute = InfraHostNameRouteImport.update({
+  id: '/infra/$hostName',
+  path: '/infra/$hostName',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ErrorsErrorTypeRoute = ErrorsErrorTypeRouteImport.update({
+  id: '/errors/$errorType',
+  path: '/errors/$errorType',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardsTemplatesRoute = DashboardsTemplatesRouteImport.update({
+  id: '/dashboards/templates',
+  path: '/dashboards/templates',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardsDashboardIdRoute = DashboardsDashboardIdRouteImport.update({
+  id: '/dashboards/$dashboardId',
+  path: '/dashboards/$dashboardId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AlertsCreateRoute = AlertsCreateRouteImport.update({
+  id: '/alerts/create',
+  path: '/alerts/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AlertsRuleIdRoute = AlertsRuleIdRouteImport.update({
+  id: '/alerts/$ruleId',
+  path: '/alerts/$ruleId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ErrorsIssuesIndexRoute = ErrorsIssuesIndexRouteImport.update({
+  id: '/errors/issues/',
+  path: '/errors/issues/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ErrorsIssuesIssueIdRoute = ErrorsIssuesIssueIdRouteImport.update({
+  id: '/errors/issues/$issueId',
+  path: '/errors/issues/$issueId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const InfraKubernetesWorkloadsIndexRoute =
+  InfraKubernetesWorkloadsIndexRouteImport.update({
+    id: '/infra/kubernetes/workloads/',
+    path: '/infra/kubernetes/workloads/',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const InfraKubernetesPodsIndexRoute =
+  InfraKubernetesPodsIndexRouteImport.update({
+    id: '/infra/kubernetes/pods/',
+    path: '/infra/kubernetes/pods/',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const InfraKubernetesNodesIndexRoute =
+  InfraKubernetesNodesIndexRouteImport.update({
+    id: '/infra/kubernetes/nodes/',
+    path: '/infra/kubernetes/nodes/',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const InfraKubernetesPodsPodNameRoute =
+  InfraKubernetesPodsPodNameRouteImport.update({
+    id: '/infra/kubernetes/pods/$podName',
+    path: '/infra/kubernetes/pods/$podName',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const InfraKubernetesNodesNodeNameRoute =
+  InfraKubernetesNodesNodeNameRouteImport.update({
+    id: '/infra/kubernetes/nodes/$nodeName',
+    path: '/infra/kubernetes/nodes/$nodeName',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DashboardsDashboardIdWidgetsWidgetIdRoute =
+  DashboardsDashboardIdWidgetsWidgetIdRouteImport.update({
+    id: '/dashboards/$dashboardId_/widgets/$widgetId',
+    path: '/dashboards/$dashboardId/widgets/$widgetId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const InfraKubernetesWorkloadsKindWorkloadNameRoute =
+  InfraKubernetesWorkloadsKindWorkloadNameRouteImport.update({
+    id: '/infra/kubernetes/workloads/$kind/$workloadName',
+    path: '/infra/kubernetes/workloads/$kind/$workloadName',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/connectors': typeof ConnectorsRoute
-  '/dashboards': typeof DashboardsRoute
   '/developer': typeof DeveloperRoute
-  '/errors': typeof ErrorsRoute
   '/logs': typeof LogsRoute
   '/mcp': typeof McpRoute
   '/metrics': typeof MetricsRoute
@@ -155,18 +262,35 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/alerts/$ruleId': typeof AlertsRuleIdRoute
+  '/alerts/create': typeof AlertsCreateRoute
+  '/dashboards/$dashboardId': typeof DashboardsDashboardIdRoute
+  '/dashboards/templates': typeof DashboardsTemplatesRoute
+  '/errors/$errorType': typeof ErrorsErrorTypeRoute
+  '/infra/$hostName': typeof InfraHostNameRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
+  '/alerts/': typeof AlertsIndexRoute
+  '/dashboards/': typeof DashboardsIndexRoute
+  '/errors/': typeof ErrorsIndexRoute
+  '/infra/': typeof InfraIndexRoute
   '/services/': typeof ServicesIndexRoute
   '/traces/': typeof TracesIndexRoute
+  '/errors/issues/$issueId': typeof ErrorsIssuesIssueIdRoute
+  '/errors/issues/': typeof ErrorsIssuesIndexRoute
+  '/dashboards/$dashboardId/widgets/$widgetId': typeof DashboardsDashboardIdWidgetsWidgetIdRoute
+  '/infra/kubernetes/nodes/$nodeName': typeof InfraKubernetesNodesNodeNameRoute
+  '/infra/kubernetes/pods/$podName': typeof InfraKubernetesPodsPodNameRoute
+  '/infra/kubernetes/nodes/': typeof InfraKubernetesNodesIndexRoute
+  '/infra/kubernetes/pods/': typeof InfraKubernetesPodsIndexRoute
+  '/infra/kubernetes/workloads/': typeof InfraKubernetesWorkloadsIndexRoute
+  '/infra/kubernetes/workloads/$kind/$workloadName': typeof InfraKubernetesWorkloadsKindWorkloadNameRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/connectors': typeof ConnectorsRoute
-  '/dashboards': typeof DashboardsRoute
   '/developer': typeof DeveloperRoute
-  '/errors': typeof ErrorsRoute
   '/logs': typeof LogsRoute
   '/mcp': typeof McpRoute
   '/metrics': typeof MetricsRoute
@@ -178,19 +302,36 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/alerts/$ruleId': typeof AlertsRuleIdRoute
+  '/alerts/create': typeof AlertsCreateRoute
+  '/dashboards/$dashboardId': typeof DashboardsDashboardIdRoute
+  '/dashboards/templates': typeof DashboardsTemplatesRoute
+  '/errors/$errorType': typeof ErrorsErrorTypeRoute
+  '/infra/$hostName': typeof InfraHostNameRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
+  '/alerts': typeof AlertsIndexRoute
+  '/dashboards': typeof DashboardsIndexRoute
+  '/errors': typeof ErrorsIndexRoute
+  '/infra': typeof InfraIndexRoute
   '/services': typeof ServicesIndexRoute
   '/traces': typeof TracesIndexRoute
+  '/errors/issues/$issueId': typeof ErrorsIssuesIssueIdRoute
+  '/errors/issues': typeof ErrorsIssuesIndexRoute
+  '/dashboards/$dashboardId/widgets/$widgetId': typeof DashboardsDashboardIdWidgetsWidgetIdRoute
+  '/infra/kubernetes/nodes/$nodeName': typeof InfraKubernetesNodesNodeNameRoute
+  '/infra/kubernetes/pods/$podName': typeof InfraKubernetesPodsPodNameRoute
+  '/infra/kubernetes/nodes': typeof InfraKubernetesNodesIndexRoute
+  '/infra/kubernetes/pods': typeof InfraKubernetesPodsIndexRoute
+  '/infra/kubernetes/workloads': typeof InfraKubernetesWorkloadsIndexRoute
+  '/infra/kubernetes/workloads/$kind/$workloadName': typeof InfraKubernetesWorkloadsKindWorkloadNameRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/connectors': typeof ConnectorsRoute
-  '/dashboards': typeof DashboardsRoute
   '/developer': typeof DeveloperRoute
-  '/errors': typeof ErrorsRoute
   '/logs': typeof LogsRoute
   '/mcp': typeof McpRoute
   '/metrics': typeof MetricsRoute
@@ -202,10 +343,29 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/alerts/$ruleId': typeof AlertsRuleIdRoute
+  '/alerts/create': typeof AlertsCreateRoute
+  '/dashboards/$dashboardId': typeof DashboardsDashboardIdRoute
+  '/dashboards/templates': typeof DashboardsTemplatesRoute
+  '/errors/$errorType': typeof ErrorsErrorTypeRoute
+  '/infra/$hostName': typeof InfraHostNameRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
+  '/alerts/': typeof AlertsIndexRoute
+  '/dashboards/': typeof DashboardsIndexRoute
+  '/errors/': typeof ErrorsIndexRoute
+  '/infra/': typeof InfraIndexRoute
   '/services/': typeof ServicesIndexRoute
   '/traces/': typeof TracesIndexRoute
+  '/errors/issues/$issueId': typeof ErrorsIssuesIssueIdRoute
+  '/errors/issues/': typeof ErrorsIssuesIndexRoute
+  '/dashboards/$dashboardId_/widgets/$widgetId': typeof DashboardsDashboardIdWidgetsWidgetIdRoute
+  '/infra/kubernetes/nodes/$nodeName': typeof InfraKubernetesNodesNodeNameRoute
+  '/infra/kubernetes/pods/$podName': typeof InfraKubernetesPodsPodNameRoute
+  '/infra/kubernetes/nodes/': typeof InfraKubernetesNodesIndexRoute
+  '/infra/kubernetes/pods/': typeof InfraKubernetesPodsIndexRoute
+  '/infra/kubernetes/workloads/': typeof InfraKubernetesWorkloadsIndexRoute
+  '/infra/kubernetes/workloads/$kind/$workloadName': typeof InfraKubernetesWorkloadsKindWorkloadNameRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -213,9 +373,7 @@ export interface FileRouteTypes {
     | '/'
     | '/chat'
     | '/connectors'
-    | '/dashboards'
     | '/developer'
-    | '/errors'
     | '/logs'
     | '/mcp'
     | '/metrics'
@@ -227,18 +385,35 @@ export interface FileRouteTypes {
     | '/settings'
     | '/sign-in'
     | '/sign-up'
+    | '/alerts/$ruleId'
+    | '/alerts/create'
+    | '/dashboards/$dashboardId'
+    | '/dashboards/templates'
+    | '/errors/$errorType'
+    | '/infra/$hostName'
     | '/services/$serviceName'
     | '/traces/$traceId'
+    | '/alerts/'
+    | '/dashboards/'
+    | '/errors/'
+    | '/infra/'
     | '/services/'
     | '/traces/'
+    | '/errors/issues/$issueId'
+    | '/errors/issues/'
+    | '/dashboards/$dashboardId/widgets/$widgetId'
+    | '/infra/kubernetes/nodes/$nodeName'
+    | '/infra/kubernetes/pods/$podName'
+    | '/infra/kubernetes/nodes/'
+    | '/infra/kubernetes/pods/'
+    | '/infra/kubernetes/workloads/'
+    | '/infra/kubernetes/workloads/$kind/$workloadName'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/chat'
     | '/connectors'
-    | '/dashboards'
     | '/developer'
-    | '/errors'
     | '/logs'
     | '/mcp'
     | '/metrics'
@@ -250,18 +425,35 @@ export interface FileRouteTypes {
     | '/settings'
     | '/sign-in'
     | '/sign-up'
+    | '/alerts/$ruleId'
+    | '/alerts/create'
+    | '/dashboards/$dashboardId'
+    | '/dashboards/templates'
+    | '/errors/$errorType'
+    | '/infra/$hostName'
     | '/services/$serviceName'
     | '/traces/$traceId'
+    | '/alerts'
+    | '/dashboards'
+    | '/errors'
+    | '/infra'
     | '/services'
     | '/traces'
+    | '/errors/issues/$issueId'
+    | '/errors/issues'
+    | '/dashboards/$dashboardId/widgets/$widgetId'
+    | '/infra/kubernetes/nodes/$nodeName'
+    | '/infra/kubernetes/pods/$podName'
+    | '/infra/kubernetes/nodes'
+    | '/infra/kubernetes/pods'
+    | '/infra/kubernetes/workloads'
+    | '/infra/kubernetes/workloads/$kind/$workloadName'
   id:
     | '__root__'
     | '/'
     | '/chat'
     | '/connectors'
-    | '/dashboards'
     | '/developer'
-    | '/errors'
     | '/logs'
     | '/mcp'
     | '/metrics'
@@ -273,19 +465,36 @@ export interface FileRouteTypes {
     | '/settings'
     | '/sign-in'
     | '/sign-up'
+    | '/alerts/$ruleId'
+    | '/alerts/create'
+    | '/dashboards/$dashboardId'
+    | '/dashboards/templates'
+    | '/errors/$errorType'
+    | '/infra/$hostName'
     | '/services/$serviceName'
     | '/traces/$traceId'
+    | '/alerts/'
+    | '/dashboards/'
+    | '/errors/'
+    | '/infra/'
     | '/services/'
     | '/traces/'
+    | '/errors/issues/$issueId'
+    | '/errors/issues/'
+    | '/dashboards/$dashboardId_/widgets/$widgetId'
+    | '/infra/kubernetes/nodes/$nodeName'
+    | '/infra/kubernetes/pods/$podName'
+    | '/infra/kubernetes/nodes/'
+    | '/infra/kubernetes/pods/'
+    | '/infra/kubernetes/workloads/'
+    | '/infra/kubernetes/workloads/$kind/$workloadName'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChatRoute: typeof ChatRoute
   ConnectorsRoute: typeof ConnectorsRoute
-  DashboardsRoute: typeof DashboardsRoute
   DeveloperRoute: typeof DeveloperRoute
-  ErrorsRoute: typeof ErrorsRoute
   LogsRoute: typeof LogsRoute
   McpRoute: typeof McpRoute
   MetricsRoute: typeof MetricsRoute
@@ -297,10 +506,29 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
+  AlertsRuleIdRoute: typeof AlertsRuleIdRoute
+  AlertsCreateRoute: typeof AlertsCreateRoute
+  DashboardsDashboardIdRoute: typeof DashboardsDashboardIdRoute
+  DashboardsTemplatesRoute: typeof DashboardsTemplatesRoute
+  ErrorsErrorTypeRoute: typeof ErrorsErrorTypeRoute
+  InfraHostNameRoute: typeof InfraHostNameRoute
   ServicesServiceNameRoute: typeof ServicesServiceNameRoute
   TracesTraceIdRoute: typeof TracesTraceIdRoute
+  AlertsIndexRoute: typeof AlertsIndexRoute
+  DashboardsIndexRoute: typeof DashboardsIndexRoute
+  ErrorsIndexRoute: typeof ErrorsIndexRoute
+  InfraIndexRoute: typeof InfraIndexRoute
   ServicesIndexRoute: typeof ServicesIndexRoute
   TracesIndexRoute: typeof TracesIndexRoute
+  ErrorsIssuesIssueIdRoute: typeof ErrorsIssuesIssueIdRoute
+  ErrorsIssuesIndexRoute: typeof ErrorsIssuesIndexRoute
+  DashboardsDashboardIdWidgetsWidgetIdRoute: typeof DashboardsDashboardIdWidgetsWidgetIdRoute
+  InfraKubernetesNodesNodeNameRoute: typeof InfraKubernetesNodesNodeNameRoute
+  InfraKubernetesPodsPodNameRoute: typeof InfraKubernetesPodsPodNameRoute
+  InfraKubernetesNodesIndexRoute: typeof InfraKubernetesNodesIndexRoute
+  InfraKubernetesPodsIndexRoute: typeof InfraKubernetesPodsIndexRoute
+  InfraKubernetesWorkloadsIndexRoute: typeof InfraKubernetesWorkloadsIndexRoute
+  InfraKubernetesWorkloadsKindWorkloadNameRoute: typeof InfraKubernetesWorkloadsKindWorkloadNameRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -382,25 +610,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LogsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/errors': {
-      id: '/errors'
-      path: '/errors'
-      fullPath: '/errors'
-      preLoaderRoute: typeof ErrorsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/developer': {
       id: '/developer'
       path: '/developer'
       fullPath: '/developer'
       preLoaderRoute: typeof DeveloperRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboards': {
-      id: '/dashboards'
-      path: '/dashboards'
-      fullPath: '/dashboards'
-      preLoaderRoute: typeof DashboardsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/connectors': {
@@ -438,6 +652,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServicesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/infra/': {
+      id: '/infra/'
+      path: '/infra'
+      fullPath: '/infra/'
+      preLoaderRoute: typeof InfraIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/errors/': {
+      id: '/errors/'
+      path: '/errors'
+      fullPath: '/errors/'
+      preLoaderRoute: typeof ErrorsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboards/': {
+      id: '/dashboards/'
+      path: '/dashboards'
+      fullPath: '/dashboards/'
+      preLoaderRoute: typeof DashboardsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/alerts/': {
+      id: '/alerts/'
+      path: '/alerts'
+      fullPath: '/alerts/'
+      preLoaderRoute: typeof AlertsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/traces/$traceId': {
       id: '/traces/$traceId'
       path: '/traces/$traceId'
@@ -452,6 +694,111 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServicesServiceNameRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/infra/$hostName': {
+      id: '/infra/$hostName'
+      path: '/infra/$hostName'
+      fullPath: '/infra/$hostName'
+      preLoaderRoute: typeof InfraHostNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/errors/$errorType': {
+      id: '/errors/$errorType'
+      path: '/errors/$errorType'
+      fullPath: '/errors/$errorType'
+      preLoaderRoute: typeof ErrorsErrorTypeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboards/templates': {
+      id: '/dashboards/templates'
+      path: '/dashboards/templates'
+      fullPath: '/dashboards/templates'
+      preLoaderRoute: typeof DashboardsTemplatesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboards/$dashboardId': {
+      id: '/dashboards/$dashboardId'
+      path: '/dashboards/$dashboardId'
+      fullPath: '/dashboards/$dashboardId'
+      preLoaderRoute: typeof DashboardsDashboardIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/alerts/create': {
+      id: '/alerts/create'
+      path: '/alerts/create'
+      fullPath: '/alerts/create'
+      preLoaderRoute: typeof AlertsCreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/alerts/$ruleId': {
+      id: '/alerts/$ruleId'
+      path: '/alerts/$ruleId'
+      fullPath: '/alerts/$ruleId'
+      preLoaderRoute: typeof AlertsRuleIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/errors/issues/': {
+      id: '/errors/issues/'
+      path: '/errors/issues'
+      fullPath: '/errors/issues/'
+      preLoaderRoute: typeof ErrorsIssuesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/errors/issues/$issueId': {
+      id: '/errors/issues/$issueId'
+      path: '/errors/issues/$issueId'
+      fullPath: '/errors/issues/$issueId'
+      preLoaderRoute: typeof ErrorsIssuesIssueIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/infra/kubernetes/workloads/': {
+      id: '/infra/kubernetes/workloads/'
+      path: '/infra/kubernetes/workloads'
+      fullPath: '/infra/kubernetes/workloads/'
+      preLoaderRoute: typeof InfraKubernetesWorkloadsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/infra/kubernetes/pods/': {
+      id: '/infra/kubernetes/pods/'
+      path: '/infra/kubernetes/pods'
+      fullPath: '/infra/kubernetes/pods/'
+      preLoaderRoute: typeof InfraKubernetesPodsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/infra/kubernetes/nodes/': {
+      id: '/infra/kubernetes/nodes/'
+      path: '/infra/kubernetes/nodes'
+      fullPath: '/infra/kubernetes/nodes/'
+      preLoaderRoute: typeof InfraKubernetesNodesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/infra/kubernetes/pods/$podName': {
+      id: '/infra/kubernetes/pods/$podName'
+      path: '/infra/kubernetes/pods/$podName'
+      fullPath: '/infra/kubernetes/pods/$podName'
+      preLoaderRoute: typeof InfraKubernetesPodsPodNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/infra/kubernetes/nodes/$nodeName': {
+      id: '/infra/kubernetes/nodes/$nodeName'
+      path: '/infra/kubernetes/nodes/$nodeName'
+      fullPath: '/infra/kubernetes/nodes/$nodeName'
+      preLoaderRoute: typeof InfraKubernetesNodesNodeNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboards/$dashboardId_/widgets/$widgetId': {
+      id: '/dashboards/$dashboardId_/widgets/$widgetId'
+      path: '/dashboards/$dashboardId/widgets/$widgetId'
+      fullPath: '/dashboards/$dashboardId/widgets/$widgetId'
+      preLoaderRoute: typeof DashboardsDashboardIdWidgetsWidgetIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/infra/kubernetes/workloads/$kind/$workloadName': {
+      id: '/infra/kubernetes/workloads/$kind/$workloadName'
+      path: '/infra/kubernetes/workloads/$kind/$workloadName'
+      fullPath: '/infra/kubernetes/workloads/$kind/$workloadName'
+      preLoaderRoute: typeof InfraKubernetesWorkloadsKindWorkloadNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -459,9 +806,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChatRoute: ChatRoute,
   ConnectorsRoute: ConnectorsRoute,
-  DashboardsRoute: DashboardsRoute,
   DeveloperRoute: DeveloperRoute,
-  ErrorsRoute: ErrorsRoute,
   LogsRoute: LogsRoute,
   McpRoute: McpRoute,
   MetricsRoute: MetricsRoute,
@@ -473,10 +818,31 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
+  AlertsRuleIdRoute: AlertsRuleIdRoute,
+  AlertsCreateRoute: AlertsCreateRoute,
+  DashboardsDashboardIdRoute: DashboardsDashboardIdRoute,
+  DashboardsTemplatesRoute: DashboardsTemplatesRoute,
+  ErrorsErrorTypeRoute: ErrorsErrorTypeRoute,
+  InfraHostNameRoute: InfraHostNameRoute,
   ServicesServiceNameRoute: ServicesServiceNameRoute,
   TracesTraceIdRoute: TracesTraceIdRoute,
+  AlertsIndexRoute: AlertsIndexRoute,
+  DashboardsIndexRoute: DashboardsIndexRoute,
+  ErrorsIndexRoute: ErrorsIndexRoute,
+  InfraIndexRoute: InfraIndexRoute,
   ServicesIndexRoute: ServicesIndexRoute,
   TracesIndexRoute: TracesIndexRoute,
+  ErrorsIssuesIssueIdRoute: ErrorsIssuesIssueIdRoute,
+  ErrorsIssuesIndexRoute: ErrorsIssuesIndexRoute,
+  DashboardsDashboardIdWidgetsWidgetIdRoute:
+    DashboardsDashboardIdWidgetsWidgetIdRoute,
+  InfraKubernetesNodesNodeNameRoute: InfraKubernetesNodesNodeNameRoute,
+  InfraKubernetesPodsPodNameRoute: InfraKubernetesPodsPodNameRoute,
+  InfraKubernetesNodesIndexRoute: InfraKubernetesNodesIndexRoute,
+  InfraKubernetesPodsIndexRoute: InfraKubernetesPodsIndexRoute,
+  InfraKubernetesWorkloadsIndexRoute: InfraKubernetesWorkloadsIndexRoute,
+  InfraKubernetesWorkloadsKindWorkloadNameRoute:
+    InfraKubernetesWorkloadsKindWorkloadNameRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -8,8 +8,13 @@ Maple is now organized as a monorepo with a SPA frontend and an Effect-based bac
 - `apps/api`: Effect HTTP API (Tinybird proxy + MCP server code)
 - `apps/ingest`: OTLP ingest gateway (key auth + org enrichment + collector forwarding)
 - `apps/landing`: Astro landing site
+- `apps/alerting`: Alert evaluation worker
+- `apps/chat-agent`: Cloudflare Worker chat surface
+- `apps/cli`: CLI utilities
+- `apps/mobile`: Expo mobile app
 - `packages/domain`: Shared Effect HTTP contracts and domain types
-- `packages/api-client`: Typed client used by the web app
+- `packages/query-engine`: Shared query and observability logic
+- `packages/ui`: Shared UI primitives and components
 
 ## Prerequisites
 
@@ -23,43 +28,28 @@ bun install
 
 ## Develop
 
-Run all app services (API + web + ingest + landing):
-
-```bash
-bun run dev:all
-```
-
-`dev:all` uses Turbo `--continue=always`, so if one service fails to bind (for example, a port already in use), other services keep running.
-Dev scripts run Turbo in TUI mode so interactive dev servers (like Vite) stay attached.
-Use strict fail-fast mode when needed:
-
-```bash
-bun run dev:all:strict
-```
-
 Run every available `dev` task in the monorepo:
 
 ```bash
 bun run dev
 ```
 
-Run only web:
+Run individual apps from the repo root with workspace filters:
 
 ```bash
-bun run dev:web
+bun --filter=@maple/web dev
+bun --filter=@maple/api dev
+bun --filter=@maple/ingest dev
+bun --filter=@maple/landing dev
 ```
 
-Run only API:
+There is also a dedicated root helper for alerting:
 
 ```bash
-bun run dev:api
+bun run dev:alerting
 ```
 
-Run only ingest gateway:
-
-```bash
-bun run dev:ingest
-```
+Turbo dev runs in TUI mode so interactive servers stay attached.
 
 ## Validate
 
@@ -84,87 +74,74 @@ Services:
 - Ingest: `http://localhost:3474`
 - OTEL collector: `4317` (gRPC), `4318` (HTTP), `13133` (health/extensions)
 
-## Railway + Cloudflare Deploy (Alchemy)
+## Cloudflare Deploy (Alchemy)
 
-Deployments are orchestrated from one Alchemy run in `apps/web/alchemy.run.ts` with stage-driven targets:
+Deployments are per-app Alchemy runs pinned to Cloudflare Workers + D1:
 
-- Provisions Railway project `maple`
-- Uses Railway environments per stage: `prd`, `stg`, and `pr-<number>`
-- Provisions stage-scoped services `api`, `ingest`, and `otel-collector`
-- Configures service instance settings (`rootDirectory`, `dockerfilePath`, `watchPatterns`)
-- Applies required Railway variables for API and ingest
-- Uses production custom Railway domains (`api.maple.dev`, `ingest.maple.dev`) and Railway-generated domains in `stg` / `pr-*`
-- Deploys `apps/web` to Cloudflare
+- `apps/api/alchemy.run.ts` — D1 database `MAPLE_DB` + api Worker with all env bindings
+- `apps/landing/alchemy.run.ts` — Astro build + Worker serving static assets
+- `apps/web/alchemy.run.ts` — TanStack Start app via the `Vite()` resource
 
-Railway orchestration module: `@maple/infra/railway` (workspace package at `packages/infra`).
+Stage grammar is `prd` / `stg` / `pr-<number>`, resolved via `@maple/infra/cloudflare` (`parseMapleStage`, `resolveMapleDomains`, `resolveWorkerName`, `resolveD1Name`).
 
 Run locally:
 
 ```bash
-bun run deploy:prd
-bun run deploy:stg
-PR_NUMBER=123 bun run deploy:pr
+bun run alchemy:deploy:prd
+bun run alchemy:deploy:stg
+PR_NUMBER=123 bun run alchemy:deploy:pr
 ```
-
-All deploy scripts are full-stack only (Railway + Cloudflare). If `RAILWAY_API_TOKEN` is missing, deploy/destroy fails immediately.
 
 Tear down:
 
 ```bash
-bun run destroy:prd
-bun run destroy:stg
-PR_NUMBER=123 bun run destroy:pr
+bun run alchemy:destroy:prd
+bun run alchemy:destroy:stg
+PR_NUMBER=123 bun run alchemy:destroy:pr
 ```
 
 CI workflows:
 
-- PRD: `.github/workflows/deploy-prd.yml` (`push` on `main` + `workflow_dispatch`)
-- STG: `.github/workflows/deploy-stg.yml` (`push` on `develop` + `workflow_dispatch`)
+- STG (default on push to `main`): `.github/workflows/deploy-stg.yml`
+- PRD (manual only via `workflow_dispatch`): `.github/workflows/deploy-prd.yml`
 - PR preview lifecycle: `.github/workflows/deploy-pr-preview.yml` (`pull_request` opened/synchronize/reopened/closed)
 
 Secrets source model (CI):
 
 - GitHub Secrets (only one): `DOPPLER_TOKEN`
 - Doppler configs (`prd`, `stg`, `pr`) must define:
-  - `ALCHEMY_PASSWORD`
-  - `ALCHEMY_STATE_TOKEN`
-  - `CLOUDFLARE_API_TOKEN`
-  - `CLOUDFLARE_ACCOUNT_ID`
-  - `CLOUDFLARE_EMAIL`
-  - `RAILWAY_API_TOKEN`
-  - `RAILWAY_WORKSPACE_ID`
-  - `TINYBIRD_HOST`
-  - `TINYBIRD_TOKEN`
-  - `MAPLE_DB_URL`
-  - `MAPLE_DB_AUTH_TOKEN`
-  - `MAPLE_INGEST_KEY_ENCRYPTION_KEY`
-  - `MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY`
-  - `MAPLE_AUTH_MODE`
-  - `MAPLE_ROOT_PASSWORD` (required in `self_hosted` mode)
-  - `CLERK_SECRET_KEY`
-  - `CLERK_PUBLISHABLE_KEY`
-  - `CLERK_JWT_KEY`
+    - `ALCHEMY_PASSWORD`
+    - `ALCHEMY_STATE_TOKEN`
+    - `CLOUDFLARE_API_TOKEN`
+    - `CLOUDFLARE_DEFAULT_ACCOUNT_ID`
+    - `TINYBIRD_HOST`
+    - `TINYBIRD_TOKEN`
+    - `RESEND_API_KEY`
+    - `RESEND_FROM_EMAIL`
+    - `MAPLE_INGEST_KEY_ENCRYPTION_KEY`
+    - `MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY`
+    - `MAPLE_AUTH_MODE`
+    - `MAPLE_ROOT_PASSWORD` (required in `self_hosted` mode)
+    - `CLERK_SECRET_KEY`
+    - `CLERK_PUBLISHABLE_KEY`
+    - `CLERK_JWT_KEY`
 
 Free/Starter note: when using a personal Doppler token, the workflow must also specify Doppler selectors (`doppler-project`, `doppler-config`). This repo uses `maple` with stage configs `prd`, `stg`, and `pr`.
 
 Runtime API URL behavior:
 
-- Deploy-time web builds always use the Railway API domain from the same Alchemy run (`api.maple.dev` in `prd`, Railway-generated in `stg` / `pr-*`).
-- Local `bun run dev:web` can still use root `.env` `VITE_API_BASE_URL` for local API routing.
-
-Legacy env cleanup (delete these from Doppler):
-
-- `MAPLE_DEPLOY_WEB_ONLY`
+- Deploy-time web builds resolve `VITE_API_BASE_URL` from the Cloudflare api worker domain (`api.maple.dev` in `prd`, `api-staging.maple.dev` in `stg`, worker.dev URL for `pr-*`).
+- Local `bun --filter=@maple/web dev` can still use root `.env` `VITE_API_BASE_URL` for local API routing.
 
 ## Environment
 
-- Canonical env example (used by `bun run dev:all`): `.env.example`
+- Canonical env example: `.env.example`
 - API-only env example: `apps/api/.env.example`
 - Real `.env` values are local-only and should stay untracked.
 
 The web app expects `VITE_API_BASE_URL` to point to the API (defaults to `http://localhost:3472`).
 
-For ingest + key auth, set these at minimum in your root `.env` when using `bun run dev:all`:
+For ingest + key auth, set these at minimum in your root `.env` when running the ingest gateway:
 
 - `MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY`
 - `INGEST_PORT`
@@ -184,13 +161,13 @@ Maple now persists dashboards in SQLite via libSQL:
 Migration commands:
 
 ```bash
-bun run db:migrate
-bun run db:generate
-bun run db:push
-bun run db:studio
+bun --filter=@maple/api db:migrate
+bun --filter=@maple/db db:generate
+bun --filter=@maple/db db:push
+bun --filter=@maple/db db:studio
 ```
 
-When running the API (`bun run dev:api` or `bun run --filter=@maple/api start`), migrations are applied automatically before boot.
+When running the API (`bun --filter=@maple/api dev` or `bun --filter=@maple/api start`), migrations are applied automatically before boot.
 
 ## Ingest Keys
 
@@ -205,35 +182,37 @@ When running the API (`bun run dev:api` or `bun run --filter=@maple/api start`),
 Maple supports exactly two auth modes via `MAPLE_AUTH_MODE`:
 
 1. `clerk`
-   - Create a Clerk application with Organizations enabled.
-   - Set `MAPLE_AUTH_MODE=clerk`
-   - Set `CLERK_SECRET_KEY`
-   - Optionally set `CLERK_JWT_KEY` for networkless verification
-   - Set `CLERK_PUBLISHABLE_KEY` for the web app
-   - Optionally override `VITE_CLERK_SIGN_IN_URL` and `VITE_CLERK_SIGN_UP_URL`
+    - Create a Clerk application with Organizations enabled.
+    - Set `MAPLE_AUTH_MODE=clerk`
+    - Set `CLERK_SECRET_KEY`
+    - Optionally set `CLERK_JWT_KEY` for networkless verification
+    - Set `CLERK_PUBLISHABLE_KEY` for the web app
+    - Optionally override `VITE_CLERK_SIGN_IN_URL` and `VITE_CLERK_SIGN_UP_URL`
 2. `self_hosted`
-   - Set `MAPLE_AUTH_MODE=self_hosted`
-   - Set `MAPLE_ROOT_PASSWORD` (required)
-   - Set `MAPLE_DEFAULT_ORG_ID` (defaults to `default`)
-   - Users must sign in at `/sign-in` with the root password before accessing the dashboard/API.
+    - Set `MAPLE_AUTH_MODE=self_hosted`
+    - Set `MAPLE_ROOT_PASSWORD` (required)
+    - Set `MAPLE_DEFAULT_ORG_ID` (defaults to `default`)
+    - Users must sign in at `/sign-in` with the root password before accessing the dashboard/API.
 
 Start apps:
 
 ```bash
-bun run dev:api
-bun run dev:web
+bun --filter=@maple/api dev
+bun --filter=@maple/web dev
 ```
 
 Validate behavior:
+
 - Clerk mode:
-  - Signed-out users are redirected to `/sign-in`
-  - Signed-in users without an active org are redirected to `/org-required`
-  - Signed-in users with an active org can query the API with bearer auth
+    - Signed-out users are redirected to `/sign-in`
+    - Signed-in users without an active org are redirected to `/org-required`
+    - Signed-in users with an active org can query the API with bearer auth
 - Self-hosted mode:
-  - Signed-out users are redirected to `/sign-in`
-  - `MAPLE_ROOT_PASSWORD` login issues a bearer session token
-  - Protected API routes reject requests without a valid bearer session token
+    - Signed-out users are redirected to `/sign-in`
+    - `MAPLE_ROOT_PASSWORD` login issues a bearer session token
+    - Protected API routes reject requests without a valid bearer session token
 
 Breaking change:
+
 - Self-hosted multi-tenant JWT/API-key auth paths were removed.
 - `MAPLE_ROOT_PASSWORD` is now required when `MAPLE_AUTH_MODE=self_hosted`.

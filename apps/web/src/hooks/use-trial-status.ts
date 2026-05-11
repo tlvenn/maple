@@ -3,41 +3,41 @@ import { useCustomer } from "autumn-js/react"
 import { getActivePlan } from "@/lib/billing/plan-gating"
 
 export function useTrialStatus() {
-  const { customer, isLoading } = useCustomer()
+	const { data: customer, isLoading } = useCustomer()
 
-  return useMemo(() => {
-    const plan = getActivePlan(customer)
+	return useMemo(() => {
+		const sub = getActivePlan(customer)
 
-    if (!plan) {
-      return {
-        isTrialing: false,
-        daysRemaining: null,
-        trialEndsAt: null,
-        planName: null,
-        planId: null,
-        planStatus: null,
-        isLoading,
-      }
-    }
+		if (!sub) {
+			return {
+				isTrialing: false,
+				daysRemaining: null,
+				trialEndsAt: null,
+				planName: null,
+				planId: null,
+				planStatus: null,
+				isLoading,
+			}
+		}
 
-    const isTrialing = plan.status === "trialing"
-    let daysRemaining: number | null = null
-    let trialEndsAt: Date | null = null
+		const isTrialing = sub.trialEndsAt != null && sub.trialEndsAt > Date.now()
+		let daysRemaining: number | null = null
+		let trialEndsAt: Date | null = null
 
-    if (isTrialing && plan.trial_ends_at) {
-      trialEndsAt = new Date(plan.trial_ends_at * 1000)
-      const msRemaining = trialEndsAt.getTime() - Date.now()
-      daysRemaining = msRemaining > 0 ? Math.ceil(msRemaining / (1000 * 60 * 60 * 24)) : 0
-    }
+		if (isTrialing && sub.trialEndsAt) {
+			trialEndsAt = new Date(sub.trialEndsAt)
+			const msRemaining = trialEndsAt.getTime() - Date.now()
+			daysRemaining = msRemaining > 0 ? Math.ceil(msRemaining / (1000 * 60 * 60 * 24)) : 0
+		}
 
-    return {
-      isTrialing,
-      daysRemaining,
-      trialEndsAt,
-      planName: plan.name ?? plan.id,
-      planId: plan.id,
-      planStatus: plan.status,
-      isLoading,
-    }
-  }, [customer, isLoading])
+		return {
+			isTrialing,
+			daysRemaining,
+			trialEndsAt,
+			planName: sub.plan?.name ?? sub.planId,
+			planId: sub.planId,
+			planStatus: sub.status,
+			isLoading,
+		}
+	}, [customer, isLoading])
 }

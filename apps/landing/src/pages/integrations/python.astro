@@ -8,16 +8,31 @@ import RelatedIntegrations from "../../components/RelatedIntegrations.astro";
 import BottomCTA from "../../components/BottomCTA.astro";
 import Footer from "../../components/Footer.astro";
 import SeoHead from "../../components/SeoHead.astro";
+import Breadcrumb from "../../components/Breadcrumb.astro";
 import { integrations } from "../../lib/integrations";
 
 const integration = integrations.python;
 const pageTitle = "Python Observability with OpenTelemetry — Maple";
 const pageDescription = "Instrument your Python application with zero code changes using OpenTelemetry auto-instrumentation. Supports Flask, FastAPI, Django, and dozens of popular libraries.";
+
+const howToJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "HowTo",
+    "name": "How to add OpenTelemetry observability to Python",
+    "description": pageDescription,
+    "step": integration.steps.map((step, index) => ({
+        "@type": "HowToStep",
+        "position": index + 1,
+        "name": step.title,
+        "text": step.code,
+    })),
+};
 ---
 
-<Layout title={pageTitle} description={pageDescription}>
+<Layout title={pageTitle} description={pageDescription} ogType="article">
     <SeoHead title={pageTitle} description={pageDescription} />
     <Nav />
+    <Breadcrumb items={[{ label: "Home", href: "/" }, { label: "Integrations" }, { label: "Python" }]} />
     <FeatureHero
         label="Python"
         title="Python observability with OpenTelemetry"
@@ -92,4 +107,5 @@ const pageDescription = "Instrument your Python application with zero code chang
     <RelatedIntegrations current="python" />
     <BottomCTA />
     <Footer />
+    <script type="application/ld+json" set:html={JSON.stringify(howToJsonLd)} />
 </Layout>

@@ -5,6 +5,7 @@ import FeatureHero from "../../components/FeatureHero.astro";
 import FeatureDetailGrid from "../../components/FeatureDetailGrid.astro";
 import RelatedFeatures from "../../components/RelatedFeatures.astro";
 import SeoHead from "../../components/SeoHead.astro";
+import Breadcrumb from "../../components/Breadcrumb.astro";
 import BottomCTA from "../../components/BottomCTA.astro";
 import Footer from "../../components/Footer.astro";
 
@@ -12,9 +13,10 @@ const pageTitle = "AI & MCP Integration | Maple";
 const pageDescription = "Connect Claude, Cursor, or any MCP-compatible client to diagnose production issues with 10+ AI-powered observability tools. From symptoms to root cause automatically.";
 ---
 
-<Layout title={pageTitle} description={pageDescription}>
+<Layout title={pageTitle} description={pageDescription} ogType="article">
     <SeoHead title={pageTitle} description={pageDescription} />
     <Nav />
+    <Breadcrumb items={[{ label: "Home", href: "/" }, { label: "Features", href: "/#features" }, { label: "AI & MCP Integration" }]} />
     <FeatureHero
         label="AI & MCP"
         title="AI-powered observability diagnostics"
@@ -109,7 +111,7 @@ const pageDescription = "Connect Claude, Cursor, or any MCP-compatible client to
                 { title: "Auto-Diagnosis", description: "AI agent chains tools together to automatically trace from symptoms to root cause." },
                 { title: "Claude Code", description: "Connect directly from Claude Code for terminal-based observability diagnostics." },
                 { title: "Cursor", description: "Use Maple's MCP server from Cursor for in-editor debugging." },
-                { title: "OpenCode", description: "Compatible with OpenCode and other MCP clients." },
+                { title: "Windsurf", description: "Use Maple's MCP server from Windsurf for AI-assisted debugging." },
                 { title: "Any MCP Client", description: "Standard MCP protocol means any compatible client works out of the box." },
             ]} />
         </div>

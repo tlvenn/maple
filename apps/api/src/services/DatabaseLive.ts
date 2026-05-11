@@ -1,34 +1,28 @@
-import { SqliteDrizzle } from "@effect/sql-drizzle/Sqlite"
-import * as Sqlite from "@effect/sql-drizzle/Sqlite"
-import { LibsqlClient } from "@effect/sql-libsql"
-import { ensureMapleDbDirectory, resolveMapleDbConfig, runMigrations } from "@maple/db"
-import { Effect, Layer, Redacted } from "effect"
-import { Env } from "./Env"
+import type { MapleD1Client, MapleLibsqlClient } from "@maple/db/client"
+import { Context, Effect, Schema } from "effect"
 
-export const DatabaseLive: Layer.Layer<SqliteDrizzle, never, Env> = Layer.unwrapEffect(
-  Effect.gen(function* () {
-    const env = yield* Env
+export type DatabaseClient = MapleLibsqlClient
+export type DatabaseTransaction = Parameters<Parameters<DatabaseClient["transaction"]>[0]>[0]
 
-    const dbConfig = ensureMapleDbDirectory(
-      resolveMapleDbConfig({
-        MAPLE_DB_URL: env.MAPLE_DB_URL,
-        MAPLE_DB_AUTH_TOKEN: env.MAPLE_DB_AUTH_TOKEN,
-      }),
-    )
+export type AnyDatabaseClient = MapleLibsqlClient | MapleD1Client
 
-    yield* Effect.tryPromise(() => runMigrations(dbConfig)).pipe(
-      Effect.tap(() => Effect.logInfo("[Database] Migrations complete")),
-      Effect.orDie,
-    )
+export class DatabaseError extends Schema.TaggedErrorClass<DatabaseError>()("DatabaseError", {
+	message: Schema.String,
+	cause: Schema.Unknown,
+}) {}
 
-    return Sqlite.layer.pipe(
-      Layer.provide(
-        LibsqlClient.layer({
-          url: dbConfig.url,
-          authToken: dbConfig.authToken ? Redacted.make(dbConfig.authToken) : undefined,
-        }),
-      ),
-      Layer.orDie,
-    )
-  }),
-)
+export interface DatabaseShape {
+	readonly client: DatabaseClient
+	readonly execute: <T>(fn: (db: DatabaseClient) => Promise<T>) => Effect.Effect<T, DatabaseError>
+}
+
+export const toDatabaseError = (cause: unknown): DatabaseError => {
+	const message = cause instanceof Error ? cause.message : "Database operation failed"
+	const rootCause = cause instanceof Error && cause.cause instanceof Error ? cause.cause.message : undefined
+	return new DatabaseError({
+		message: rootCause ? `${message} [caused by: ${rootCause}]` : message,
+		cause,
+	})
+}
+
+export class Database extends Context.Service<Database, DatabaseShape>()("Database") {}

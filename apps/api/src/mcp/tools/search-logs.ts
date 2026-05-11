@@ -1,115 +1,114 @@
-import {
-  optionalNumberParam,
-  optionalStringParam,
-  type McpToolRegistrar,
-} from "./types"
-import { queryTinybird } from "../lib/query-tinybird"
-import { defaultTimeRange } from "../lib/time"
+import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
+import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTimeRange, formatClampNote } from "../lib/time"
+import { clampLimit, clampOffset } from "../lib/limits"
 import { truncate, formatNumber } from "../lib/format"
-import { Effect } from "effect"
+import { formatNextSteps } from "../lib/next-steps"
+import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
+import { searchLogs } from "@maple/query-engine/observability"
+import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
 
 export function registerSearchLogsTool(server: McpToolRegistrar) {
-  server.tool(
-    "search_logs",
-    "Search and filter logs by service, severity, time range, or body text.",
-    {
-      start_time: optionalStringParam("Start of time range (YYYY-MM-DD HH:mm:ss)"),
-      end_time: optionalStringParam("End of time range (YYYY-MM-DD HH:mm:ss)"),
-      service: optionalStringParam("Filter by service name"),
-      severity: optionalStringParam("Filter by severity (e.g. ERROR, WARN, INFO)"),
-      search: optionalStringParam("Search text in log body"),
-      trace_id: optionalStringParam("Filter by trace ID"),
-      limit: optionalNumberParam("Max results (default 30)"),
-    },
-    ({ start_time, end_time, service, severity, search, trace_id, limit }) =>
-      Effect.gen(function* () {
-        const { startTime, endTime } = defaultTimeRange(1)
-        const st = start_time ?? startTime
-        const et = end_time ?? endTime
-        const lim = limit ?? 30
+	server.tool(
+		"search_logs",
+		"Search and filter logs by service, severity, keyword, or trace_id. Supports pagination — check hasMore in the response for additional results. Use inspect_trace to see the full trace for a log entry.",
+		Schema.Struct({
+			start_time: optionalStringParam("Start of time range (YYYY-MM-DD HH:mm:ss)"),
+			end_time: optionalStringParam("End of time range (YYYY-MM-DD HH:mm:ss)"),
+			service: optionalStringParam("Filter by service name"),
+			severity: optionalStringParam(
+				"Filter by log severity level. Valid values: TRACE, DEBUG, INFO, WARN, ERROR, FATAL. Case-insensitive.",
+			),
+			search: optionalStringParam("Search text in log body"),
+			trace_id: optionalStringParam("Filter by trace ID"),
+			span_id: optionalStringParam("Filter by span ID (scope to a specific span within a trace)"),
+			offset: optionalNumberParam(
+				"Offset for pagination (default 0). Use nextOffset from previous response.",
+			),
+			limit: optionalNumberParam("Max results (default 30)"),
+		}),
+		Effect.fn("McpTool.searchLogs")(function* ({
+			start_time,
+			end_time,
+			service,
+			severity,
+			search,
+			trace_id,
+			span_id,
+			offset,
+			limit,
+		}) {
+			const range = resolveTimeRange(start_time, end_time, { maxHours: 24 * 7 })
+			const { st, et } = range
+			const lim = clampLimit(limit, { defaultValue: 30, max: 200 })
+			const off = clampOffset(offset, { max: 10_000 })
+			const tenant = yield* resolveTenant
 
-        const [logsResult, countResult] = yield* Effect.all(
-          [
-            queryTinybird("list_logs", {
-              start_time: st,
-              end_time: et,
-              service,
-              severity,
-              search,
-              trace_id,
-              limit: lim,
-            }),
-            queryTinybird("logs_count", {
-              start_time: st,
-              end_time: et,
-              service,
-              severity,
-              search,
-              trace_id,
-            }),
-          ],
-          { concurrency: "unbounded" },
-        )
+			const result = yield* searchLogs({
+				timeRange: { startTime: st, endTime: et },
+				service: service ?? undefined,
+				severity: severity ?? undefined,
+				search: search ?? undefined,
+				traceId: trace_id ?? undefined,
+				limit: lim,
+				offset: off,
+			}).pipe(
+				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+				Effect.mapError((e) => new McpQueryError({ message: e.message, pipe: "list_logs" })),
+			)
 
-        const total = countResult.data[0] ? Number(countResult.data[0].total) : 0
-        const logs = logsResult.data
+			if (result.logs.length === 0) {
+				return { content: [{ type: "text", text: `No logs found matching filters (${st} — ${et})` }] }
+			}
 
-        if (logs.length === 0) {
-          return { content: [{ type: "text", text: `No logs found matching filters (${st} — ${et})` }] }
-        }
+			const lines: string[] = [
+				`## Logs (${formatNumber(result.total)} total, showing ${result.logs.length})`,
+				`Time range: ${st} — ${et}${formatClampNote(range)}`,
+			]
 
-        const lines: string[] = [
-          `=== Logs (${formatNumber(total)} total, showing ${logs.length}) ===`,
-          `Time range: ${st} — ${et}`,
-        ]
+			const filters: string[] = []
+			if (service) filters.push(`service=${service}`)
+			if (severity) filters.push(`severity=${severity}`)
+			if (search) filters.push(`search="${search}"`)
+			if (trace_id) filters.push(`trace_id=${trace_id}`)
+			if (filters.length > 0) lines.push(`Filters: ${filters.join(", ")}`)
+			lines.push(``)
 
-        const filters: string[] = []
-        if (service) filters.push(`service=${service}`)
-        if (severity) filters.push(`severity=${severity}`)
-        if (search) filters.push(`search="${search}"`)
-        if (trace_id) filters.push(`trace_id=${trace_id}`)
-        if (filters.length > 0) lines.push(`Filters: ${filters.join(", ")}`)
+			for (const log of result.logs) {
+				const time = log.timestamp.split(" ")[1] ?? log.timestamp
+				const sev = log.severityText.padEnd(5)
+				const traceRef = log.traceId ? ` [trace:${log.traceId.slice(0, 8)}]` : ""
+				lines.push(`${time} [${sev}] ${log.serviceName}: ${truncate(log.body, 120)}${traceRef}`)
+			}
 
-        lines.push(``)
+			const hasMore = result.pagination.hasMore
+			if (hasMore) {
+				const nextOffset = off + result.logs.length
+				lines.push(
+					``,
+					`Showing ${off + 1}–${off + result.logs.length} of ${formatNumber(result.total)}. Call again with offset=${nextOffset} for more.`,
+				)
+			}
 
-        for (const log of logs) {
-          const ts = String(log.timestamp)
-          const time = ts.split(" ")[1] ?? ts
-          const sev = (log.severityText || "INFO").padEnd(5)
-          const svc = log.serviceName
-          const body = truncate(log.body, 120)
-          const traceRef = log.traceId ? ` [trace:${log.traceId.slice(0, 8)}]` : ""
-          lines.push(`${time} [${sev}] ${svc}: ${body}${traceRef}`)
-        }
+			const traceIds = [...new Set(result.logs.filter((l) => l.traceId).map((l) => l.traceId))].slice(
+				0,
+				3,
+			)
+			const nextSteps = traceIds.map((tid) => `\`inspect_trace trace_id="${tid}"\` — see full trace`)
+			lines.push(formatNextSteps(nextSteps))
 
-        if (total > logs.length) {
-          lines.push(``, `... ${formatNumber(total - logs.length)} more logs not shown`)
-        }
-
-        return {
-          content: createDualContent(lines.join("\n"), {
-            tool: "search_logs",
-            data: {
-              timeRange: { start: st, end: et },
-              totalCount: total,
-              logs: logs.map((l) => ({
-                timestamp: String(l.timestamp),
-                severityText: l.severityText || "INFO",
-                serviceName: l.serviceName,
-                body: l.body,
-                traceId: l.traceId || undefined,
-                spanId: l.spanId || undefined,
-              })),
-              filters: {
-                ...(service && { service }),
-                ...(severity && { severity }),
-                ...(search && { search }),
-                ...(trace_id && { traceId: trace_id }),
-              },
-            },
-          }),
-        }
-      }),
-  )
+			return {
+				content: createDualContent(lines.join("\n"), {
+					tool: "search_logs",
+					data: {
+						timeRange: { start: st, end: et },
+						totalCount: result.total,
+						pagination: result.pagination,
+						logs: result.logs.map((l) => ({ ...l })),
+					},
+				}),
+			}
+		}),
+	)
 }

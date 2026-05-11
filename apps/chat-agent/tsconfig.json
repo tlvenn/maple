@@ -1,22 +1,32 @@
 {
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": ["ESNext"],
-    "types": ["@cloudflare/workers-types"],
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src"],
-  "exclude": ["node_modules"]
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"jsx": "react-jsx",
+		"baseUrl": ".",
+		"ignoreDeprecations": "6.0",
+		"lib": ["ESNext"],
+		"types": ["node", "@cloudflare/workers-types"],
+		"strict": true,
+		"noUnusedLocals": false,
+		"noUnusedParameters": false,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"isolatedModules": true,
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"paths": {
+			"@/mcp/*": ["../api/src/mcp/*"],
+			"@/services/*": ["../api/src/services/*"],
+			"@/lib/*": ["../api/src/lib/*"],
+			"@/dashboard-templates": ["../api/src/dashboard-templates/index.ts"],
+			"@/dashboard-templates/*": ["../api/src/dashboard-templates/*"],
+			"@/*": ["./src/*"]
+		}
+	},
+	"include": ["src"],
+	"exclude": ["node_modules"]
 }
