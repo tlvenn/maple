@@ -1,33 +1,125 @@
-import * as Config from "effect/Config"
-import * as Effect from "effect/Effect"
+import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 
-export class Env extends Effect.Service<Env>()("Env", {
-  accessors: true,
-  effect: Effect.gen(function* () {
-    const env = {
-      PORT: yield* Config.number("PORT").pipe(Config.withDefault(3472)),
-      TINYBIRD_HOST: yield* Config.string("TINYBIRD_HOST"),
-      TINYBIRD_TOKEN: yield* Config.redacted("TINYBIRD_TOKEN"),
-      MAPLE_DB_URL: yield* Config.string("MAPLE_DB_URL").pipe(Config.withDefault("")),
-      MAPLE_DB_AUTH_TOKEN: yield* Config.string("MAPLE_DB_AUTH_TOKEN").pipe(Config.withDefault("")),
-      MAPLE_AUTH_MODE: yield* Config.string("MAPLE_AUTH_MODE").pipe(Config.withDefault("self_hosted")),
-      MAPLE_ROOT_PASSWORD: yield* Config.string("MAPLE_ROOT_PASSWORD").pipe(Config.withDefault("")),
-      MAPLE_DEFAULT_ORG_ID: yield* Config.string("MAPLE_DEFAULT_ORG_ID").pipe(Config.withDefault("default")),
-      MAPLE_INGEST_KEY_ENCRYPTION_KEY: yield* Config.string("MAPLE_INGEST_KEY_ENCRYPTION_KEY"),
-      MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY: yield* Config.string("MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY"),
-      CLERK_SECRET_KEY: yield* Config.string("CLERK_SECRET_KEY").pipe(Config.withDefault("")),
-      CLERK_PUBLISHABLE_KEY: yield* Config.string("CLERK_PUBLISHABLE_KEY").pipe(Config.withDefault("")),
-      CLERK_JWT_KEY: yield* Config.string("CLERK_JWT_KEY").pipe(Config.withDefault("")),
-      MAPLE_ORG_ID_OVERRIDE: yield* Config.string("MAPLE_ORG_ID_OVERRIDE").pipe(Config.withDefault("")),
-      AUTUMN_SECRET_KEY: yield* Config.string("AUTUMN_SECRET_KEY").pipe(Config.withDefault("")),
-      SD_INTERNAL_TOKEN: yield* Config.string("SD_INTERNAL_TOKEN").pipe(Config.withDefault("")),
-      INTERNAL_SERVICE_TOKEN: yield* Config.string("INTERNAL_SERVICE_TOKEN").pipe(Config.withDefault("")),
-    } as const
+export interface EnvShape {
+	readonly PORT: number
+	readonly TINYBIRD_HOST: string
+	readonly TINYBIRD_TOKEN: Redacted.Redacted<string>
+	readonly CLICKHOUSE_URL: Option.Option<string>
+	readonly CLICKHOUSE_USER: string
+	readonly CLICKHOUSE_PASSWORD: Option.Option<Redacted.Redacted<string>>
+	readonly CLICKHOUSE_DATABASE: string
+	readonly MAPLE_DB_URL: string
+	readonly MAPLE_DB_AUTH_TOKEN: Option.Option<Redacted.Redacted<string>>
+	readonly MAPLE_AUTH_MODE: string
+	readonly MAPLE_ROOT_PASSWORD: Option.Option<Redacted.Redacted<string>>
+	readonly MAPLE_DEFAULT_ORG_ID: string
+	readonly MAPLE_INGEST_KEY_ENCRYPTION_KEY: Redacted.Redacted<string>
+	readonly MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY: Redacted.Redacted<string>
+	readonly MAPLE_INGEST_PUBLIC_URL: string
+	readonly MAPLE_APP_BASE_URL: string
+	readonly CLERK_SECRET_KEY: Option.Option<Redacted.Redacted<string>>
+	readonly CLERK_PUBLISHABLE_KEY: Option.Option<string>
+	readonly CLERK_JWT_KEY: Option.Option<Redacted.Redacted<string>>
+	readonly MAPLE_ORG_ID_OVERRIDE: Option.Option<string>
+	readonly AUTUMN_SECRET_KEY: Option.Option<Redacted.Redacted<string>>
+	readonly SD_INTERNAL_TOKEN: Option.Option<Redacted.Redacted<string>>
+	readonly INTERNAL_SERVICE_TOKEN: Option.Option<Redacted.Redacted<string>>
+	readonly RESEND_API_KEY: Option.Option<Redacted.Redacted<string>>
+	readonly RESEND_FROM_EMAIL: string
+	readonly HAZEL_API_BASE_URL: string
+	readonly HAZEL_OAUTH_DISCOVERY_URL: string
+	readonly HAZEL_OAUTH_CLIENT_ID: Option.Option<string>
+	readonly HAZEL_OAUTH_CLIENT_SECRET: Option.Option<Redacted.Redacted<string>>
+	readonly HAZEL_OAUTH_SCOPES: string
+}
 
-    if (env.MAPLE_AUTH_MODE.toLowerCase() !== "clerk" && env.MAPLE_ROOT_PASSWORD.trim().length === 0) {
-      return yield* Effect.dieMessage("MAPLE_ROOT_PASSWORD is required when MAPLE_AUTH_MODE=self_hosted")
-    }
+const stringWithDefault = (key: string, fallback: string) =>
+	Config.string(key).pipe(Config.withDefault(fallback))
 
-    return env
-  }),
-}) {}
+const optionalString = (key: string) =>
+	Config.option(Config.string(key)).pipe(
+		Config.map((opt) =>
+			Option.flatMap(opt, (s) => (s.trim().length > 0 ? Option.some(s) : Option.none())),
+		),
+	)
+
+const optionalRedacted = (key: string) =>
+	Config.option(Config.string(key)).pipe(
+		Config.map((opt) =>
+			Option.flatMap(opt, (s) => (s.trim().length > 0 ? Option.some(Redacted.make(s)) : Option.none())),
+		),
+	)
+
+const portConfig = Config.number("PORT").pipe(Config.withDefault(3472))
+
+const envConfig = Config.all({
+	PORT: portConfig,
+	TINYBIRD_HOST: Config.string("TINYBIRD_HOST"),
+	TINYBIRD_TOKEN: Config.redacted("TINYBIRD_TOKEN"),
+	CLICKHOUSE_URL: optionalString("CLICKHOUSE_URL"),
+	CLICKHOUSE_USER: stringWithDefault("CLICKHOUSE_USER", "default"),
+	CLICKHOUSE_PASSWORD: optionalRedacted("CLICKHOUSE_PASSWORD"),
+	CLICKHOUSE_DATABASE: stringWithDefault("CLICKHOUSE_DATABASE", "default"),
+	MAPLE_DB_URL: stringWithDefault("MAPLE_DB_URL", ""),
+	MAPLE_DB_AUTH_TOKEN: optionalRedacted("MAPLE_DB_AUTH_TOKEN"),
+	MAPLE_AUTH_MODE: stringWithDefault("MAPLE_AUTH_MODE", "self_hosted"),
+	MAPLE_ROOT_PASSWORD: optionalRedacted("MAPLE_ROOT_PASSWORD"),
+	MAPLE_DEFAULT_ORG_ID: stringWithDefault("MAPLE_DEFAULT_ORG_ID", "default"),
+	MAPLE_INGEST_KEY_ENCRYPTION_KEY: Config.redacted("MAPLE_INGEST_KEY_ENCRYPTION_KEY"),
+	MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY: Config.redacted("MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY"),
+	MAPLE_INGEST_PUBLIC_URL: stringWithDefault("MAPLE_INGEST_PUBLIC_URL", "http://127.0.0.1:3474"),
+	MAPLE_APP_BASE_URL: stringWithDefault("MAPLE_APP_BASE_URL", "http://127.0.0.1:3471"),
+	CLERK_SECRET_KEY: optionalRedacted("CLERK_SECRET_KEY"),
+	CLERK_PUBLISHABLE_KEY: optionalString("CLERK_PUBLISHABLE_KEY"),
+	CLERK_JWT_KEY: optionalRedacted("CLERK_JWT_KEY"),
+	MAPLE_ORG_ID_OVERRIDE: optionalString("MAPLE_ORG_ID_OVERRIDE"),
+	AUTUMN_SECRET_KEY: optionalRedacted("AUTUMN_SECRET_KEY"),
+	SD_INTERNAL_TOKEN: optionalRedacted("SD_INTERNAL_TOKEN"),
+	INTERNAL_SERVICE_TOKEN: optionalRedacted("INTERNAL_SERVICE_TOKEN"),
+	RESEND_API_KEY: optionalRedacted("RESEND_API_KEY"),
+	RESEND_FROM_EMAIL: stringWithDefault("RESEND_FROM_EMAIL", "Maple <notifications@maple.dev>"),
+	HAZEL_API_BASE_URL: stringWithDefault("HAZEL_API_BASE_URL", "https://api.hazel.sh"),
+	HAZEL_OAUTH_DISCOVERY_URL: stringWithDefault(
+		"HAZEL_OAUTH_DISCOVERY_URL",
+		"https://clerk.hazel.sh/.well-known/openid-configuration",
+	),
+	HAZEL_OAUTH_CLIENT_ID: optionalString("HAZEL_OAUTH_CLIENT_ID"),
+	HAZEL_OAUTH_CLIENT_SECRET: optionalRedacted("HAZEL_OAUTH_CLIENT_SECRET"),
+	HAZEL_OAUTH_SCOPES: stringWithDefault(
+		"HAZEL_OAUTH_SCOPES",
+		"openid email profile organizations:read channels:read channel-webhooks:write",
+	),
+})
+
+const makeEnv = Effect.gen(function* () {
+	const env = (yield* envConfig) as EnvShape
+
+	if (env.MAPLE_DEFAULT_ORG_ID.trim().length === 0) {
+		return yield* Effect.die(new Error("MAPLE_DEFAULT_ORG_ID cannot be empty"))
+	}
+
+	const authMode = env.MAPLE_AUTH_MODE.toLowerCase()
+
+	if (authMode !== "clerk" && Option.isNone(env.MAPLE_ROOT_PASSWORD)) {
+		return yield* Effect.die(
+			new Error("MAPLE_ROOT_PASSWORD is required when MAPLE_AUTH_MODE=self_hosted"),
+		)
+	}
+
+	if (authMode === "clerk" && Option.isNone(env.CLERK_SECRET_KEY)) {
+		return yield* Effect.die(new Error("CLERK_SECRET_KEY is required when MAPLE_AUTH_MODE=clerk"))
+	}
+
+	if (
+		Option.isSome(env.MAPLE_ROOT_PASSWORD) &&
+		Redacted.value(env.MAPLE_ROOT_PASSWORD.value).trim().length === 0
+	) {
+		return yield* Effect.die(new Error("MAPLE_ROOT_PASSWORD cannot be empty"))
+	}
+
+	return env
+})
+
+export class Env extends Context.Service<Env, EnvShape>()("Env") {
+	static readonly Default = Layer.effect(this, makeEnv)
+}

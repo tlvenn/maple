@@ -1,89 +1,95 @@
 import { timingSafeEqual } from "node:crypto"
-import { HttpApiBuilder, HttpServerRequest } from "@effect/platform"
-import { MapleApi, SDPersistenceError, SDUnauthorizedError } from "@maple/domain/http"
-import { Effect } from "effect"
+import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { HttpServerRequest } from "effect/unstable/http"
+import { MapleApi, PrometheusSDTarget, SDPersistenceError, SDUnauthorizedError } from "@maple/domain/http"
+import { Array as Arr, Effect, Option, Redacted, Schema } from "effect"
 import { Env } from "../services/Env"
 import { ScrapeTargetsService } from "../services/ScrapeTargetsService"
 
-export const HttpServiceDiscoveryLive = HttpApiBuilder.group(
-  MapleApi,
-  "serviceDiscovery",
-  (handlers) =>
-    Effect.gen(function* () {
-      const env = yield* Env
-      const service = yield* ScrapeTargetsService
+export const HttpServiceDiscoveryLive = HttpApiBuilder.group(MapleApi, "serviceDiscovery", (handlers) =>
+	Effect.gen(function* () {
+		const env = yield* Env
+		const service = yield* ScrapeTargetsService
 
-      return handlers.handle("prometheus", () =>
-        Effect.gen(function* () {
-          const internalToken = env.SD_INTERNAL_TOKEN
+		return handlers.handle("prometheus", () =>
+			Effect.gen(function* () {
+				const internalToken = Option.match(env.SD_INTERNAL_TOKEN, {
+					onNone: () => undefined,
+					onSome: Redacted.value,
+				})
 
-          if (internalToken.length === 0) {
-            return yield* Effect.fail(
-              new SDUnauthorizedError({ message: "Service discovery endpoint not configured" }),
-            )
-          }
+				if (!internalToken) {
+					return yield* Effect.fail(
+						new SDUnauthorizedError({ message: "Service discovery endpoint not configured" }),
+					)
+				}
 
-          const req = yield* HttpServerRequest.HttpServerRequest
-          const authHeader = req.headers.authorization ?? ""
-          const provided = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : ""
+				const req = yield* HttpServerRequest.HttpServerRequest
+				const authHeader = req.headers.authorization ?? ""
+				const provided = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : ""
 
-          const isValid =
-            provided.length === internalToken.length &&
-            timingSafeEqual(Buffer.from(provided), Buffer.from(internalToken))
+				const isValid =
+					provided.length === internalToken.length &&
+					timingSafeEqual(Buffer.from(provided), Buffer.from(internalToken))
 
-          if (!isValid) {
-            return yield* Effect.fail(
-              new SDUnauthorizedError({ message: "Unauthorized" }),
-            )
-          }
+				if (!isValid) {
+					return yield* Effect.fail(new SDUnauthorizedError({ message: "Unauthorized" }))
+				}
 
-          const rows = yield* service.listAllEnabled().pipe(
-            Effect.mapError(
-              (e) => new SDPersistenceError({ message: e.message }),
-            ),
-          )
+				const rows = yield* service
+					.listAllEnabled()
+					.pipe(Effect.mapError((e) => new SDPersistenceError({ message: e.message })))
 
-          const sdTargets: Array<{ targets: string[]; labels: Record<string, string> }> = []
+				const sdTargets = yield* Effect.forEach(rows, (row) =>
+					Effect.gen(function* () {
+						const url = yield* Effect.try({
+							try: () => new URL(row.url),
+							catch: () => new Error("Invalid URL"),
+						}).pipe(Effect.option)
 
-          for (const row of rows) {
-            let url: URL
-            try {
-              url = new URL(row.url)
-            } catch {
-              console.warn(`[sd] Skipping scrape target ${row.id} — invalid URL: ${row.url}`)
-              continue
-            }
+						if (Option.isNone(url)) {
+							yield* Effect.logWarning("Skipping scrape target with invalid URL").pipe(
+								Effect.annotateLogs({
+									scrapeTargetId: row.id,
+									url: row.url,
+								}),
+							)
+							return Option.none<PrometheusSDTarget>()
+						}
 
-            const labels: Record<string, string> = {
-              __scheme__: url.protocol.replace(":", ""),
-              __metrics_path__: url.pathname,
-              __scrape_interval__: `${row.scrapeIntervalSeconds}s`,
-              job: row.serviceName ?? row.name,
-              maple_org_id: row.orgId,
-              maple_scrape_target_id: row.id,
-              maple_scrape_target_name: row.name,
-            }
+						const labels: Record<string, string> = {}
 
-            if (row.labelsJson) {
-              try {
-                const extra = JSON.parse(row.labelsJson)
-                if (extra && typeof extra === "object") {
-                  for (const [k, v] of Object.entries(extra)) {
-                    if (typeof v === "string") {
-                      labels[k] = v
-                    }
-                  }
-                }
-              } catch {
-                // ignore invalid labels JSON
-              }
-            }
+						// Apply user-supplied labels first so they cannot override the
+						// canonical system labels written below. Reserved keys
+						// (`maple_*`, `__*`, `job`, `instance`) are also rejected at
+						// write time in ScrapeTargetsService.validateLabelsJson, but
+						// applying system labels last is the authoritative defense
+						// against tenant-controlled `maple_org_id` poisoning the
+						// collector's tenant attribution.
+						if (row.labelsJson) {
+							const extra = yield* Schema.decodeUnknownEffect(
+								Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)),
+							)(row.labelsJson).pipe(Effect.option)
 
-            sdTargets.push({ targets: [url.host], labels })
-          }
+							if (Option.isSome(extra)) {
+								Object.assign(labels, extra.value)
+							}
+						}
 
-          return sdTargets
-        }),
-      )
-    }),
+						labels.__scheme__ = url.value.protocol.replace(":", "")
+						labels.__metrics_path__ = url.value.pathname
+						labels.__scrape_interval__ = `${row.scrapeIntervalSeconds}s`
+						labels.job = row.serviceName ?? row.name
+						labels.maple_org_id = row.orgId
+						labels.maple_scrape_target_id = row.id
+						labels.maple_scrape_target_name = row.name
+
+						return Option.some(new PrometheusSDTarget({ targets: [url.value.host], labels }))
+					}),
+				).pipe(Effect.map(Arr.getSomes))
+
+				return sdTargets
+			}),
+		)
+	}),
 )

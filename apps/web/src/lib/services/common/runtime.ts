@@ -1,7 +1,11 @@
-import { Atom } from "@effect-atom/atom-react"
-import { ManagedRuntime } from "effect"
-import { MapleApiAtomClient } from "./atom-client"
+import { Layer, ManagedRuntime } from "effect"
+import { Atom } from "effect/unstable/reactivity"
+import { mapleApiClientLayer } from "@/lib/registry"
+import { mapleOtelLayer } from "./otel-layer"
 
-export const runtimeLayer = MapleApiAtomClient.layer
+export { mapleOtelLayer }
 
-export const runtime = ManagedRuntime.make(runtimeLayer, Atom.defaultMemoMap)
+export const runtime = ManagedRuntime.make(
+	mapleApiClientLayer.pipe(Layer.provideMerge(mapleOtelLayer)),
+	{ memoMap: Atom.defaultMemoMap },
+)

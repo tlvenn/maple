@@ -1,26 +1,37 @@
 import { Effect, Schema } from "effect"
-import { getTinybird, type ListLogsOutput } from "@/lib/tinybird"
+import { QueryEngineExecuteRequest } from "@maple/query-engine"
+import { TraceId, SpanId } from "@maple/domain"
+import { ListLogsRequest } from "@maple/domain/http"
+import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import {
-  TinybirdDateTimeString,
-  decodeInput,
-  runTinybirdQuery,
+	TinybirdDateTimeString,
+	decodeInput,
+	executeQueryEngine,
+	extractCount,
+	extractFacets,
+	runTinybirdQuery,
 } from "@/api/tinybird/effect-utils"
 
+const toTraceId = Schema.decodeSync(TraceId)
+const toSpanId = Schema.decodeSync(SpanId)
+
 const ListLogsInputSchema = Schema.Struct({
-  limit: Schema.optional(
-    Schema.Number.pipe(Schema.int(), Schema.greaterThanOrEqualTo(1), Schema.lessThanOrEqualTo(1000)),
-  ),
-  service: Schema.optional(Schema.String),
-  severity: Schema.optional(Schema.String),
-  minSeverity: Schema.optional(
-    Schema.Number.pipe(Schema.int(), Schema.greaterThanOrEqualTo(0), Schema.lessThanOrEqualTo(255)),
-  ),
-  startTime: Schema.optional(TinybirdDateTimeString),
-  endTime: Schema.optional(TinybirdDateTimeString),
-  traceId: Schema.optional(Schema.String),
-  spanId: Schema.optional(Schema.String),
-  cursor: Schema.optional(Schema.String),
-  search: Schema.optional(Schema.String),
+	limit: Schema.optional(
+		Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1000)),
+	),
+	service: Schema.optional(Schema.String),
+	severity: Schema.optional(Schema.String),
+	minSeverity: Schema.optional(
+		Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(255)),
+	),
+	startTime: Schema.optional(TinybirdDateTimeString),
+	endTime: Schema.optional(TinybirdDateTimeString),
+	traceId: Schema.optional(Schema.String),
+	spanId: Schema.optional(Schema.String),
+	cursor: Schema.optional(Schema.String),
+	search: Schema.optional(Schema.String),
+	deploymentEnv: Schema.optional(Schema.String),
+	deploymentEnvMatchMode: Schema.optional(Schema.Literal("contains")),
 })
 
 export type ListLogsInput = Schema.Schema.Type<typeof ListLogsInputSchema>
@@ -28,201 +39,209 @@ export type ListLogsInput = Schema.Schema.Type<typeof ListLogsInputSchema>
 const DEFAULT_LIMIT = 100
 
 export interface Log {
-  timestamp: string
-  severityText: string
-  severityNumber: number
-  serviceName: string
-  body: string
-  traceId: string
-  spanId: string
-  logAttributes: Record<string, string>
-  resourceAttributes: Record<string, string>
+	timestamp: string
+	severityText: string
+	severityNumber: number
+	serviceName: string
+	body: string
+	traceId: TraceId
+	spanId: SpanId
+	logAttributes: Record<string, string>
+	resourceAttributes: Record<string, string>
 }
 
 export interface LogsResponse {
-  data: Log[]
-  meta: {
-    limit: number
-    total: number
-    cursor: string | null
-  }
-}
-
-export interface LogsCountResponse {
-  data: Array<{ total: number }>
+	data: Log[]
+	meta: {
+		limit: number
+		cursor: string | null
+	}
 }
 
 function parseAttributes(value: string | null | undefined): Record<string, string> {
-  if (!value) return {}
-  const parsed = JSON.parse(value)
-  return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {}
+	if (!value) return {}
+	try {
+		const parsed = JSON.parse(value)
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {}
+	} catch {
+		return {}
+	}
 }
 
-function transformLog(raw: ListLogsOutput): Log {
-  return {
-    timestamp: String(raw.timestamp),
-    severityText: raw.severityText,
-    severityNumber: Number(raw.severityNumber),
-    serviceName: raw.serviceName,
-    body: raw.body,
-    traceId: raw.traceId,
-    spanId: raw.spanId,
-    logAttributes: parseAttributes(raw.logAttributes),
-    resourceAttributes: parseAttributes(raw.resourceAttributes),
-  }
+function transformLog(raw: Record<string, unknown>): Log {
+	return {
+		timestamp: String(raw.timestamp ?? ""),
+		severityText: String(raw.severityText ?? ""),
+		severityNumber: Number(raw.severityNumber ?? 0),
+		serviceName: String(raw.serviceName ?? ""),
+		body: String(raw.body ?? ""),
+		traceId: raw.traceId ? toTraceId(String(raw.traceId)) : ("" as TraceId),
+		spanId: raw.spanId ? toSpanId(String(raw.spanId)) : ("" as SpanId),
+		logAttributes: parseAttributes(raw.logAttributes as string),
+		resourceAttributes: parseAttributes(raw.resourceAttributes as string),
+	}
 }
 
-export function listLogs({
-  data,
-}: {
-  data: ListLogsInput
-}) {
-  return listLogsEffect({ data })
+export function listLogs({ data }: { data: ListLogsInput }) {
+	return listLogsEffect({ data })
 }
 
-const listLogsEffect = Effect.fn("Tinybird.listLogs")(function* ({
-  data,
-}: {
-  data: ListLogsInput
-}) {
-    const input = yield* decodeInput(ListLogsInputSchema, data ?? {}, "listLogs")
-    const limit = input.limit ?? DEFAULT_LIMIT
-    const tinybird = getTinybird()
+const listLogsEffect = Effect.fn("QueryEngine.listLogs")(function* ({ data }: { data: ListLogsInput }) {
+	const input = yield* decodeInput(ListLogsInputSchema, data ?? {}, "listLogs")
+	const limit = input.limit ?? DEFAULT_LIMIT
+	const fallback = defaultLogsTimeRange()
 
-    const [logsResult, countResult] = yield* Effect.all([
-      runTinybirdQuery("list_logs", () =>
-        tinybird.query.list_logs({
-          limit,
-          service: input.service,
-          severity: input.severity,
-          min_severity: input.minSeverity,
-          start_time: input.startTime,
-          end_time: input.endTime,
-          trace_id: input.traceId,
-          span_id: input.spanId,
-          cursor: input.cursor,
-          search: input.search,
-        }),
-      ),
-      runTinybirdQuery("logs_count", () =>
-        tinybird.query.logs_count({
-          service: input.service,
-          severity: input.severity,
-          start_time: input.startTime,
-          end_time: input.endTime,
-          trace_id: input.traceId,
-          search: input.search,
-        }),
-      ),
-    ])
+	const logsResult = yield* runTinybirdQuery("listLogs", () =>
+		Effect.gen(function* () {
+			const client = yield* MapleApiAtomClient
+			return yield* client.queryEngine.listLogs({
+				payload: new ListLogsRequest({
+					startTime: input.startTime ?? fallback.startTime,
+					endTime: input.endTime ?? fallback.endTime,
+					limit,
+					service: input.service,
+					severity: input.severity,
+					minSeverity: input.minSeverity,
+					traceId: input.traceId,
+					spanId: input.spanId,
+					cursor: input.cursor,
+					search: input.search,
+					deploymentEnv: input.deploymentEnv,
+					deploymentEnvMatchMode: input.deploymentEnvMatchMode,
+				}),
+			})
+		}),
+	)
 
-    const total = Number(countResult.data[0]?.total ?? 0)
-    const logs = logsResult.data.map(transformLog)
-    const cursor = logs.length === limit && logs.length > 0 ? logs[logs.length - 1].timestamp : null
+	const logs = logsResult.data.map(transformLog)
+	const cursor = logs.length === limit && logs.length > 0 ? logs[logs.length - 1].timestamp : null
 
-    return {
-      data: logs,
-      meta: {
-        limit,
-        total,
-        cursor,
-      },
-    }
+	return {
+		data: logs,
+		meta: {
+			limit,
+			cursor,
+		},
+	}
 })
 
-export function getLogsCount({
-  data,
-}: {
-  data: ListLogsInput
-}) {
-  return getLogsCountEffect({ data })
+export function getLogsCount({ data }: { data: ListLogsInput }) {
+	return getLogsCountEffect({ data })
 }
 
-const getLogsCountEffect = Effect.fn("Tinybird.getLogsCount")(function* ({
-  data,
+const defaultLogsTimeRange = () => {
+	const now = new Date()
+	const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+	const fmt = (d: Date) => d.toISOString().replace("T", " ").slice(0, 19)
+	return { startTime: fmt(dayAgo), endTime: fmt(now) }
+}
+
+const getLogsCountEffect = Effect.fn("QueryEngine.getLogsCount")(function* ({
+	data,
 }: {
-  data: ListLogsInput
+	data: ListLogsInput
 }) {
-    const input = yield* decodeInput(ListLogsInputSchema, data ?? {}, "getLogsCount")
-    const tinybird = getTinybird()
+	const input = yield* decodeInput(ListLogsInputSchema, data ?? {}, "getLogsCount")
+	const fallback = defaultLogsTimeRange()
 
-    const countResult = yield* runTinybirdQuery("logs_count", () =>
-      tinybird.query.logs_count({
-        service: input.service,
-        severity: input.severity,
-        start_time: input.startTime,
-        end_time: input.endTime,
-        trace_id: input.traceId,
-        search: input.search,
-      }),
-    )
+	const response = yield* executeQueryEngine(
+		"queryEngine.getLogsCount",
+		new QueryEngineExecuteRequest({
+			startTime: input.startTime ?? fallback.startTime,
+			endTime: input.endTime ?? fallback.endTime,
+			query: {
+				kind: "count" as const,
+				source: "logs" as const,
+				filters: {
+					serviceName: input.service,
+					severity: input.severity,
+					traceId: input.traceId,
+					search: input.search,
+					environments: input.deploymentEnv ? [input.deploymentEnv] : undefined,
+					deploymentEnvMatchMode: input.deploymentEnvMatchMode,
+				},
+			},
+		}),
+	)
 
-    return {
-      data: [{ total: Number(countResult.data[0]?.total ?? 0) }],
-    }
+	return {
+		data: [{ total: extractCount(response) }],
+	}
 })
 
 export interface FacetItem {
-  name: string
-  count: number
+	name: string
+	count: number
 }
 
 export interface LogsFacets {
-  services: FacetItem[]
-  severities: FacetItem[]
+	services: FacetItem[]
+	severities: FacetItem[]
+	deploymentEnvs: FacetItem[]
 }
 
 export interface LogsFacetsResponse {
-  data: LogsFacets
+	data: LogsFacets
 }
 
 const GetLogsFacetsInputSchema = Schema.Struct({
-  service: Schema.optional(Schema.String),
-  severity: Schema.optional(Schema.String),
-  startTime: Schema.optional(TinybirdDateTimeString),
-  endTime: Schema.optional(TinybirdDateTimeString),
+	service: Schema.optional(Schema.String),
+	severity: Schema.optional(Schema.String),
+	deploymentEnv: Schema.optional(Schema.String),
+	deploymentEnvMatchMode: Schema.optional(Schema.Literal("contains")),
+	startTime: Schema.optional(TinybirdDateTimeString),
+	endTime: Schema.optional(TinybirdDateTimeString),
 })
 
 export type GetLogsFacetsInput = Schema.Schema.Type<typeof GetLogsFacetsInputSchema>
 
-export function getLogsFacets({
-  data,
-}: {
-  data: GetLogsFacetsInput
-}) {
-  return getLogsFacetsEffect({ data })
+export function getLogsFacets({ data }: { data: GetLogsFacetsInput }) {
+	return getLogsFacetsEffect({ data })
 }
 
-const getLogsFacetsEffect = Effect.fn("Tinybird.getLogsFacets")(function* ({
-  data,
+const getLogsFacetsEffect = Effect.fn("QueryEngine.getLogsFacets")(function* ({
+	data,
 }: {
-  data: GetLogsFacetsInput
+	data: GetLogsFacetsInput
 }) {
-    const input = yield* decodeInput(GetLogsFacetsInputSchema, data ?? {}, "getLogsFacets")
-    const tinybird = getTinybird()
+	const input = yield* decodeInput(GetLogsFacetsInputSchema, data ?? {}, "getLogsFacets")
+	const fallback = defaultLogsTimeRange()
 
-    const result = yield* runTinybirdQuery("logs_facets", () =>
-      tinybird.query.logs_facets({
-        service: input.service,
-        severity: input.severity,
-        start_time: input.startTime,
-        end_time: input.endTime,
-      }),
-    )
+	const response = yield* executeQueryEngine(
+		"queryEngine.getLogsFacets",
+		new QueryEngineExecuteRequest({
+			startTime: input.startTime ?? fallback.startTime,
+			endTime: input.endTime ?? fallback.endTime,
+			query: {
+				kind: "facets" as const,
+				source: "logs" as const,
+				filters: {
+					serviceName: input.service,
+					severity: input.severity,
+					environments: input.deploymentEnv ? [input.deploymentEnv] : undefined,
+					deploymentEnvMatchMode: input.deploymentEnvMatchMode,
+				},
+			},
+		}),
+	)
 
-    const services: FacetItem[] = []
-    const severities: FacetItem[] = []
+	const facetsData = extractFacets(response)
+	const services: FacetItem[] = []
+	const severities: FacetItem[] = []
+	const deploymentEnvs: FacetItem[] = []
 
-    for (const row of result.data) {
-      const count = Number(row.count)
-      if (row.facetType === "service" && row.serviceName) {
-        services.push({ name: row.serviceName, count })
-      } else if (row.facetType === "severity" && row.severityText) {
-        severities.push({ name: row.severityText, count })
-      }
-    }
+	for (const row of facetsData) {
+		const count = Number(row.count)
+		if (row.facetType === "service" && row.name) {
+			services.push({ name: row.name, count })
+		} else if (row.facetType === "severity" && row.name) {
+			severities.push({ name: row.name, count })
+		} else if (row.facetType === "deploymentEnv" && row.name) {
+			deploymentEnvs.push({ name: row.name, count })
+		}
+	}
 
-    return {
-      data: { services, severities },
-    }
+	return {
+		data: { services, severities, deploymentEnvs },
+	}
 })

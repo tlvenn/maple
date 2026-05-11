@@ -1,44 +1,36 @@
-import { HttpServerRequest } from "@effect/platform"
+import { HttpServerRequest } from "effect/unstable/http"
 import type { TinybirdPipe } from "@maple/domain"
-import { Effect, ManagedRuntime } from "effect"
+import { Effect } from "effect"
 import { resolveMcpTenantContext } from "@/mcp/lib/resolve-tenant"
-import { McpTenantError, McpQueryError } from "@/mcp/tools/types"
-import { TinybirdService } from "@/services/TinybirdService"
+import { toMcpQueryError } from "@/mcp/lib/map-warehouse-error"
+import { McpAuthMissingError } from "@/mcp/tools/types"
+import { WarehouseQueryService } from "@/services/WarehouseQueryService"
+import { TinybirdExecutor } from "@maple/query-engine/observability"
+import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
+import type { TenantContext } from "@/services/AuthService"
 
-const TinybirdRuntime = ManagedRuntime.make(TinybirdService.Default)
+export const resolveTenant = Effect.gen(function* () {
+	const req = yield* HttpServerRequest.HttpServerRequest
+	const nativeReq = yield* HttpServerRequest.toWeb(req).pipe(
+		Effect.mapError((e) => new McpAuthMissingError({ message: `Failed to read request: ${e.message}` })),
+	)
+	return yield* resolveMcpTenantContext(nativeReq)
+})
 
-const resolveTenant = Effect.gen(function* () {
-  const req = yield* HttpServerRequest.HttpServerRequest
-  const nativeReq = yield* HttpServerRequest.toWeb(req)
-  return yield* Effect.tryPromise({
-    try: () => resolveMcpTenantContext(nativeReq),
-    catch: (error) =>
-      new McpTenantError({
-        message: error instanceof Error ? error.message : String(error),
-      }),
-  })
-}).pipe(
-  Effect.catchTag("RequestError", (error) =>
-    Effect.fail(new McpTenantError({ message: error.message })),
-  ),
-)
+/** Infrastructure binding: resolves tenant and provides TinybirdExecutor layer. */
+export const withTenantExecutor = <A, E>(effect: Effect.Effect<A, E, TinybirdExecutor>) =>
+	Effect.gen(function* () {
+		const tenant = yield* resolveTenant
+		return yield* Effect.provide(effect, makeTinybirdExecutorFromTenant(tenant))
+	})
 
-export const queryTinybird = <T = any>(
-  pipe: TinybirdPipe,
-  params?: Record<string, unknown>,
-): Effect.Effect<{ data: T[] }, McpTenantError | McpQueryError, HttpServerRequest.HttpServerRequest> =>
-  Effect.gen(function* () {
-    const tenant = yield* resolveTenant
+export const queryTinybird = <T = any>(pipe: TinybirdPipe, params?: Record<string, unknown>) =>
+	Effect.gen(function* () {
+		const tenant = yield* resolveTenant
+		const service = yield* WarehouseQueryService
+		const response = yield* service
+			.query(tenant, { pipe, params })
+			.pipe(Effect.mapError(toMcpQueryError(pipe)))
 
-    const response = yield* Effect.tryPromise({
-      try: () =>
-        TinybirdRuntime.runPromise(TinybirdService.query(tenant, { pipe, params })),
-      catch: (error) =>
-        new McpQueryError({
-          message: error instanceof Error ? error.message : String(error),
-          pipe,
-        }),
-    })
-
-    return { data: response.data as T[] }
-  })
+		return { data: response.data as T[] }
+	})

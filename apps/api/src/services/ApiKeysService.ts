@@ -1,190 +1,221 @@
 import { randomUUID } from "node:crypto"
-import { SqliteDrizzle } from "@effect/sql-drizzle/Sqlite"
 import {
-  ApiKeyCreatedResponse,
-  ApiKeyNotFoundError,
-  ApiKeyPersistenceError,
-  ApiKeyResponse,
-  ApiKeysListResponse,
+	ApiKeyId,
+	type ApiKeyKind,
+	ApiKeyCreatedResponse,
+	ApiKeyNotFoundError,
+	ApiKeyPersistenceError,
+	ApiKeyResponse,
+	ApiKeysListResponse,
+	OrgId,
+	UserId,
 } from "@maple/domain/http"
-import {
-  API_KEY_PREFIX,
-  apiKeys,
-  generateApiKey,
-  hashApiKey,
-  parseIngestKeyLookupHmacKey,
-} from "@maple/db"
+import { API_KEY_PREFIX, apiKeys, generateApiKey, hashApiKey, parseIngestKeyLookupHmacKey } from "@maple/db"
 import { and, desc, eq } from "drizzle-orm"
-import { Effect, Layer } from "effect"
-import { DatabaseLive } from "./DatabaseLive"
+import { Effect, Layer, Option, Redacted, Schema, Context } from "effect"
+import { Database } from "./DatabaseLive"
 import { Env } from "./Env"
 
 export interface ResolvedApiKey {
-  readonly orgId: string
-  readonly userId: string
-  readonly keyId: string
+	readonly orgId: OrgId
+	readonly userId: UserId
+	readonly keyId: ApiKeyId
+	readonly metadataJson: string | null
 }
 
+const decodeApiKeyIdSync = Schema.decodeUnknownSync(ApiKeyId)
+const decodeOrgIdSync = Schema.decodeUnknownSync(OrgId)
+const decodeUserIdSync = Schema.decodeUnknownSync(UserId)
+
 const toPersistenceError = (error: unknown) =>
-  new ApiKeyPersistenceError({
-    message:
-      error instanceof Error ? error.message : "API key persistence failed",
-  })
+	new ApiKeyPersistenceError({
+		message: error instanceof Error ? error.message : "API key persistence failed",
+	})
 
 const rowToResponse = (row: typeof apiKeys.$inferSelect): ApiKeyResponse =>
-  new ApiKeyResponse({
-    id: row.id,
-    name: row.name,
-    description: row.description ?? null,
-    keyPrefix: row.keyPrefix,
-    revoked: row.revoked,
-    revokedAt: row.revokedAt ?? null,
-    lastUsedAt: row.lastUsedAt ?? null,
-    expiresAt: row.expiresAt ?? null,
-    createdAt: row.createdAt,
-    createdBy: row.createdBy,
-  })
+	new ApiKeyResponse({
+		id: decodeApiKeyIdSync(row.id),
+		name: row.name,
+		description: row.description ?? null,
+		keyPrefix: row.keyPrefix,
+		kind: row.kind,
+		revoked: row.revoked,
+		revokedAt: row.revokedAt ?? null,
+		lastUsedAt: row.lastUsedAt ?? null,
+		expiresAt: row.expiresAt ?? null,
+		createdAt: row.createdAt,
+		createdBy: decodeUserIdSync(row.createdBy),
+		createdByEmail: row.createdByEmail ?? null,
+	})
 
-export class ApiKeysService extends Effect.Service<ApiKeysService>()(
-  "ApiKeysService",
-  {
-    accessors: true,
-    dependencies: [Env.Default],
-    effect: Effect.gen(function* () {
-      const db = yield* SqliteDrizzle
-      const env = yield* Env
-      const hmacKey = parseIngestKeyLookupHmacKey(env.MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY)
+export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysService", {
+	make: Effect.gen(function* () {
+		const database = yield* Database
+		const env = yield* Env
+		const hmacKey = parseIngestKeyLookupHmacKey(Redacted.value(env.MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY))
 
-      const list = Effect.fn("ApiKeysService.list")(function* (orgId: string) {
-        const rows = yield* db
-          .select()
-          .from(apiKeys)
-          .where(eq(apiKeys.orgId, orgId))
-          .orderBy(desc(apiKeys.createdAt))
-          .pipe(Effect.mapError(toPersistenceError))
+		const selectById = Effect.fn("ApiKeysService.selectById")(function* (orgId: OrgId, keyId: ApiKeyId) {
+			const rows = yield* database
+				.execute((db) =>
+					db
+						.select()
+						.from(apiKeys)
+						.where(and(eq(apiKeys.id, keyId), eq(apiKeys.orgId, orgId)))
+						.limit(1),
+				)
+				.pipe(Effect.mapError(toPersistenceError))
 
-        return new ApiKeysListResponse({
-          keys: rows.map(rowToResponse),
-        })
-      })
+			return Option.fromNullishOr(rows[0])
+		})
 
-      const create = Effect.fn("ApiKeysService.create")(function* (
-        orgId: string,
-        userId: string,
-        params: { name: string; description?: string; expiresInSeconds?: number },
-      ) {
-        const id = randomUUID()
-        const rawKey = generateApiKey()
-        const keyHash = hashApiKey(rawKey, hmacKey)
-        const keyPrefix = rawKey.slice(0, 12) + "..."
-        const now = Date.now()
-        const expiresAt = params.expiresInSeconds
-          ? now + params.expiresInSeconds * 1000
-          : undefined
+		const requireById = Effect.fn("ApiKeysService.requireById")(function* (
+			orgId: OrgId,
+			keyId: ApiKeyId,
+		) {
+			const row = yield* selectById(orgId, keyId)
+			if (Option.isSome(row)) return row.value
 
-        yield* db
-          .insert(apiKeys)
-          .values({
-            id,
-            orgId,
-            name: params.name,
-            description: params.description ?? null,
-            keyHash,
-            keyPrefix,
-            expiresAt: expiresAt ?? null,
-            createdAt: now,
-            createdBy: userId,
-          })
-          .pipe(Effect.mapError(toPersistenceError))
+			return yield* Effect.fail(new ApiKeyNotFoundError({ keyId, message: "API key not found" }))
+		})
 
-        return new ApiKeyCreatedResponse({
-          id,
-          name: params.name,
-          description: params.description ?? null,
-          keyPrefix,
-          revoked: false,
-          revokedAt: null,
-          lastUsedAt: null,
-          expiresAt: expiresAt ?? null,
-          createdAt: now,
-          createdBy: userId,
-          secret: rawKey,
-        })
-      })
+		const list = Effect.fn("ApiKeysService.list")(function* (orgId: OrgId) {
+			const rows = yield* database
+				.execute((db) =>
+					db
+						.select()
+						.from(apiKeys)
+						.where(eq(apiKeys.orgId, orgId))
+						.orderBy(desc(apiKeys.createdAt)),
+				)
+				.pipe(Effect.mapError(toPersistenceError))
 
-      const revoke = Effect.fn("ApiKeysService.revoke")(function* (
-        orgId: string,
-        keyId: string,
-      ) {
-        const now = Date.now()
+			return new ApiKeysListResponse({
+				keys: rows.map(rowToResponse),
+			})
+		})
 
-        const rows = yield* db
-          .select()
-          .from(apiKeys)
-          .where(and(eq(apiKeys.id, keyId), eq(apiKeys.orgId, orgId)))
-          .limit(1)
-          .pipe(Effect.mapError(toPersistenceError))
+		const create = Effect.fn("ApiKeysService.create")(function* (
+			orgId: OrgId,
+			userId: UserId,
+			params: {
+				name: string
+				description?: string
+				expiresInSeconds?: number
+				kind?: ApiKeyKind
+				createdByEmail?: string | null
+			},
+		) {
+			const id = decodeApiKeyIdSync(randomUUID())
+			const rawKey = generateApiKey()
+			const keyHash = hashApiKey(rawKey, hmacKey)
+			const keyPrefix = rawKey.slice(0, 12) + "..."
+			const now = Date.now()
+			const expiresAt = params.expiresInSeconds ? now + params.expiresInSeconds * 1000 : undefined
+			const kind: ApiKeyKind = params.kind ?? "standard"
+			const createdByEmail = params.createdByEmail ?? null
 
-        const row = rows[0]
-        if (!row) {
-          return yield* Effect.fail(
-            new ApiKeyNotFoundError({ keyId, message: "API key not found" }),
-          )
-        }
+			yield* database
+				.execute((db) =>
+					db.insert(apiKeys).values({
+						id,
+						orgId,
+						name: params.name,
+						description: params.description ?? null,
+						keyHash,
+						keyPrefix,
+						kind,
+						expiresAt: expiresAt ?? null,
+						createdAt: now,
+						createdBy: userId,
+						createdByEmail,
+					}),
+				)
+				.pipe(Effect.mapError(toPersistenceError))
 
-        yield* db
-          .update(apiKeys)
-          .set({ revoked: true, revokedAt: now })
-          .where(eq(apiKeys.id, keyId))
-          .pipe(Effect.mapError(toPersistenceError))
+			return new ApiKeyCreatedResponse({
+				id,
+				name: params.name,
+				description: params.description ?? null,
+				keyPrefix,
+				kind,
+				revoked: false,
+				revokedAt: null,
+				lastUsedAt: null,
+				expiresAt: expiresAt ?? null,
+				createdAt: now,
+				createdBy: userId,
+				createdByEmail,
+				secret: rawKey,
+			})
+		})
 
-        return rowToResponse({ ...row, revoked: true, revokedAt: now })
-      })
+		const revoke = Effect.fn("ApiKeysService.revoke")(function* (orgId: OrgId, keyId: ApiKeyId) {
+			const now = Date.now()
+			const row = yield* requireById(orgId, keyId)
 
-      const resolveByKey = Effect.fn("ApiKeysService.resolveByKey")(function* (
-        rawKey: string,
-      ) {
-        if (!rawKey.startsWith(API_KEY_PREFIX)) return null
+			yield* database
+				.execute((db) =>
+					db.update(apiKeys).set({ revoked: true, revokedAt: now }).where(eq(apiKeys.id, keyId)),
+				)
+				.pipe(Effect.mapError(toPersistenceError))
 
-        const keyHash = hashApiKey(rawKey, hmacKey)
-        const rows = yield* db
-          .select()
-          .from(apiKeys)
-          .where(eq(apiKeys.keyHash, keyHash))
-          .limit(1)
-          .pipe(Effect.mapError(toPersistenceError))
+			return rowToResponse({ ...row, revoked: true, revokedAt: now })
+		})
 
-        const row = rows[0]
-        if (!row) return null
-        if (row.revoked) return null
-        if (row.expiresAt && row.expiresAt < Date.now()) return null
+		const resolveByKey = Effect.fn("ApiKeysService.resolveByKey")(function* (rawKey: string) {
+			if (!rawKey.startsWith(API_KEY_PREFIX)) return Option.none()
 
-        return {
-          orgId: row.orgId,
-          userId: row.createdBy,
-          keyId: row.id,
-        } satisfies ResolvedApiKey
-      })
+			const keyHash = hashApiKey(rawKey, hmacKey)
+			const rows = yield* database
+				.execute((db) => db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash)).limit(1))
+				.pipe(Effect.mapError(toPersistenceError))
 
-      const touchLastUsed = Effect.fn("ApiKeysService.touchLastUsed")(function* (
-        keyId: string,
-      ) {
-        yield* db
-          .update(apiKeys)
-          .set({ lastUsedAt: Date.now() })
-          .where(eq(apiKeys.id, keyId))
-          .pipe(Effect.mapError(toPersistenceError))
-      })
+			const row = Option.fromNullishOr(rows[0])
+			if (Option.isNone(row)) return Option.none()
+			if (row.value.revoked) return Option.none()
+			if (row.value.expiresAt && row.value.expiresAt < Date.now()) return Option.none()
 
-      return {
-        list,
-        create,
-        revoke,
-        resolveByKey,
-        touchLastUsed,
-      }
-    }),
-  },
-) {
-  static readonly Live = this.Default.pipe(Layer.provide(DatabaseLive))
+			return Option.some({
+				orgId: decodeOrgIdSync(row.value.orgId),
+				userId: decodeUserIdSync(row.value.createdBy),
+				keyId: decodeApiKeyIdSync(row.value.id),
+				metadataJson: row.value.metadataJson ?? null,
+			} satisfies ResolvedApiKey)
+		})
+
+		const touchLastUsed = Effect.fn("ApiKeysService.touchLastUsed")(function* (keyId: ApiKeyId) {
+			yield* database
+				.execute((db) =>
+					db.update(apiKeys).set({ lastUsedAt: Date.now() }).where(eq(apiKeys.id, keyId)),
+				)
+				.pipe(Effect.mapError(toPersistenceError))
+		})
+
+		const resolveByBearer = Effect.fn("ApiKeysService.resolveByBearer")(function* (
+			bearerToken: string | undefined,
+		) {
+			if (!bearerToken || !bearerToken.startsWith(API_KEY_PREFIX)) {
+				return Option.none<ResolvedApiKey>()
+			}
+
+			const resolved = yield* resolveByKey(bearerToken)
+			if (Option.isSome(resolved)) {
+				yield* touchLastUsed(resolved.value.keyId).pipe(Effect.ignore, Effect.forkDetach)
+			}
+			return resolved
+		})
+
+		return {
+			list,
+			create,
+			revoke,
+			resolveByKey,
+			resolveByBearer,
+			touchLastUsed,
+		}
+	}),
+}) {
+	static readonly layer = Layer.effect(this, this.make)
+	static readonly Live = this.layer
+	static readonly Default = this.layer
 }

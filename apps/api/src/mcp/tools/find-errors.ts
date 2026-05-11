@@ -1,73 +1,79 @@
-import {
-  optionalNumberParam,
-  optionalStringParam,
-  type McpToolRegistrar,
-} from "./types"
-import { queryTinybird } from "../lib/query-tinybird"
-import { getSpamPatternsParam } from "@/lib/spam-patterns"
-import { defaultTimeRange } from "../lib/time"
+import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
+import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTimeRange } from "../lib/time"
 import { formatNumber, formatTable } from "../lib/format"
-import { Effect } from "effect"
+import { formatNextSteps } from "../lib/next-steps"
+import { Array as Arr, Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
+import { findErrors } from "@maple/query-engine/observability"
+import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
 
 export function registerFindErrorsTool(server: McpToolRegistrar) {
-  server.tool(
-    "find_errors",
-    "Find and categorize errors by type, with counts, affected services, and timestamps.",
-    {
-      start_time: optionalStringParam("Start of time range (YYYY-MM-DD HH:mm:ss)"),
-      end_time: optionalStringParam("End of time range (YYYY-MM-DD HH:mm:ss)"),
-      service: optionalStringParam("Filter to a specific service"),
-      limit: optionalNumberParam("Max results (default 20)"),
-    },
-    ({ start_time, end_time, service, limit }) =>
-      Effect.gen(function* () {
-        const { startTime, endTime } = defaultTimeRange(1)
-        const st = start_time ?? startTime
-        const et = end_time ?? endTime
+	server.tool(
+		"find_errors",
+		"Find and categorize errors by type with counts and affected services. Use error_detail to see sample traces for a specific error type.",
+		Schema.Struct({
+			start_time: optionalStringParam("Start of time range (YYYY-MM-DD HH:mm:ss)"),
+			end_time: optionalStringParam("End of time range (YYYY-MM-DD HH:mm:ss)"),
+			service: optionalStringParam("Filter to a specific service"),
+			environment: optionalStringParam("Filter by deployment environment (e.g. production, staging)"),
+			limit: optionalNumberParam("Max results (default 20)"),
+		}),
+		Effect.fn("McpTool.findErrors")(function* ({ start_time, end_time, service, environment, limit }) {
+			const { st, et } = resolveTimeRange(start_time, end_time)
+			const tenant = yield* resolveTenant
 
-        const result = yield* queryTinybird("errors_by_type", {
-          start_time: st,
-          end_time: et,
-          services: service,
-          limit: limit ?? 20,
-          exclude_spam_patterns: getSpamPatternsParam(),
-        })
+			const errors = yield* findErrors({
+				timeRange: { startTime: st, endTime: et },
+				service: service ?? undefined,
+				environment: environment ?? undefined,
+				limit: limit ?? 20,
+			}).pipe(
+				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+				Effect.mapError((e) => new McpQueryError({ message: e.message, pipe: "errors_by_type" })),
+			)
 
-        if (result.data.length === 0) {
-          return { content: [{ type: "text", text: `No errors found in ${st} — ${et}` }] }
-        }
+			if (errors.length === 0) {
+				return { content: [{ type: "text", text: `No errors found in ${st} — ${et}` }] }
+			}
 
-        const lines: string[] = [
-          `=== Errors by Type (${st} — ${et}) ===`,
-          ``,
-        ]
+			const lines: string[] = [`## Errors by Type`, ``]
 
-        const headers = ["Error Type", "Count", "Services", "Last Seen"]
-        const rows = result.data.map((e) => [
-          e.errorType.length > 60 ? e.errorType.slice(0, 57) + "..." : e.errorType,
-          formatNumber(e.count),
-          e.affectedServices.join(", "),
-          String(e.lastSeen),
-        ])
+			const headers = ["Error Type", "Count", "Affected Services", "Last Seen"]
+			const rows = Arr.map(errors, (e) => [
+				e.errorType.length > 60 ? e.errorType.slice(0, 57) + "..." : e.errorType,
+				formatNumber(e.count),
+				String(e.affectedServicesCount),
+				e.lastSeen,
+			])
 
-        lines.push(formatTable(headers, rows))
-        lines.push(``, `Total: ${result.data.length} error types`)
+			lines.push(formatTable(headers, rows))
+			lines.push(``, `Total: ${errors.length} error types`)
 
-        return {
-          content: createDualContent(lines.join("\n"), {
-            tool: "find_errors",
-            data: {
-              timeRange: { start: st, end: et },
-              errors: result.data.map((e) => ({
-                errorType: e.errorType,
-                count: Number(e.count),
-                affectedServices: e.affectedServices,
-                lastSeen: String(e.lastSeen),
-              })),
-            },
-          }),
-        }
-      }),
-  )
+			const nextSteps: string[] = []
+			for (const e of Arr.take(errors, 3)) {
+				const short = e.errorType.length > 50 ? e.errorType.slice(0, 47) + "..." : e.errorType
+				nextSteps.push(`\`error_detail error_type="${short}"\` — see sample traces and logs`)
+			}
+			nextSteps.push(
+				'`query_data source="traces" kind="timeseries" metric="error_rate"` — chart error rate trend',
+			)
+			lines.push(formatNextSteps(nextSteps))
+
+			return {
+				content: createDualContent(lines.join("\n"), {
+					tool: "find_errors",
+					data: {
+						timeRange: { start: st, end: et },
+						errors: Arr.map(errors, (e) => ({
+							errorType: e.errorType,
+							count: e.count,
+							affectedServicesCount: e.affectedServicesCount,
+							lastSeen: e.lastSeen,
+						})),
+					},
+				}),
+			}
+		}),
+	)
 }

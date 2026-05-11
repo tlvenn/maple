@@ -4,147 +4,168 @@ import { PricingCards } from "./pricing-cards"
 import { format } from "date-fns"
 
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@maple/ui/components/ui/card"
 import { Button } from "@maple/ui/components/ui/button"
-import { Badge } from "@maple/ui/components/ui/badge"
 import { getPlanLimits, type PlanLimits } from "@/lib/billing/plans"
 import type { AggregatedUsage } from "@/lib/billing/usage"
 import { UsageMeters } from "./usage-meters"
 import { useTrialStatus } from "@/hooks/use-trial-status"
-import { ClockIcon } from "@/components/icons"
+import { cn } from "@maple/ui/utils"
 
-type CustomerFeatures = Record<string, { usage?: number | null; included_usage?: number | null; balance?: number | null }> | undefined
+type CustomerBalances = Record<string, { usage?: number; granted?: number; remaining?: number }> | undefined
 
-function limitsFromCustomer(features: CustomerFeatures): PlanLimits | null {
-  if (!features) return null
-  const defaults = getPlanLimits("starter")
-  return {
-    logsGB: features.logs?.included_usage ?? defaults.logsGB,
-    tracesGB: features.traces?.included_usage ?? defaults.tracesGB,
-    metricsGB: features.metrics?.included_usage ?? defaults.metricsGB,
-    retentionDays: features.retention_days?.balance ?? defaults.retentionDays,
-  }
+function limitsFromCustomer(balances: CustomerBalances): PlanLimits | null {
+	if (!balances) return null
+	const defaults = getPlanLimits("starter")
+	return {
+		logsGB: balances.logs?.granted ?? defaults.logsGB,
+		tracesGB: balances.traces?.granted ?? defaults.tracesGB,
+		metricsGB: balances.metrics?.granted ?? defaults.metricsGB,
+		retentionDays: balances.retention_days?.remaining ?? defaults.retentionDays,
+	}
 }
 
-function CurrentPlanCard() {
-  const { isTrialing, daysRemaining, trialEndsAt, planName, planStatus, isLoading } = useTrialStatus()
-  const { openBillingPortal } = useCustomer()
+function DataPoint({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+	return (
+		<div className="flex flex-col gap-0.5">
+			<span className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
+				{label}
+			</span>
+			<span className={cn("text-sm tabular-nums", accent && "text-primary")}>{value}</span>
+		</div>
+	)
+}
 
-  if (isLoading) {
-    return (
-      <Card>
-        <CardHeader>
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-4 w-56" />
-        </CardHeader>
-      </Card>
-    )
-  }
+function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+	return (
+		<div className="flex items-baseline justify-between gap-4 border-b border-border/60 pb-2">
+			<h2 className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/80">
+				{title}
+			</h2>
+			{subtitle && (
+				<span className="text-xs tabular-nums text-muted-foreground/60">{subtitle}</span>
+			)}
+		</div>
+	)
+}
 
-  if (!planStatus) return null
+function SubscriptionStrip({ billingPeriodLabel }: { billingPeriodLabel: string }) {
+	const { isTrialing, daysRemaining, trialEndsAt, planName, planStatus, isLoading } = useTrialStatus()
+	const { openCustomerPortal } = useCustomer()
 
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <CardTitle className="text-sm font-medium">{planName}</CardTitle>
-          {isTrialing && (
-            <Badge variant="secondary" className="text-[10px] font-medium">
-              Free Trial
-            </Badge>
-          )}
-        </div>
-        {isTrialing && daysRemaining != null && trialEndsAt ? (
-          <CardDescription className="space-y-1">
-            <span className="flex items-center gap-1.5 text-sm">
-              <ClockIcon size={14} className="text-muted-foreground" />
-              {daysRemaining} days remaining · ends {format(trialEndsAt, "MMM d")}
-            </span>
-            <span className="block text-xs text-muted-foreground">
-              Your card will be charged when the trial ends. Cancel anytime before to avoid charges.
-            </span>
-          </CardDescription>
-        ) : (
-          <CardDescription className="text-sm">
-            Current active plan
-          </CardDescription>
-        )}
-      </CardHeader>
-      <CardContent className="pt-0">
-        <Button variant="outline" size="sm" onClick={() => openBillingPortal({ returnUrl: window.location.href })}>
-          Manage billing
-        </Button>
-      </CardContent>
-    </Card>
-  )
+	if (isLoading) {
+		return (
+			<div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
+				<div className="flex flex-wrap items-baseline gap-x-8 gap-y-3">
+					<div className="flex flex-col gap-1.5">
+						<Skeleton className="h-2.5 w-10" />
+						<Skeleton className="h-4 w-20" />
+					</div>
+					<div className="flex flex-col gap-1.5">
+						<Skeleton className="h-2.5 w-12" />
+						<Skeleton className="h-4 w-24" />
+					</div>
+					<div className="flex flex-col gap-1.5">
+						<Skeleton className="h-2.5 w-12" />
+						<Skeleton className="h-4 w-32" />
+					</div>
+				</div>
+				<Skeleton className="h-8 w-32" />
+			</div>
+		)
+	}
+
+	if (!planStatus) return null
+
+	const statusValue =
+		isTrialing && daysRemaining != null ? `Trial · ${daysRemaining}d left` : "Active"
+
+	return (
+		<div>
+			<div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
+				<div className="flex flex-wrap items-baseline gap-x-8 gap-y-3">
+					<DataPoint label="Plan" value={planName} />
+					<DataPoint label="Status" value={statusValue} accent={isTrialing} />
+					<DataPoint label="Period" value={billingPeriodLabel} />
+				</div>
+				<Button
+					variant="outline"
+					size="sm"
+					onClick={() => openCustomerPortal({ returnUrl: window.location.href })}
+				>
+					Manage billing
+				</Button>
+			</div>
+			{isTrialing && trialEndsAt && (
+				<p className="mt-3 text-xs text-muted-foreground">
+					Card charges when trial ends on {format(trialEndsAt, "MMM d")}. Cancel anytime before to avoid charges.
+				</p>
+			)}
+		</div>
+	)
+}
+
+function UsageSkeleton() {
+	return (
+		<div className="space-y-4">
+			{Array.from({ length: 3 }).map((_, i) => (
+				<div key={i} className="flex flex-col gap-2">
+					<div className="flex items-center gap-2">
+						<Skeleton className="h-3 w-3 rounded-sm" />
+						<Skeleton className="h-3 w-16" />
+						<Skeleton className="ml-auto h-3 w-24" />
+					</div>
+					<Skeleton className="h-1.5 w-full" />
+				</div>
+			))}
+		</div>
+	)
 }
 
 export function BillingSection() {
-  const { customer, isLoading: isCustomerLoading } = useCustomer()
-  const { total, isLoading: isUsageLoading } = useAggregateEvents({
-    featureId: ["logs", "traces", "metrics"],
-    range: "1bc",
-  })
+	const { data: customer, isLoading: isCustomerLoading } = useCustomer()
+	const { total, isLoading: isUsageLoading } = useAggregateEvents({
+		featureId: ["logs", "traces", "metrics"],
+		range: "1bc",
+	})
 
-  const isLoading = isCustomerLoading || isUsageLoading
+	const isLoading = isCustomerLoading || isUsageLoading
 
-  const billingPeriodLabel = useMemo(() => {
-    const activeProduct = customer?.products?.find(
-      (p) => p.status === "active" || p.status === "trialing",
-    )
-    if (activeProduct?.current_period_start && activeProduct?.current_period_end) {
-      const start = new Date(activeProduct.current_period_start)
-      const end = new Date(activeProduct.current_period_end)
-      return `${format(start, "MMM d")} – ${format(end, "MMM d, yyyy")}`
-    }
-    // Fallback: calendar month → today
-    const now = new Date()
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-    return `${format(startOfMonth, "MMM d")} – ${format(now, "MMM d, yyyy")}`
-  }, [customer])
+	const billingPeriodLabel = useMemo(() => {
+		const activeSub = customer?.subscriptions?.find((s) => s.status === "active")
+		if (activeSub?.currentPeriodStart && activeSub?.currentPeriodEnd) {
+			const start = new Date(activeSub.currentPeriodStart)
+			const end = new Date(activeSub.currentPeriodEnd)
+			return `${format(start, "MMM d")} – ${format(end, "MMM d, yyyy")}`
+		}
+		const now = new Date()
+		const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+		return `${format(startOfMonth, "MMM d")} – ${format(now, "MMM d, yyyy")}`
+	}, [customer])
 
-  const limits = limitsFromCustomer(customer?.features) ?? getPlanLimits("starter")
-  const usage: AggregatedUsage = {
-    logsGB: total?.logs?.sum ?? 0,
-    tracesGB: total?.traces?.sum ?? 0,
-    metricsGB: total?.metrics?.sum ?? 0,
-  }
+	const limits = limitsFromCustomer(customer?.balances) ?? getPlanLimits("starter")
+	const usage: AggregatedUsage = {
+		logsGB: total?.logs?.sum ?? 0,
+		tracesGB: total?.traces?.sum ?? 0,
+		metricsGB: total?.metrics?.sum ?? 0,
+	}
 
-  return (
-    <div className="space-y-6">
-      <CurrentPlanCard />
+	return (
+		<div>
+			<SubscriptionStrip billingPeriodLabel={billingPeriodLabel} />
 
-      {isLoading ? (
-        <Card>
-          <CardHeader>
-            <Skeleton className="h-5 w-32" />
-            <Skeleton className="h-4 w-48" />
-          </CardHeader>
-          <CardContent className="space-y-5">
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-          </CardContent>
-        </Card>
-      ) : (
-        <UsageMeters
-          usage={usage}
-          limits={limits}
-          billingPeriodLabel={billingPeriodLabel}
-        />
-      )}
+			<section className="mt-10">
+				<SectionHeader title="Current usage" subtitle={billingPeriodLabel} />
+				<div className="mt-5">
+					{isLoading ? <UsageSkeleton /> : <UsageMeters usage={usage} limits={limits} />}
+				</div>
+			</section>
 
-      <div className="space-y-3">
-        <h3 className="text-sm font-medium">Plans</h3>
-        {isLoading ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Skeleton className="h-48 w-full rounded-lg" />
-            <Skeleton className="h-48 w-full rounded-lg" />
-          </div>
-        ) : (
-          <PricingCards />
-        )}
-      </div>
-    </div>
-  )
+			<section className="mt-12">
+				<SectionHeader title="Plans" />
+				<div className="mt-5">
+					<PricingCards />
+				</div>
+			</section>
+		</div>
+	)
 }

@@ -1,5 +1,6 @@
 .tinyb
 .tinybird-generated
+.tinybird-entities-*.mjs
 .terraform
 .DS_Store
 .claude
@@ -26,3 +27,9 @@ apps/api/.data/
 .mcp.json
 .dev.vars
 apps/chat-agent/.dev.vars
+
+# sst
+.sst
+/bin/
+/apps/agents/logs
+/logs

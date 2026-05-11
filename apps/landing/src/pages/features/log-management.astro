@@ -5,6 +5,7 @@ import FeatureHero from "../../components/FeatureHero.astro";
 import FeatureDetailGrid from "../../components/FeatureDetailGrid.astro";
 import RelatedFeatures from "../../components/RelatedFeatures.astro";
 import SeoHead from "../../components/SeoHead.astro";
+import Breadcrumb from "../../components/Breadcrumb.astro";
 import BottomCTA from "../../components/BottomCTA.astro";
 import Footer from "../../components/Footer.astro";
 
@@ -12,9 +13,10 @@ const pageTitle = "Log Management | Maple";
 const pageDescription = "Search and filter logs with full-text search, severity filtering, and service grouping. Correlate logs with distributed traces for seamless debugging across your stack.";
 ---
 
-<Layout title={pageTitle} description={pageDescription}>
+<Layout title={pageTitle} description={pageDescription} ogType="article">
     <SeoHead title={pageTitle} description={pageDescription} />
     <Nav />
+    <Breadcrumb items={[{ label: "Home", href: "/" }, { label: "Features", href: "/#features" }, { label: "Log Management" }]} />
     <FeatureHero
         label="Log Management"
         title="Search and correlate logs instantly"

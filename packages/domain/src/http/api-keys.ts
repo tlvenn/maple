@@ -1,83 +1,100 @@
-import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "@effect/platform"
+import { HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi"
 import { Schema } from "effect"
+import { ApiKeyId, UserId } from "../primitives"
 import { Authorization } from "./current-tenant"
 
-const ApiKeyPath = Schema.Struct({
-  keyId: Schema.String,
-})
+export const ApiKeyKind = Schema.Literals(["standard", "mcp"])
+export type ApiKeyKind = Schema.Schema.Type<typeof ApiKeyKind>
 
 export class ApiKeyResponse extends Schema.Class<ApiKeyResponse>("ApiKeyResponse")({
-  id: Schema.String,
-  name: Schema.String,
-  description: Schema.NullOr(Schema.String),
-  keyPrefix: Schema.String,
-  revoked: Schema.Boolean,
-  revokedAt: Schema.NullOr(Schema.Number),
-  lastUsedAt: Schema.NullOr(Schema.Number),
-  expiresAt: Schema.NullOr(Schema.Number),
-  createdAt: Schema.Number,
-  createdBy: Schema.String,
+	id: ApiKeyId,
+	name: Schema.String,
+	description: Schema.NullOr(Schema.String),
+	keyPrefix: Schema.String,
+	kind: ApiKeyKind,
+	revoked: Schema.Boolean,
+	revokedAt: Schema.NullOr(Schema.Number),
+	lastUsedAt: Schema.NullOr(Schema.Number),
+	expiresAt: Schema.NullOr(Schema.Number),
+	createdAt: Schema.Number,
+	createdBy: UserId,
+	createdByEmail: Schema.NullOr(Schema.String),
 }) {}
 
 export class ApiKeyCreatedResponse extends Schema.Class<ApiKeyCreatedResponse>("ApiKeyCreatedResponse")({
-  id: Schema.String,
-  name: Schema.String,
-  description: Schema.NullOr(Schema.String),
-  keyPrefix: Schema.String,
-  revoked: Schema.Boolean,
-  revokedAt: Schema.NullOr(Schema.Number),
-  lastUsedAt: Schema.NullOr(Schema.Number),
-  expiresAt: Schema.NullOr(Schema.Number),
-  createdAt: Schema.Number,
-  createdBy: Schema.String,
-  secret: Schema.String,
+	id: ApiKeyId,
+	name: Schema.String,
+	description: Schema.NullOr(Schema.String),
+	keyPrefix: Schema.String,
+	kind: ApiKeyKind,
+	revoked: Schema.Boolean,
+	revokedAt: Schema.NullOr(Schema.Number),
+	lastUsedAt: Schema.NullOr(Schema.Number),
+	expiresAt: Schema.NullOr(Schema.Number),
+	createdAt: Schema.Number,
+	createdBy: UserId,
+	createdByEmail: Schema.NullOr(Schema.String),
+	secret: Schema.String,
 }) {}
 
 export class ApiKeysListResponse extends Schema.Class<ApiKeysListResponse>("ApiKeysListResponse")({
-  keys: Schema.Array(ApiKeyResponse),
+	keys: Schema.Array(ApiKeyResponse),
 }) {}
 
 export class CreateApiKeyRequest extends Schema.Class<CreateApiKeyRequest>("CreateApiKeyRequest")({
-  name: Schema.String,
-  description: Schema.optional(Schema.String),
-  expiresInSeconds: Schema.optional(Schema.Number),
+	name: Schema.String,
+	description: Schema.optional(Schema.String),
+	expiresInSeconds: Schema.optional(Schema.Number),
+	kind: Schema.optional(ApiKeyKind),
 }) {}
 
-export class ApiKeyPersistenceError extends Schema.TaggedError<ApiKeyPersistenceError>()(
-  "ApiKeyPersistenceError",
-  {
-    message: Schema.String,
-  },
-  HttpApiSchema.annotations({ status: 503 }),
+export class ApiKeyPersistenceError extends Schema.TaggedErrorClass<ApiKeyPersistenceError>()(
+	"@maple/http/errors/ApiKeyPersistenceError",
+	{
+		message: Schema.String,
+	},
+	{ httpApiStatus: 503 },
 ) {}
 
-export class ApiKeyNotFoundError extends Schema.TaggedError<ApiKeyNotFoundError>()(
-  "ApiKeyNotFoundError",
-  {
-    keyId: Schema.String,
-    message: Schema.String,
-  },
-  HttpApiSchema.annotations({ status: 404 }),
+export class ApiKeyForbiddenError extends Schema.TaggedErrorClass<ApiKeyForbiddenError>()(
+	"@maple/http/errors/ApiKeyForbiddenError",
+	{
+		message: Schema.String,
+	},
+	{ httpApiStatus: 403 },
+) {}
+
+export class ApiKeyNotFoundError extends Schema.TaggedErrorClass<ApiKeyNotFoundError>()(
+	"@maple/http/errors/ApiKeyNotFoundError",
+	{
+		keyId: ApiKeyId,
+		message: Schema.String,
+	},
+	{ httpApiStatus: 404 },
 ) {}
 
 export class ApiKeysApiGroup extends HttpApiGroup.make("apiKeys")
-  .add(
-    HttpApiEndpoint.get("list", "/")
-      .addSuccess(ApiKeysListResponse)
-      .addError(ApiKeyPersistenceError),
-  )
-  .add(
-    HttpApiEndpoint.post("create", "/")
-      .setPayload(CreateApiKeyRequest)
-      .addSuccess(ApiKeyCreatedResponse)
-      .addError(ApiKeyPersistenceError),
-  )
-  .add(
-    HttpApiEndpoint.del("revoke", "/:keyId/revoke")
-      .setPath(ApiKeyPath)
-      .addSuccess(ApiKeyResponse)
-      .addError(ApiKeyNotFoundError)
-      .addError(ApiKeyPersistenceError),
-  )
-  .prefix("/api/api-keys")
-  .middleware(Authorization) {}
+	.add(
+		HttpApiEndpoint.get("list", "/", {
+			success: ApiKeysListResponse,
+			error: ApiKeyPersistenceError,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("create", "/", {
+			payload: CreateApiKeyRequest,
+			success: ApiKeyCreatedResponse,
+			error: [ApiKeyForbiddenError, ApiKeyPersistenceError],
+		}),
+	)
+	.add(
+		HttpApiEndpoint.delete("revoke", "/:keyId/revoke", {
+			params: {
+				keyId: ApiKeyId,
+			},
+			success: ApiKeyResponse,
+			error: [ApiKeyForbiddenError, ApiKeyNotFoundError, ApiKeyPersistenceError],
+		}),
+	)
+	.prefix("/api/api-keys")
+	.middleware(Authorization) {}
