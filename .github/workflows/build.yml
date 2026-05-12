@@ -9,7 +9,7 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-api:
+  build-workerd:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,11 +28,11 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: apps/api/Dockerfile
+          file: deploy/workerd/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/tlvenn/maple-api:latest
-          cache-from: type=gha,scope=maple-api
-          cache-to: type=gha,mode=max,scope=maple-api
+          tags: ${{ env.REGISTRY }}/tlvenn/maple-workerd:latest
+          cache-from: type=gha,scope=maple-workerd
+          cache-to: type=gha,mode=max,scope=maple-workerd
 
   build-web:
     runs-on: ubuntu-latest
