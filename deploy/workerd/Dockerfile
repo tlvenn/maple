@@ -15,6 +15,7 @@ RUN bunx turbo prune \
       @maple/alerting \
       @maple/chat-agent \
       @maple-dev/effect-sdk \
+      @maple/clickhouse-cli \
       --docker --out-dir /app/out
 
 # ---- builder: install + build SDK + bundle each worker ----
@@ -38,6 +39,14 @@ RUN cd apps/api && bunx wrangler deploy --dry-run --outdir=/build/api
 RUN cd apps/alerting && bunx wrangler deploy --dry-run --outdir=/build/alerting
 RUN cd apps/chat-agent && bunx wrangler deploy --dry-run --outdir=/build/chat-agent
 
+# Bundle the ClickHouse schema CLI from this same source tree. Baking it in
+# pins the CLI to whatever Maple commit our fork was synced to, so schema
+# applied at boot stays in lockstep with what the API expects (no surprise
+# `@latest` pulls at deploy time).
+RUN bun build packages/clickhouse-cli/src/cli.ts \
+      --target=bun \
+      --outfile=/build/clickhouse-cli.js
+
 # ---- runner: minimal image that runs the Miniflare orchestrator ----
 FROM base AS runner
 WORKDIR /app
@@ -49,6 +58,10 @@ COPY --from=builder /build/chat-agent/  /app/bundles/chat-agent/
 
 # Drizzle migrations applied to D1 on boot
 COPY --from=builder /app/packages/db/drizzle /app/migrations
+
+# Baked ClickHouse schema CLI — invoked by the `maple-ch-migrate` init
+# container (override the default CMD via docker-compose).
+COPY --from=builder /build/clickhouse-cli.js /app/clickhouse-cli.js
 
 # Runtime entry + its deps
 COPY deploy/workerd/package.json deploy/workerd/runtime.ts ./
