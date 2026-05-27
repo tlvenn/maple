@@ -8,7 +8,7 @@ import {
 	ChartLineIcon,
 	type IconComponent,
 } from "@/components/icons"
-import { createQueryDraft } from "@/lib/query-builder/model"
+import { createQueryDraft, type QueryBuilderQueryDraft } from "@/lib/query-builder/model"
 import type {
 	VisualizationType,
 	WidgetDataSource,
@@ -282,15 +282,28 @@ export const listPresets: WidgetPresetDefinition[] = [
 
 function buildBreakdownQuery(
 	index: number,
-	overrides: Partial<ReturnType<typeof createQueryDraft>>,
-): ReturnType<typeof createQueryDraft> {
-	return {
-		...createQueryDraft(index),
+	overrides: {
+		dataSource: "traces" | "logs"
+		whereClause: string
+		aggregation: string
+		groupBy: string[]
+		name?: string
+	},
+): QueryBuilderQueryDraft {
+	const draft = createQueryDraft(index)
+	const base = {
+		...draft,
+		name: overrides.name ?? draft.name,
 		enabled: true,
+		whereClause: overrides.whereClause,
+		aggregation: overrides.aggregation,
+		groupBy: overrides.groupBy,
 		addOns: { groupBy: true, having: false, orderBy: false, limit: true, legend: false },
 		limit: "10",
-		...overrides,
 	}
+	return overrides.dataSource === "logs"
+		? { ...base, dataSource: "logs" }
+		: { ...base, dataSource: "traces" }
 }
 
 export const piePresets: WidgetPresetDefinition[] = [
@@ -379,6 +392,67 @@ export const piePresets: WidgetPresetDefinition[] = [
 			chartId: "query-builder-pie",
 			unit: "number",
 			pie: { donut: true, showLabels: false, showPercent: true },
+		},
+	},
+]
+
+export const funnelPresets: WidgetPresetDefinition[] = [
+	{
+		id: "funnel-traces-by-service",
+		name: "Traces by Service",
+		description: "Trace volume per service as a descending funnel",
+		icon: PulseIcon,
+		visualization: "funnel",
+		dataSource: {
+			endpoint: "custom_query_builder_breakdown",
+			params: {
+				queries: [
+					buildBreakdownQuery(0, {
+						dataSource: "traces",
+						whereClause: "root_only = true",
+						aggregation: "count",
+						groupBy: ["service_name"],
+					}),
+				],
+				formulas: [],
+				comparison: { mode: "none", includePercentChange: false },
+				debug: false,
+			},
+		},
+		display: {
+			title: "Traces by Service",
+			chartId: "query-builder-funnel",
+			unit: "number",
+			funnel: { showStepPercent: true },
+		},
+	},
+	{
+		id: "funnel-errors-by-service",
+		name: "Errors by Service",
+		description: "Error volume per service ranked as a funnel",
+		icon: AlertWarningIcon,
+		visualization: "funnel",
+		dataSource: {
+			endpoint: "custom_query_builder_breakdown",
+			params: {
+				queries: [
+					buildBreakdownQuery(0, {
+						dataSource: "traces",
+						whereClause: "has_error = true",
+						aggregation: "count",
+						groupBy: ["service_name"],
+					}),
+				],
+				formulas: [],
+				comparison: { mode: "none", includePercentChange: false },
+				debug: false,
+			},
+		},
+		display: {
+			title: "Errors by Service",
+			chartId: "query-builder-funnel",
+			unit: "number",
+			funnel: { showStepPercent: false },
 		},
 	},
 ]
@@ -535,7 +609,7 @@ export const tablePresets: WidgetPresetDefinition[] = [
 		display: {
 			title: "Errors by Type",
 			columns: [
-				{ field: "errorType", header: "Error Type" },
+				{ field: "errorLabel", header: "Error" },
 				{ field: "count", header: "Count", unit: "number", align: "right" },
 				{ field: "affectedServicesCount", header: "Services", align: "right" },
 			],
@@ -554,7 +628,7 @@ export const tablePresets: WidgetPresetDefinition[] = [
 		display: {
 			title: "Root Errors by Type",
 			columns: [
-				{ field: "errorType", header: "Error Type" },
+				{ field: "errorLabel", header: "Error" },
 				{ field: "count", header: "Count", unit: "number", align: "right" },
 				{ field: "affectedServicesCount", header: "Services", align: "right" },
 			],

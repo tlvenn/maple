@@ -1,13 +1,13 @@
 import { optionalStringParam, type McpToolRegistrar } from "./types"
-import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange } from "../lib/time"
 import { formatPercent, formatDurationFromMs, formatNumber, formatTable } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { createDualContent } from "../lib/structured-output"
 import { toMcpQueryError } from "../lib/map-warehouse-error"
-import { Array as Arr, Effect, Layer, Schema } from "effect"
+import { Array as Arr, Effect, Schema } from "effect"
 import { listServices } from "@maple/query-engine/observability"
-import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
 
 export function registerListServicesTool(server: McpToolRegistrar) {
 	server.tool(
@@ -21,14 +21,20 @@ export function registerListServicesTool(server: McpToolRegistrar) {
 		Effect.fn("McpTool.listServices")(function* ({ start_time, end_time, environment }) {
 			const { st, et } = resolveTimeRange(start_time, end_time)
 			const tenant = yield* resolveTenant
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				environment: environment ?? "all",
+			})
 
 			const services = yield* listServices({
 				timeRange: { startTime: st, endTime: et },
 				environment: environment ?? undefined,
 			}).pipe(
-				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 				Effect.mapError(toMcpQueryError("service_overview")),
 			)
+
+			yield* Effect.annotateCurrentSpan("resultCount", services.length)
 
 			const lines: string[] = [
 				`## Services`,

@@ -1,7 +1,7 @@
 import { McpQueryError, optionalStringParam, requiredStringParam, type McpToolRegistrar } from "./types"
-import { Effect, Schema } from "effect"
+import { Clock, Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
 import { DashboardDocument, DashboardId, PortableDashboardDocument } from "@maple/domain/http"
 import { IsoDateTimeString } from "@maple/domain"
@@ -45,10 +45,11 @@ export function registerUpdateDashboardTool(server: McpToolRegistrar) {
 			const portable = dashboard_json
 				? yield* Schema.decodeUnknownEffect(PortableDashboardFromJson)(dashboard_json).pipe(
 						Effect.mapError(
-							() =>
+							(cause) =>
 								new McpQueryError({
 									message: "Invalid dashboard JSON",
 									pipe: "update_dashboard",
+									cause,
 								}),
 						),
 					)
@@ -56,23 +57,19 @@ export function registerUpdateDashboardTool(server: McpToolRegistrar) {
 
 			const dashboardIdBranded = decodeDashboardId(dashboard_id)
 
+			const nowMillis = yield* Clock.currentTimeMillis
+			const now = decodeIsoDateTimeString(new Date(nowMillis).toISOString())
+
 			const result = yield* persistence
 				.mutate(tenant.orgId, tenant.userId, dashboardIdBranded, (existing) =>
 					Effect.sync(() => {
-						const now = decodeIsoDateTimeString(new Date().toISOString())
-
 						if (portable) {
-							// Full-replacement path. Variables aren't part of the
-							// portable export schema, so preserve whatever the
-							// stored dashboard already had — otherwise a "rename"
-							// via this branch would silently wipe variables.
 							return new DashboardDocument({
 								id: existing.id,
 								name: portable.name,
 								description: portable.description,
 								tags: portable.tags,
 								timeRange: portable.timeRange,
-								variables: existing.variables,
 								widgets: portable.widgets,
 								createdAt: existing.createdAt,
 								updatedAt: now,
@@ -92,7 +89,6 @@ export function registerUpdateDashboardTool(server: McpToolRegistrar) {
 							description: description ?? existing.description,
 							tags: existing.tags,
 							timeRange,
-							variables: existing.variables,
 							widgets: existing.widgets,
 							createdAt: existing.createdAt,
 							updatedAt: now,
@@ -109,6 +105,7 @@ export function registerUpdateDashboardTool(server: McpToolRegistrar) {
 							new McpQueryError({
 								message: error.message,
 								pipe: "update_dashboard",
+								cause: error,
 							}),
 					),
 				)

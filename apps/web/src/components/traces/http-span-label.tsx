@@ -10,7 +10,7 @@ interface HttpSpanLabelProps {
 }
 
 export function HttpSpanLabel({ spanName, spanAttributes, spanKind, className, textClassName }: HttpSpanLabelProps) {
-	const httpInfo = getHttpInfo(spanName, spanAttributes ?? {})
+	const httpInfo = getHttpInfo({ spanName, spanAttributes, spanKind })
 
 	if (!httpInfo) {
 		return (
@@ -20,7 +20,7 @@ export function HttpSpanLabel({ spanName, spanAttributes, spanKind, className, t
 		)
 	}
 
-	const isClient = spanKind === "SPAN_KIND_CLIENT" || httpInfo.kind === "client"
+	const isClient = httpInfo.kind === "client"
 
 	return (
 		<span
@@ -40,12 +40,12 @@ export function HttpSpanLabel({ spanName, spanAttributes, spanKind, className, t
 						className="size-2.5 -ml-0.5 opacity-90"
 						fill="none"
 						stroke="currentColor"
-						strokeWidth="1.75"
-						strokeLinecap="round"
-						strokeLinejoin="round"
+						strokeWidth="2"
+						strokeLinecap="square"
+						strokeLinejoin="miter"
 					>
 						<path d="M3 7L7 3" />
-						<path d="M3.5 3H7v3.5" />
+						<path d="M4 3H7V6" />
 					</svg>
 				)}
 				{httpInfo.method}

@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type { TracesMetric } from "../../query-engine"
+import { compileCH } from "../compile"
 import * as CH from "../expr"
 import { param } from "../param"
 import { from, type CHQuery, type ColumnAccessor } from "../query"
@@ -13,6 +14,7 @@ import { METRIC_NEEDS } from "../../traces-shared"
 import type { ColumnDefs } from "../types"
 import {
 	apdexExprs,
+	buildProjectedMapExpr,
 	canUseServiceOverviewMv,
 	canUseTracesAggregatesMv,
 	serviceOverviewWhereConditions,
@@ -48,7 +50,7 @@ function metricSelectExprs(
 	const durationMs = $.Duration.div(1000000)
 
 	const apdex = needs.has("apdex")
-		? apdexExprs(durationMs, apdexThresholdMs)
+		? apdexExprs(durationMs, apdexThresholdMs, $.StatusCode.eq("Error"))
 		: { satisfiedCount: CH.lit(0), toleratingCount: CH.lit(0), apdexScore: CH.lit(0) }
 
 	return {
@@ -361,20 +363,19 @@ export interface TracesListOutput {
 }
 
 /**
- * Build a ClickHouse map() literal that extracts only the requested attribute keys.
+ * Two-stage list query. The `traces` sort key is
+ * `(OrgId, ServiceName, SpanName, toDateTime(Timestamp))` — `ServiceName` and
+ * `SpanName` sit between `OrgId` and the timestamp, so `ORDER BY Timestamp DESC`
+ * is not a sort-key prefix and ClickHouse cannot read-in-order. A single-stage
+ * query therefore scans the whole window and materializes the heavy
+ * `SpanAttributes` / `ResourceAttributes` Map columns for every matching row
+ * *before* `LIMIT` discards all but N, which OOMs on busy orgs.
+ *
+ * Stage 1 reads only `Timestamp` to find the cutoff (the (limit+offset)-th
+ * newest matching timestamp). Stage 2 gates on `Timestamp >= cutoff`, so the
+ * heavy columns are materialized only for the small slice of rows at/after the
+ * cutoff. The outer `LIMIT` / `OFFSET` trims any ties at the cutoff timestamp.
  */
-function buildProjectedMapExpr(
-	requestedKeys: string[],
-	mapName: "SpanAttributes" | "ResourceAttributes",
-): CH.Expr<Record<string, string>> {
-	if (requestedKeys.length === 0) return CH.mapLiteral()
-	const pairs: Array<[string, CH.Expr<string>]> = requestedKeys.map((key) => {
-		const valueExpr: CH.Expr<string> = CH.mapGet(CH.dynamicColumn<Record<string, string>>(mapName), key)
-		return [key, valueExpr]
-	})
-	return CH.mapLiteral(...pairs)
-}
-
 export function tracesListQuery(opts: TracesListOpts) {
 	const limit = opts.limit ?? 25
 	const offset = opts.offset ?? 0
@@ -403,6 +404,26 @@ export function tracesListQuery(opts: TracesListOpts) {
 
 	const cursor = opts.cursor
 
+	const baseWhere = (
+		$: ColumnAccessor<typeof Traces.columns>,
+	): Array<CH.Condition | undefined> => [
+		...buildWhereConditions($, opts),
+		CH.when(cursor, (v: string) => $.Timestamp.lt(v)),
+	]
+
+	// Stage 1: cheap scan — only `Timestamp` is read. Compiled with placeholders
+	// intact ({} params) so the outer `CH.compile()` substitutes them once.
+	// Limit is `limit + offset` so the cutoff covers every row the outer query
+	// might examine, not just the slice it returns.
+	const cutoffInner = from(Traces)
+		.select(($) => ({ ts: $.Timestamp }))
+		.where(baseWhere)
+		.orderBy(["ts", "desc"])
+		.limit(limit + offset)
+	const cutoffSql = compileCH(cutoffInner, {}, { skipFormat: true }).sql
+	const cutoff = CH.rawExpr<string>(`(SELECT min(ts) FROM (${cutoffSql}))`)
+
+	// Stage 2: heavy columns read only for rows at/after the cutoff timestamp.
 	let q = from(Traces)
 		.select(($) => ({
 			traceId: $.TraceId,
@@ -417,7 +438,7 @@ export function tracesListQuery(opts: TracesListOpts) {
 			spanAttributes: spanAttrExpr ?? $.SpanAttributes,
 			resourceAttributes: resourceAttrExpr ?? $.ResourceAttributes,
 		}))
-		.where(($) => [...buildWhereConditions($, opts), CH.when(cursor, (v: string) => $.Timestamp.lt(v))])
+		.where(($) => [...baseWhere($), $.Timestamp.gte(cutoff)])
 		.orderBy(["timestamp", "desc"])
 		.limit(limit)
 		.format("JSON")
@@ -459,12 +480,42 @@ export interface TracesRootListOutput {
 	readonly hasError: number
 }
 
+/**
+ * Two-stage root-trace list query. Same OOM avoidance as `tracesListQuery`:
+ * the `traces` sort key is `(OrgId, ServiceName, SpanName, toDateTime(Timestamp))`,
+ * so `ORDER BY Timestamp DESC` can't read-in-order. The single-stage form
+ * materializes `SpanAttributes['http.method']` / `['http.route']` /
+ * `['http.status_code']` Map lookups for every matching span before `LIMIT`
+ * discards them.
+ *
+ * Stage 1 scans only `Timestamp` under the same WHERE (including `rootOnly`)
+ * to find the (limit+offset)-th newest cutoff. Stage 2 reads the heavy
+ * Map-lookup columns only for rows at/after the cutoff.
+ */
 export function tracesRootListQuery(opts: TracesRootListOpts) {
 	const limit = opts.limit ?? 25
 	const offset = opts.offset ?? 0
 
 	const cursor = opts.cursor
 
+	const baseWhere = (
+		$: ColumnAccessor<typeof Traces.columns>,
+	): Array<CH.Condition | undefined> => [
+		...buildWhereConditions($, { ...opts, rootOnly: true }),
+		CH.when(cursor, (v: string) => $.Timestamp.lt(v)),
+	]
+
+	// Stage 1: cheap scan — only `Timestamp` is read, sharing the same WHERE
+	// (rootOnly included) as the outer heavy query.
+	const cutoffInner = from(Traces)
+		.select(($) => ({ ts: $.Timestamp }))
+		.where(baseWhere)
+		.orderBy(["ts", "desc"])
+		.limit(limit + offset)
+	const cutoffSql = compileCH(cutoffInner, {}, { skipFormat: true }).sql
+	const cutoff = CH.rawExpr<string>(`(SELECT min(ts) FROM (${cutoffSql}))`)
+
+	// Stage 2: heavy SpanAttributes lookups read only for rows at/after the cutoff.
 	let q = from(Traces)
 		.select(($) => ({
 			traceId: $.TraceId,
@@ -481,10 +532,7 @@ export function tracesRootListQuery(opts: TracesRootListOpts) {
 			rootHttpStatusCode: $.SpanAttributes.get("http.status_code"),
 			hasError: CH.if_($.StatusCode.eq("Error"), CH.lit(1), CH.lit(0)),
 		}))
-		.where(($) => [
-			...buildWhereConditions($, { ...opts, rootOnly: true }),
-			CH.when(cursor, (v: string) => $.Timestamp.lt(v)),
-		])
+		.where(($) => [...baseWhere($), $.Timestamp.gte(cutoff)])
 		.orderBy(["startTime", "desc"])
 		.limit(limit)
 		.format("JSON")

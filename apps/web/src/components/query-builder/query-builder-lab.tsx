@@ -33,9 +33,9 @@ import { getPerformanceHints, hasSlowHints, slowHintsSummary } from "@/lib/query
 import {
 	getQueryBuilderTimeseriesResultAtom,
 	listMetricsResultAtom,
-} from "@/lib/services/atoms/tinybird-query-atoms"
+} from "@/lib/services/atoms/warehouse-query-atoms"
 import { type FormulaDraft, type TimeseriesPoint } from "@/components/query-builder/formula-results"
-import { type QueryBuilderTimeseriesInput } from "@/api/tinybird/query-builder-timeseries"
+import { type QueryBuilderTimeseriesInput } from "@/api/warehouse/query-builder-timeseries"
 import {
 	AGGREGATIONS_BY_SOURCE,
 	createFormulaDraft,
@@ -520,7 +520,7 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 
 			<ScrollArea className="h-[min(72vh,52rem)]">
 				<CardContent className="space-y-3 p-3">
-					<Card size="sm" className="gap-2">
+					<Card className="gap-2">
 						<CardHeader className="pb-1">
 							<CardTitle className="text-xs">Execution Results</CardTitle>
 						</CardHeader>
@@ -552,7 +552,7 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 						{queries.map((query) => {
 							const aggregateOptions = AGGREGATIONS_BY_SOURCE[query.dataSource]
 							const metricValue =
-								query.metricName && query.metricType
+								query.dataSource === "metrics" && query.metricName && query.metricType
 									? `${query.metricName}::${query.metricType}`
 									: undefined
 
@@ -565,7 +565,7 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 										{query.name}
 									</Badge>
 
-									<Card size="sm" className={query.enabled ? "" : "opacity-60"}>
+									<Card className={query.enabled ? "" : "opacity-60"}>
 										<CardHeader className="pb-2">
 											<div className="flex flex-wrap items-center justify-between gap-2">
 												<div className="flex items-center gap-2">
@@ -657,11 +657,17 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 																		: null
 																	if (!parsed) return
 
-																	updateQuery(query.id, (current) => ({
-																		...current,
-																		metricName: parsed.metricName,
-																		metricType: parsed.metricType,
-																	}))
+																	updateQuery(query.id, (current) =>
+																		current.dataSource === "metrics"
+																			? {
+																					...current,
+																					metricName:
+																						parsed.metricName,
+																					metricType:
+																						parsed.metricType,
+																				}
+																			: current,
+																	)
 																}}
 															>
 																<SelectTrigger className="w-full">
@@ -692,14 +698,24 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 															</p>
 															<Select
 																items={SIGNAL_SOURCES}
-																value={query.signalSource}
+																value={
+																	query.dataSource === "metrics"
+																		? query.signalSource
+																		: "default"
+																}
 																onValueChange={(value) =>
-																	updateQuery(query.id, (current) => ({
-																		...current,
-																		signalSource:
-																			(value as "default" | "meter") ??
-																			current.signalSource,
-																	}))
+																	updateQuery(query.id, (current) =>
+																		current.dataSource === "metrics"
+																			? {
+																					...current,
+																					signalSource:
+																						(value as
+																							| "default"
+																							| "meter") ??
+																						current.signalSource,
+																				}
+																			: current,
+																	)
 																}
 															>
 																<SelectTrigger className="w-full">
@@ -752,7 +768,7 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 														)
 														if (!hasSlowHints(hints)) return null
 														return (
-															<p className="mt-1 text-[11px] text-amber-500">
+															<p className="mt-1 text-[11px] text-warning">
 																{slowHintsSummary(hints)}
 															</p>
 														)
@@ -976,7 +992,7 @@ function QueryBuilderLabInner({ startTime, endTime }: QueryBuilderLabProps) {
 								>
 									{formula.name}
 								</Badge>
-								<Card size="sm" className="border-dashed">
+								<Card className="border-dashed">
 									<CardHeader className="pb-2">
 										<div className="flex items-center justify-between gap-2">
 											<span className="text-xs text-muted-foreground">

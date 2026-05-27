@@ -1,54 +1,79 @@
 import * as React from "react"
-import type { SpanNode } from "@/api/tinybird/traces"
+import type { SpanNode } from "@/api/warehouse/traces"
 import type { TimelineBar, ViewportState, TimelineState, TimelineAction } from "./trace-timeline-types"
 import { ROW_HEIGHT, ROW_GAP, OVERSCAN } from "./trace-timeline-types"
+import { getValueHue } from "@maple/ui/colors"
+import { resolveColorValue, isStatusCodePreset, type ColorByField } from "./color-by"
+import { computeDefaultExpandedSpanIds, countDescendants } from "./auto-collapse"
+
+// --- Color palette (kept muted to preserve current aesthetic) ---
+
+const ERROR_HUE = 25
+const NEUTRAL_FILL = "oklch(0.22 0.005 0)"
+const NEUTRAL_BORDER = "oklch(0.45 0.02 0)"
+
+function barFillFromHue(hue: number | null, isError: boolean, statusPreset: boolean): string {
+	if (isError && !statusPreset) return `oklch(0.22 0.06 ${ERROR_HUE})`
+	if (hue === null) return NEUTRAL_FILL
+	return `oklch(0.22 0.015 ${hue})`
+}
+
+function barBorderFromHue(hue: number | null, isError: boolean, statusPreset: boolean): string {
+	if (isError && !statusPreset) return `oklch(0.62 0.22 ${ERROR_HUE})`
+	if (hue === null) return NEUTRAL_BORDER
+	return `oklch(0.55 0.18 ${hue})`
+}
 
 // --- Layout ---
 
-function collectDefaultExpanded(nodes: SpanNode[], depth: number, maxDepth: number): Set<string> {
-	const ids = new Set<string>()
-	for (const node of nodes) {
-		if (node.children.length > 0 && depth < maxDepth) {
-			ids.add(node.spanId)
-			const childIds = collectDefaultExpanded(node.children, depth + 1, maxDepth)
-			childIds.forEach((id) => ids.add(id))
-		}
-	}
-	return ids
-}
-
-function countDescendants(node: SpanNode): number {
-	let count = 0
-	for (const child of node.children) {
-		count += 1 + countDescendants(child)
-	}
-	return count
+export interface LayoutResult {
+	bars: TimelineBar[]
+	totalRows: number
+	barIndexBySpanId: Map<string, number>
+	parentIndexById: Map<string, number>
 }
 
 export function layoutSpans(
 	rootSpans: SpanNode[],
 	expandedSpanIds: Set<string>,
-): { bars: TimelineBar[]; totalRows: number } {
+	services: string[],
+	colorBy: ColorByField,
+): LayoutResult {
 	const bars: TimelineBar[] = []
+	const barIndexBySpanId = new Map<string, number>()
 	let currentRow = 0
+	const statusPreset = isStatusCodePreset(colorBy)
+	const colorByService = colorBy.kind === "preset" && colorBy.key === "service"
 
 	function visit(node: SpanNode) {
 		const startMs = new Date(node.startTime).getTime()
 		const endMs = startMs + node.durationMs
 		const hasChildren = node.children.length > 0
 		const isCollapsed = hasChildren && !expandedSpanIds.has(node.spanId)
+		const isError = node.statusCode === "Error"
+		const serviceIndex = services.indexOf(node.serviceName)
 
-		bars.push({
+		const value = resolveColorValue(node, colorBy)
+		const indexHint = colorByService && value ? services.indexOf(value) : undefined
+		const hue = getValueHue(value, indexHint, services.length)
+
+		const bar: TimelineBar = {
 			span: node,
 			row: currentRow,
 			startMs,
 			endMs,
 			depth: node.depth,
 			parentSpanId: node.parentSpanId,
-			isError: node.statusCode === "Error",
+			isError,
 			isCollapsed,
 			childCount: isCollapsed ? countDescendants(node) : 0,
-		})
+			serviceIndex,
+			fill: barFillFromHue(hue, isError, statusPreset),
+			borderColor: barBorderFromHue(hue, isError, statusPreset),
+			hasChildren,
+		}
+		bars.push(bar)
+		barIndexBySpanId.set(node.spanId, currentRow)
 		currentRow++
 
 		if (!isCollapsed) {
@@ -62,7 +87,15 @@ export function layoutSpans(
 		visit(root)
 	}
 
-	return { bars, totalRows: currentRow }
+	const parentIndexById = new Map<string, number>()
+	for (const bar of bars) {
+		if (bar.parentSpanId) {
+			const parentIdx = barIndexBySpanId.get(bar.parentSpanId)
+			if (parentIdx !== undefined) parentIndexById.set(bar.span.spanId, parentIdx)
+		}
+	}
+
+	return { bars, totalRows: currentRow, barIndexBySpanId, parentIndexById }
 }
 
 // --- State reducer ---
@@ -133,7 +166,7 @@ function timelineReducer(state: TimelineState, action: TimelineAction): Timeline
 		case "ZOOM_TO_SPAN": {
 			const { startMs, endMs, traceStartMs, traceEndMs } = action
 			const spanDuration = endMs - startMs
-			const padding = spanDuration * 0.1
+			const padding = Math.max(spanDuration * 0.1, 0.001)
 			return {
 				...state,
 				viewport: clampViewport(
@@ -251,12 +284,17 @@ export interface UseTraceTimelineOptions {
 	rootSpans: SpanNode[]
 	totalDurationMs: number
 	traceStartTime: string
-	defaultExpandDepth?: number
+	services: string[]
+	colorBy: ColorByField
+	/** Keep this span's ancestor chain expanded so auto-collapse never hides it. */
+	keepVisibleSpanId?: string
 }
 
 export interface UseTraceTimelineResult {
 	bars: TimelineBar[]
 	totalRows: number
+	barIndexBySpanId: Map<string, number>
+	parentIndexById: Map<string, number>
 	state: TimelineState
 	dispatch: React.Dispatch<TimelineAction>
 	traceStartMs: number
@@ -265,24 +303,23 @@ export interface UseTraceTimelineResult {
 	timeAxisTicks: number[]
 	searchMatches: Set<string>
 	isSearchActive: boolean
-	getBarLeftPercent: (bar: TimelineBar) => number
-	getBarWidthPercent: (bar: TimelineBar) => number
-	getVisibleBars: (scrollTop: number, containerHeight: number) => TimelineBar[]
 }
 
 export function useTraceTimeline({
 	rootSpans,
 	totalDurationMs,
 	traceStartTime,
-	defaultExpandDepth = Infinity,
+	services,
+	colorBy,
+	keepVisibleSpanId,
 }: UseTraceTimelineOptions): UseTraceTimelineResult {
 	const traceStartMs = React.useMemo(() => new Date(traceStartTime).getTime(), [traceStartTime])
 	const traceEndMs = traceStartMs + totalDurationMs
 
-	// Initialize with default expanded spans (those with children, up to depth)
+	// Initialize with default expanded spans (auto-collapses big subtrees on long traces).
 	const defaultExpanded = React.useMemo(
-		() => collectDefaultExpanded(rootSpans, 0, defaultExpandDepth),
-		[rootSpans, defaultExpandDepth],
+		() => computeDefaultExpandedSpanIds(rootSpans, { keepVisibleSpanId }),
+		[rootSpans, keepVisibleSpanId],
 	)
 
 	const [state, dispatch] = React.useReducer(timelineReducer, {
@@ -313,9 +350,9 @@ export function useTraceTimeline({
 	}, [rootSpanIdsKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
 	// Layout bars
-	const { bars, totalRows } = React.useMemo(
-		() => layoutSpans(rootSpans, state.expandedSpanIds),
-		[rootSpans, state.expandedSpanIds],
+	const { bars, totalRows, barIndexBySpanId, parentIndexById } = React.useMemo(
+		() => layoutSpans(rootSpans, state.expandedSpanIds, services, colorBy),
+		[rootSpans, state.expandedSpanIds, services, colorBy],
 	)
 
 	// Viewport derived values
@@ -335,38 +372,11 @@ export function useTraceTimeline({
 
 	const isSearchActive = state.searchQuery.trim().length > 0
 
-	// Position helpers
-	const getBarLeftPercent = React.useCallback(
-		(bar: TimelineBar) => {
-			return ((bar.startMs - state.viewport.startMs) / visibleDurationMs) * 100
-		},
-		[state.viewport.startMs, visibleDurationMs],
-	)
-
-	const getBarWidthPercent = React.useCallback(
-		(bar: TimelineBar) => {
-			return ((bar.endMs - bar.startMs) / visibleDurationMs) * 100
-		},
-		[visibleDurationMs],
-	)
-
-	// Virtualization
-	const getVisibleBars = React.useCallback(
-		(scrollTop: number, containerHeight: number) => {
-			const rowSize = ROW_HEIGHT + ROW_GAP
-			const firstVisible = Math.max(0, Math.floor(scrollTop / rowSize) - OVERSCAN)
-			const lastVisible = Math.min(
-				totalRows - 1,
-				Math.ceil((scrollTop + containerHeight) / rowSize) + OVERSCAN,
-			)
-			return bars.filter((bar) => bar.row >= firstVisible && bar.row <= lastVisible)
-		},
-		[bars, totalRows],
-	)
-
 	return {
 		bars,
 		totalRows,
+		barIndexBySpanId,
+		parentIndexById,
 		state,
 		dispatch,
 		traceStartMs,
@@ -375,8 +385,7 @@ export function useTraceTimeline({
 		timeAxisTicks,
 		searchMatches,
 		isSearchActive,
-		getBarLeftPercent,
-		getBarWidthPercent,
-		getVisibleBars,
 	}
 }
+
+export { ROW_HEIGHT, ROW_GAP, OVERSCAN }

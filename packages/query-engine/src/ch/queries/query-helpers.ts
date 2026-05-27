@@ -21,13 +21,32 @@ import { buildAttrFilterCondition } from "../../traces-shared"
  * Build the standard APDEX aggregation expressions (satisfiedCount,
  * toleratingCount, apdexScore) from a duration expression and threshold.
  *
+ * Per the Apdex spec, a *failed* request counts as frustrated regardless of how
+ * fast it was. When `errorCondition` is supplied, errored spans are excluded
+ * from the satisfied and tolerating buckets (they remain in `total`, so they
+ * drag the score down). Omitting it falls back to latency-only classification.
+ *
  * @param durationMs - An expression representing span duration in milliseconds
  *                     (typically `$.Duration.div(1000000)`)
  * @param thresholdMs - The APDEX "T" threshold in milliseconds
+ * @param errorCondition - Optional predicate identifying errored spans
+ *                         (typically `$.StatusCode.eq("Error")`)
  */
-export function apdexExprs(durationMs: CH.Expr<number>, thresholdMs: number) {
-	const satisfied = CH.countIf(durationMs.lt(thresholdMs))
-	const tolerating = CH.countIf(durationMs.gte(thresholdMs).and(durationMs.lt(thresholdMs * 4)))
+export function apdexExprs(
+	durationMs: CH.Expr<number>,
+	thresholdMs: number,
+	errorCondition?: CH.Condition,
+) {
+	const satisfiedLatency = durationMs.lt(thresholdMs)
+	const toleratingLatency = durationMs.gte(thresholdMs).and(durationMs.lt(thresholdMs * 4))
+	// Gate the latency buckets on "not an error" so failed requests fall through
+	// to frustrated. `total` still counts every span, so errors pull the score down.
+	const satisfiedCond = errorCondition ? CH.not(errorCondition).and(satisfiedLatency) : satisfiedLatency
+	const toleratingCond = errorCondition
+		? CH.not(errorCondition).and(toleratingLatency)
+		: toleratingLatency
+	const satisfied = CH.countIf(satisfiedCond)
+	const tolerating = CH.countIf(toleratingCond)
 	const total = CH.count()
 	// Split the formula so SQL operator precedence stays correct.
 	// (s + t*0.5) / n  ≡  s/n + (t*0.5)/n
@@ -42,6 +61,28 @@ export function apdexExprs(durationMs: CH.Expr<number>, thresholdMs: number) {
 		toleratingCount: tolerating,
 		apdexScore: CH.if_(total.gt(0), CH.round_(satisfiedRatio.add(toleratingRatio), 4), CH.lit(0)),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Attribute map projection
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a ClickHouse `map()` literal that extracts only the requested attribute
+ * keys from a Map column. Selecting the full `SpanAttributes` / `ResourceAttributes`
+ * map for every row materializes large per-row JSON — projecting just the keys
+ * the UI renders is a large win on wide traces.
+ */
+export function buildProjectedMapExpr(
+	requestedKeys: readonly string[],
+	mapName: "SpanAttributes" | "ResourceAttributes" | "LogAttributes",
+): CH.Expr<Record<string, string>> {
+	if (requestedKeys.length === 0) return CH.mapLiteral()
+	const pairs: Array<[string, CH.Expr<string>]> = requestedKeys.map((key) => {
+		const valueExpr: CH.Expr<string> = CH.mapGet(CH.dynamicColumn<Record<string, string>>(mapName), key)
+		return [key, valueExpr]
+	})
+	return CH.mapLiteral(...pairs)
 }
 
 // ---------------------------------------------------------------------------

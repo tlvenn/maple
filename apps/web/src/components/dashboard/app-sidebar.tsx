@@ -4,6 +4,7 @@ import {
 	HouseIcon,
 	FileIcon,
 	PulseIcon,
+	PlayRotateClockwiseIcon,
 	ChartLineIcon,
 	ServerIcon,
 	ComputerIcon,
@@ -18,7 +19,7 @@ import {
 	ChevronRightIcon,
 	NetworkNodesIcon,
 	ChatBubbleSparkleIcon,
-	GridIcon,
+	GridSquareCirclePlusIcon,
 } from "@/components/icons"
 import { OrgSwitcher } from "@/components/dashboard/org-switcher"
 import {
@@ -52,6 +53,7 @@ import { clearSelfHostedSessionToken } from "@/lib/services/common/self-hosted-a
 import { useDashboardStore } from "@/hooks/use-dashboard-store"
 import { useDashboardPreferences } from "@/hooks/use-dashboard-preferences"
 import { useInfraEnabled } from "@/hooks/use-infra-enabled"
+import { useSessionReplaysEnabled } from "@/hooks/use-session-replays-enabled"
 import { Badge } from "@maple/ui/components/ui/badge"
 
 const mainNavItems = [
@@ -84,6 +86,7 @@ interface SignalsNavItem {
 	title: string
 	href: string
 	icon: typeof PulseIcon
+	badge?: string
 	subItems?: { title: string; href: string }[]
 }
 
@@ -102,6 +105,12 @@ const signalsNavItems: SignalsNavItem[] = [
 		title: "Metrics",
 		href: "/metrics",
 		icon: ChartLineIcon,
+	},
+	{
+		title: "Replays",
+		href: "/replays",
+		icon: PlayRotateClockwiseIcon,
+		badge: "Beta",
 	},
 	{
 		title: "Infrastructure",
@@ -258,9 +267,12 @@ export function AppSidebar() {
 	const otherDashboards = dashboards.filter((d) => !favorites.has(d.id))
 
 	const infraEnabled = useInfraEnabled()
-	const visibleSignalsNavItems = infraEnabled
-		? signalsNavItems
-		: signalsNavItems.filter((item) => item.href !== "/infra")
+	const sessionReplaysEnabled = useSessionReplaysEnabled()
+	const visibleSignalsNavItems = signalsNavItems.filter(
+		(item) =>
+			(infraEnabled || item.href !== "/infra") &&
+			(sessionReplaysEnabled || item.href !== "/replays"),
+	)
 
 	return (
 		<Sidebar collapsible="icon">
@@ -349,10 +361,10 @@ export function AppSidebar() {
 					</SidebarGroup>
 				))}
 
-				<Collapsible defaultOpen className="group/dashboards flex flex-1 min-h-0 flex-col">
-					<SidebarGroup className="flex flex-1 min-h-0 flex-col">
+				<Collapsible defaultOpen className="group/dashboards flex flex-col">
+					<SidebarGroup className="flex flex-col">
 						<SidebarGroupLabel render={<CollapsibleTrigger />}>
-							<GridIcon size={14} className="mr-1 !size-3.5" />
+							<GridSquareCirclePlusIcon size={14} className="mr-1 !size-3.5" />
 							Dashboards
 							<Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 font-medium">
 								Beta
@@ -362,9 +374,9 @@ export function AppSidebar() {
 								className="ml-auto !size-3.5 transition-transform group-data-[open]/dashboards:rotate-90"
 							/>
 						</SidebarGroupLabel>
-						<CollapsibleContent className="flex min-h-0 flex-1 flex-col overflow-hidden">
-							<SidebarGroupContent className="flex min-h-0 flex-1 flex-col overflow-hidden">
-								<SidebarMenu className="flex min-h-0 flex-1 flex-col overflow-hidden">
+						<CollapsibleContent className="flex flex-col">
+							<SidebarGroupContent className="flex flex-col">
+								<SidebarMenu className="flex flex-col">
 									<SidebarMenuItem>
 										<SidebarMenuButton
 											render={<Link to="/dashboards" />}
@@ -374,12 +386,12 @@ export function AppSidebar() {
 												currentPath === "/dashboards/"
 											}
 										>
-											<GridIcon size={18} />
+											<GridSquareCirclePlusIcon size={18} />
 											<span>All Dashboards</span>
 										</SidebarMenuButton>
 									</SidebarMenuItem>
 									{!isLoading && dashboards.length > 0 && (
-										<SidebarMenuSub className="min-h-0 flex-1 overflow-y-auto">
+										<SidebarMenuSub className="max-h-40 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent_0,black_8px,black_calc(100%-8px),transparent_100%)]">
 											{favoriteDashboards.map((dashboard) => (
 												<SidebarMenuSubItem key={dashboard.id}>
 													<SidebarMenuSubButton

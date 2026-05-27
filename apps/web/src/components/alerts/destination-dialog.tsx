@@ -45,11 +45,15 @@ interface DestinationDialogProps {
 	onSave: () => void
 }
 
-function isFormReady(form: DestinationFormState): boolean {
+function isFormReady(form: DestinationFormState, isEditing: boolean): boolean {
 	if (form.name.trim().length === 0) return false
 	switch (form.type) {
 		case "hazel-oauth":
 			return form.hazelOrganizationId.trim().length > 0 && form.hazelChannelId.trim().length > 0
+		// On create the secret is required; when editing, a blank value keeps the
+		// stored one.
+		case "discord":
+			return isEditing || form.webhookUrl.trim().length > 0
 		default:
 			return true
 	}
@@ -195,6 +199,12 @@ function HazelOAuthFields({
 		)
 	const channelsLoading = orgIdForChannels.length > 0 && channelsResult.waiting
 
+	// Surface failures explicitly. Without these, an OAuth/API error renders
+	// identically to "not connected" / "no data", silently hiding the problem.
+	const statusFailed = Result.isFailure(statusResult)
+	const organizationsFailed = Result.isFailure(organizationsResult)
+	const channelsFailed = Result.isFailure(channelsResult)
+
 	useEffect(() => {
 		function onMessage(event: MessageEvent) {
 			if (event.data && event.data.type === "maple:integration:hazel") {
@@ -244,6 +254,12 @@ function HazelOAuthFields({
 	if (!status || !status.connected) {
 		return (
 			<div className="space-y-2 rounded-md border border-dashed border-border/60 p-3">
+				{statusFailed ? (
+					<p className="text-xs text-destructive">
+						Couldn't check your Hazel connection status. This may be a temporary issue — try
+						connecting again.
+					</p>
+				) : null}
 				<p className="text-xs text-muted-foreground">
 					Connect Maple to your Hazel account via OAuth. We'll fetch the organizations and channels
 					you can post into and provision a dedicated webhook for this destination.
@@ -305,7 +321,7 @@ function HazelOAuthFields({
 						}))
 					}}
 				>
-					<SelectTrigger id="destination-hazel-organization">
+					<SelectTrigger id="destination-hazel-organization" className="w-full">
 						{selectedOrgName ? (
 							<span className="flex items-center gap-2">
 								<HazelOrgAvatar logoUrl={selectedOrgLogoUrl} name={selectedOrgName} />
@@ -328,7 +344,11 @@ function HazelOAuthFields({
 						</SelectGroup>
 					</SelectContent>
 				</Select>
-				{organizations.length === 0 ? (
+				{organizationsFailed ? (
+					<p className="text-[11px] text-destructive">
+						Couldn't load your Hazel organizations. Try reconnecting or refreshing.
+					</p>
+				) : organizations.length === 0 ? (
 					<p className="text-[11px] text-muted-foreground">
 						No organizations returned. Make sure your Hazel account is a member of at least one
 						organization.
@@ -352,7 +372,7 @@ function HazelOAuthFields({
 					}}
 					disabled={orgIdForChannels.length === 0 || channelsLoading}
 				>
-					<SelectTrigger id="destination-hazel-channel">
+					<SelectTrigger id="destination-hazel-channel" className="w-full">
 						<SelectValue
 							placeholder={
 								orgIdForChannels.length === 0
@@ -375,7 +395,11 @@ function HazelOAuthFields({
 						</SelectGroup>
 					</SelectContent>
 				</Select>
-				{orgIdForChannels.length > 0 && !channelsLoading && channels.length === 0 ? (
+				{orgIdForChannels.length > 0 && !channelsLoading && channelsFailed ? (
+					<p className="text-[11px] text-destructive">
+						Couldn't load channels for this organization. Try reselecting the organization.
+					</p>
+				) : orgIdForChannels.length > 0 && !channelsLoading && channels.length === 0 ? (
 					<p className="text-[11px] text-muted-foreground">
 						No channels. Make sure your account is in at least one channel of this organization.
 					</p>
@@ -424,7 +448,7 @@ export function DestinationDialog({
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="space-y-5">
+				<div className="space-y-5 px-6">
 					{!isEditing && (
 						<div className="space-y-2">
 							<div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -527,6 +551,34 @@ export function DestinationDialog({
 										}
 										className="font-mono text-xs"
 									/>
+								</div>
+							)}
+
+							{form.type === "discord" && (
+								<div className="space-y-1.5">
+									<Label htmlFor="destination-discord-webhook" className="text-xs">
+										Discord webhook URL
+									</Label>
+									<Input
+										id="destination-discord-webhook"
+										value={form.webhookUrl}
+										onChange={(event) =>
+											onFormChange((current) => ({
+												...current,
+												webhookUrl: event.target.value,
+											}))
+										}
+										placeholder={
+											isEditing
+												? "Leave blank to keep current webhook"
+												: "https://discord.com/api/webhooks/..."
+										}
+										className="font-mono text-xs"
+									/>
+									<p className="text-[11px] text-muted-foreground">
+										In Discord: Channel settings → Integrations → Webhooks → New Webhook,
+										then copy the URL.
+									</p>
 								</div>
 							)}
 
@@ -666,7 +718,7 @@ export function DestinationDialog({
 					</Button>
 					<Button
 						onClick={onSave}
-						disabled={saving || !isFormReady(form)}
+						disabled={saving || !isFormReady(form, isEditing)}
 						style={{
 							background: provider.accent,
 							borderColor: provider.accent,

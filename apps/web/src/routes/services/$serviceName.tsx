@@ -13,22 +13,28 @@ import type {
 	ChartReferenceLine,
 	ChartTooltipMode,
 } from "@maple/ui/components/charts/_shared/chart-types"
+import { Tabs, TabsList, TabsTrigger } from "@maple/ui/components/ui/tabs"
 import {
 	getCustomChartServiceDetailResultAtom,
 	getServiceApdexTimeSeriesResultAtom,
 	getServiceReleasesTimelineResultAtom,
-} from "@/lib/services/atoms/tinybird-query-atoms"
+} from "@/lib/services/atoms/warehouse-query-atoms"
 import { detectReleaseMarkers } from "@/lib/services/release-markers"
 import { applyTimeRangeSearch } from "@/components/time-range-picker/search"
 import { PageRefreshProvider } from "@/components/time-range-picker/page-refresh-context"
 import { TimeRangeHeaderControls } from "@/components/time-range-picker/time-range-header-controls"
 import { Button } from "@maple/ui/components/ui/button"
 import { BellIcon } from "@/components/icons"
+import { ServiceDependenciesTab } from "@/components/services/service-dependencies-tab"
+
+const ServiceDetailTab = Schema.Literals(["overview", "dependencies"])
+type ServiceDetailTabValue = Schema.Schema.Type<typeof ServiceDetailTab>
 
 const serviceDetailSearchSchema = Schema.Struct({
 	startTime: Schema.optional(Schema.String),
 	endTime: Schema.optional(Schema.String),
 	timePreset: Schema.optional(Schema.String),
+	tab: Schema.optional(ServiceDetailTab),
 })
 
 export const Route = effectRoute(createFileRoute("/services/$serviceName"))({
@@ -113,6 +119,84 @@ function ServiceDetailContent() {
 		})
 	}
 
+	const activeTab: ServiceDetailTabValue = search.tab ?? "overview"
+	const handleTabChange = (value: unknown) => {
+		const next = value === "dependencies" ? "dependencies" : "overview"
+		navigate({
+			replace: true,
+			search: (prev: Record<string, unknown>) => ({
+				...prev,
+				tab: next === "overview" ? undefined : next,
+			}),
+		})
+	}
+
+	return (
+		<DashboardLayout
+			breadcrumbs={[{ label: "Services", href: "/services" }, { label: serviceName }]}
+			title={serviceName}
+			headerActions={
+				<div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+					{/* View switch lives inline with other page controls so it reads as a
+					    perspective toggle, not a navigation bar. Sized to match the time
+					    picker buttons (h-7) and tucked left of them so the visual order is:
+					    "what view → what window → what action". */}
+					<Tabs value={activeTab} onValueChange={handleTabChange}>
+						<TabsList variant="default" className="h-7 p-0.5 gap-0">
+							<TabsTrigger
+								value="overview"
+								className="h-6 px-2.5 text-xs sm:text-xs sm:h-6 font-medium"
+							>
+								Overview
+							</TabsTrigger>
+							<TabsTrigger
+								value="dependencies"
+								className="h-6 px-2.5 text-xs sm:text-xs sm:h-6 font-medium"
+							>
+								Dependencies
+							</TabsTrigger>
+						</TabsList>
+					</Tabs>
+					<TimeRangeHeaderControls
+						startTime={search.startTime}
+						endTime={search.endTime}
+						presetValue={search.timePreset ?? "12h"}
+						onTimeChange={handleTimeChange}
+					/>
+					<Button variant="outline" render={<Link to="/alerts/create" search={{ serviceName }} />}>
+						<BellIcon size={14} />
+						Create Alert
+					</Button>
+				</div>
+			}
+		>
+			{activeTab === "overview" ? (
+				<OverviewTab
+					serviceName={serviceName}
+					effectiveStartTime={effectiveStartTime}
+					effectiveEndTime={effectiveEndTime}
+				/>
+			) : (
+				<ServiceDependenciesTab
+					serviceName={serviceName}
+					startTime={search.startTime}
+					endTime={search.endTime}
+					timePreset={search.timePreset}
+					effectiveStartTime={effectiveStartTime}
+					effectiveEndTime={effectiveEndTime}
+				/>
+			)}
+		</DashboardLayout>
+	)
+}
+
+interface OverviewTabProps {
+	serviceName: string
+	effectiveStartTime: string
+	effectiveEndTime: string
+}
+
+function OverviewTab({ serviceName, effectiveStartTime, effectiveEndTime }: OverviewTabProps) {
 	const detailResult = useRetainedRefreshableResultValue(
 		getCustomChartServiceDetailResultAtom({
 			data: {
@@ -145,7 +229,7 @@ function ServiceDetailContent() {
 
 	const releaseMarkers: ChartReferenceLine[] = useMemo(() => {
 		const timeline = Result.builder(releasesResult)
-			.onSuccess((r) => r.data as Array<{ bucket: string; commitSha: string; count: number }>)
+			.onSuccess((r) => r.data)
 			.orElse(() => [])
 		return detectReleaseMarkers(timeline).map((m) => ({
 			x: m.bucket,
@@ -159,11 +243,14 @@ function ServiceDetailContent() {
 		(Result.isSuccess(detailResult) && detailResult.waiting) ||
 		(Result.isSuccess(apdexResult) && apdexResult.waiting)
 
-	const detailPoints = Result.builder(detailResult)
-		.onSuccess((response) => response.data as unknown as Record<string, unknown>[])
+	// ServiceDetail/Apdex points are typed structs; the chart grid consumes a
+	// generic `Record<string, unknown>[]`. Each point's fields are all primitive,
+	// so this is a safe widening (no `as unknown` round-trip needed).
+	const detailPoints: Record<string, unknown>[] = Result.builder(detailResult)
+		.onSuccess((response) => response.data.map((point) => ({ ...point })))
 		.orElse(() => [])
-	const apdexPoints = Result.builder(apdexResult)
-		.onSuccess((response) => response.data as unknown as Record<string, unknown>[])
+	const apdexPoints: Record<string, unknown>[] = Result.builder(apdexResult)
+		.onSuccess((response) => response.data.map((point) => ({ ...point })))
 		.orElse(() => [])
 
 	const widgetData: Record<string, Record<string, unknown>[]> = {
@@ -185,30 +272,5 @@ function ServiceDetailContent() {
 		referenceLines: releaseMarkers,
 	}))
 
-	return (
-		<DashboardLayout
-			breadcrumbs={[{ label: "Services", href: "/services" }, { label: serviceName }]}
-			title={serviceName}
-			headerActions={
-				<div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-					<TimeRangeHeaderControls
-						startTime={search.startTime}
-						endTime={search.endTime}
-						presetValue={search.timePreset ?? "12h"}
-						onTimeChange={handleTimeChange}
-					/>
-					<Button
-						variant="outline"
-						nativeButton={false}
-						render={<Link to="/alerts/create" search={{ serviceName }} />}
-					>
-						<BellIcon size={14} />
-						Create Alert
-					</Button>
-				</div>
-			}
-		>
-			<MetricsGrid items={metrics} waiting={!!isWaiting} syncId={`service-${serviceName}`} />
-		</DashboardLayout>
-	)
+	return <MetricsGrid items={metrics} waiting={!!isWaiting} syncId={`service-${serviceName}`} />
 }

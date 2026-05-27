@@ -3,7 +3,7 @@ import { formatTable, truncate } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { AlertsService } from "@/services/AlertsService"
 
 const comparatorLabel: Record<string, string> = {
@@ -33,6 +33,7 @@ export function registerListAlertIncidentsTool(server: McpToolRegistrar) {
 						new McpQueryError({
 							message: error.message,
 							pipe: "list_alert_incidents",
+							cause: error,
 						}),
 				),
 			)
@@ -54,6 +55,13 @@ export function registerListAlertIncidentsTool(server: McpToolRegistrar) {
 
 			const openCount = incidents.filter((i) => i.status === "open").length
 			const resolvedCount = incidents.filter((i) => i.status === "resolved").length
+
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				status: status ?? "all",
+				severity: severity ?? "all",
+				resultCount: incidents.length,
+			})
 
 			const lines: string[] = [
 				`## Alert Incidents`,

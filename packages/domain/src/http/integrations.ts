@@ -47,7 +47,7 @@ export class HazelChannelsListResponse extends Schema.Class<HazelChannelsListRes
 export class HazelStartConnectRequest extends Schema.Class<HazelStartConnectRequest>(
 	"HazelStartConnectRequest",
 )({
-	returnTo: Schema.optional(Schema.String),
+	returnTo: Schema.optionalKey(Schema.String),
 }) {}
 
 export class HazelStartConnectResponse extends Schema.Class<HazelStartConnectResponse>(
@@ -100,6 +100,7 @@ export class IntegrationsUpstreamError extends Schema.TaggedErrorClass<Integrati
 	{
 		message: Schema.String,
 		status: Schema.optional(Schema.Number),
+		cause: Schema.optionalKey(Schema.Defect),
 	},
 	{ httpApiStatus: 502 },
 ) {}
@@ -146,7 +147,7 @@ export class IntegrationsApiGroup extends HttpApiGroup.make("integrations")
 	.add(
 		HttpApiEndpoint.get("hazelChannels", "/hazel/organizations/:organizationId/channels", {
 			params: {
-				organizationId: Schema.String.pipe(Schema.check(Schema.isMinLength(1), Schema.isTrimmed())),
+				organizationId: Schema.String.check(Schema.isMinLength(1), Schema.isTrimmed()),
 			},
 			success: HazelChannelsListResponse,
 			error: [

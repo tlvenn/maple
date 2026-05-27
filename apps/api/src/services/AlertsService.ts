@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto"
 import {
 	CompiledAlertQueryPlan,
+	QueryEngineAlertReducer,
 	type QueryEngineNoDataBehavior,
 	type QueryEngineSampleCountStrategy,
 	QuerySpec,
 } from "@maple/query-engine"
 import * as CH from "@maple/query-engine/ch"
-import { resolveGroupBy } from "@maple/query-engine/query-builder"
+import { buildTimeseriesQuerySpec, resolveGroupBy } from "@maple/query-engine/query-builder"
 import {
-	buildAlertQueryFilterSet,
 	AlertComparator as AlertComparatorSchema,
 	AlertDeliveryError,
 	AlertDeliveryEventDocument,
@@ -35,14 +35,13 @@ import {
 	AlertMetricType as AlertMetricTypeSchema,
 	AlertNotFoundError,
 	AlertPersistenceError,
-	AlertQueryAggregation as AlertQueryAggregationSchema,
-	AlertQueryDataSource as AlertQueryDataSourceSchema,
 	AlertRuleDeleteResponse,
 	AlertRuleDocument,
 	AlertRulesListResponse,
 	AlertSeverity as AlertSeveritySchema,
 	AlertSignalType as AlertSignalTypeSchema,
 	AlertValidationError,
+	QueryBuilderQueryDraftSchema,
 	type AlertComparator,
 	AlertDestinationType as AlertDestinationTypeSchema,
 	type AlertDestinationCreateRequest,
@@ -51,9 +50,8 @@ import {
 	type AlertEventType as AlertEventTypeValue,
 	type AlertMetricAggregation as AlertMetricAggregationValue,
 	type AlertMetricType,
-	type AlertQueryAggregation,
-	type AlertQueryDataSource,
 	type AlertRuleUpsertRequest,
+	type QueryBuilderQueryDraftPayload,
 	type AlertSeverity,
 	type AlertSignalType,
 	type AlertGroupBy,
@@ -62,8 +60,8 @@ import {
 	type AlertDestinationId,
 	type AlertIncidentId,
 	QueryEngineExecutionError,
-	TinybirdQueryError,
-	TinybirdQuotaExceededError,
+	WarehouseQueryError,
+	WarehouseQuotaExceededError,
 	QueryEngineTimeoutError,
 	QueryEngineValidationError,
 	RoleName,
@@ -84,21 +82,23 @@ import {
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm"
 import {
 	Array as Arr,
+	Clock,
 	Effect,
 	HashSet,
 	Layer,
 	Match,
 	Metric,
 	Option,
+	Random,
 	Redacted,
 	Ref,
 	Schema,
 	Context,
 } from "effect"
-import * as AlertingMetrics from "./AlertingMetrics"
+import * as AlertingMetrics from "../lib/AlertingMetrics"
 import type { TenantContext } from "./AuthService"
-import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "./Crypto"
-import { Database, type DatabaseClient } from "./DatabaseLive"
+import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "../lib/Crypto"
+import { Database, type DatabaseClient } from "../lib/DatabaseLive"
 import {
 	buildAlertChatUrl,
 	dispatchDelivery as dispatchDeliveryImpl,
@@ -107,10 +107,10 @@ import {
 	formatEventTypeLabel,
 	formatSignalMetric,
 } from "./AlertDeliveryDispatch"
-import { Env } from "./Env"
+import { Env } from "../lib/Env"
 import { HazelOAuthService } from "./HazelOAuthService"
 import { QueryEngineService, type GroupedAlertObservation } from "./QueryEngineService"
-import { WarehouseQueryService } from "./WarehouseQueryService"
+import { WarehouseQueryService } from "../lib/WarehouseQueryService"
 import { validateExternalUrl } from "../lib/url-validator"
 import type { AlertChecksRow } from "@maple/domain/tinybird"
 import {
@@ -143,9 +143,9 @@ interface NormalizedRule {
 	readonly metricType: AlertMetricType | null
 	readonly metricAggregation: AlertMetricAggregationValue | null
 	readonly apdexThresholdMs: number | null
-	readonly queryDataSource: string | null
-	readonly queryAggregation: string | null
-	readonly queryWhereClause: string | null
+	readonly queryBuilderDraft: QueryBuilderQueryDraftPayload | null
+	readonly rawQuerySql: string | null
+	readonly rawQueryReducer: QueryEngineAlertReducer | null
 	readonly destinationIds: ReadonlyArray<AlertDestinationId>
 	readonly compiledPlan: Schema.Schema.Type<typeof CompiledAlertQueryPlan>
 	readonly createdAt: number
@@ -183,6 +183,7 @@ interface DispatchContext {
 	readonly value: number | null
 	readonly sampleCount: number | null
 	readonly linkUrl: string
+	readonly sentAtMs: number
 }
 
 interface DispatchResult {
@@ -208,6 +209,7 @@ interface DeliveryPayloadContext {
 	readonly value: number | null
 	readonly sampleCount: number | null
 	readonly linkUrl: string
+	readonly sentAtMs: number
 }
 
 interface DeliveryAttemptFailure {
@@ -228,27 +230,27 @@ type DatabaseExecutor = DatabaseClient | DatabaseTransaction
 /* -------------------------------------------------------------------------- */
 
 const StoredDeliveryPayloadSchema = Schema.Struct({
-	eventType: Schema.optional(Schema.String),
-	incidentId: Schema.optional(Schema.NullOr(Schema.String)),
-	incidentStatus: Schema.optional(Schema.String),
-	dedupeKey: Schema.optional(Schema.String),
-	rule: Schema.optional(
+	eventType: Schema.optionalKey(Schema.String),
+	incidentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+	incidentStatus: Schema.optionalKey(Schema.String),
+	dedupeKey: Schema.optionalKey(Schema.String),
+	rule: Schema.optionalKey(
 		Schema.Struct({
-			id: Schema.optional(Schema.String),
-			name: Schema.optional(Schema.String),
-			signalType: Schema.optional(Schema.String),
-			severity: Schema.optional(Schema.String),
-			groupKey: Schema.optional(Schema.NullOr(Schema.String)),
-			comparator: Schema.optional(Schema.String),
-			threshold: Schema.optional(Schema.Number),
-			thresholdUpper: Schema.optional(Schema.NullOr(Schema.Number)),
-			windowMinutes: Schema.optional(Schema.Number),
+			id: Schema.optionalKey(Schema.String),
+			name: Schema.optionalKey(Schema.String),
+			signalType: Schema.optionalKey(Schema.String),
+			severity: Schema.optionalKey(Schema.String),
+			groupKey: Schema.optionalKey(Schema.NullOr(Schema.String)),
+			comparator: Schema.optionalKey(Schema.String),
+			threshold: Schema.optionalKey(Schema.Number),
+			thresholdUpper: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+			windowMinutes: Schema.optionalKey(Schema.Number),
 		}),
 	),
-	observed: Schema.optional(
+	observed: Schema.optionalKey(
 		Schema.Struct({
-			value: Schema.optional(Schema.NullOr(Schema.Number)),
-			sampleCount: Schema.optional(Schema.NullOr(Schema.Number)),
+			value: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+			sampleCount: Schema.optionalKey(Schema.NullOr(Schema.Number)),
 		}),
 	),
 })
@@ -299,30 +301,36 @@ const resolveServiceLinkName = (
 	}
 	return null
 }
-const decodeAlertQueryDataSourceSync = Schema.decodeUnknownSync(AlertQueryDataSourceSchema)
-const decodeAlertQueryAggregationSync = Schema.decodeUnknownSync(AlertQueryAggregationSchema)
+const decodeQueryEngineAlertReducerSync = Schema.decodeUnknownSync(QueryEngineAlertReducer)
+const QueryBuilderDraftFromJson = Schema.fromJsonString(QueryBuilderQueryDraftSchema)
+
+/** Parse the stored query-builder draft JSON; returns null when absent/invalid. */
+const parseStoredQueryBuilderDraft = (raw: string | null): QueryBuilderQueryDraftPayload | null => {
+	if (raw == null) return null
+	return Option.getOrElse(Schema.decodeUnknownOption(QueryBuilderDraftFromJson)(raw), () => null)
+}
+
 type IsoDateTimeValue = Schema.Schema.Type<typeof AlertDestinationDocument.fields.createdAt>
 
 const adminRoles = [decodeRoleNameSync("root"), decodeRoleNameSync("org:admin")]
 
 export interface AlertRuntimeShape {
-	readonly now: () => number
+	/** Current wall-clock time in epoch ms, sourced from Effect's `Clock` so tests drive it via `TestClock`. */
+	readonly now: Effect.Effect<number>
 	readonly makeUuid: () => string
 	readonly fetch: typeof fetch
 	readonly deliveryTimeoutMs: () => number
 }
 
-export class AlertRuntime extends Context.Service<AlertRuntime, AlertRuntimeShape>()("AlertRuntime", {
+export class AlertRuntime extends Context.Service<AlertRuntime, AlertRuntimeShape>()("@maple/api/services/AlertRuntime", {
 	make: Effect.succeed({
-		now: () => Date.now(),
-		makeUuid: () => randomUUID(),
-		fetch: globalThis.fetch as typeof fetch,
-		deliveryTimeoutMs: () => DELIVERY_TIMEOUT_MS_DEFAULT,
-	}),
+			now: Clock.currentTimeMillis,
+			makeUuid: () => randomUUID(),
+			fetch: globalThis.fetch as typeof fetch,
+			deliveryTimeoutMs: () => DELIVERY_TIMEOUT_MS_DEFAULT,
+		} satisfies AlertRuntimeShape),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }
 
 const toIso = (value: number | null | undefined): IsoDateTimeValue | null =>
@@ -362,8 +370,11 @@ const makePersistenceError = (error: unknown) =>
 		message: error instanceof Error ? error.message : "Alert persistence failed",
 	})
 
-const makeValidationError = (message: string, details: ReadonlyArray<string> = []) =>
-	new AlertValidationError({ message, details })
+const makeValidationError = (
+	message: string,
+	details: ReadonlyArray<string> = [],
+	cause?: unknown,
+) => new AlertValidationError({ message, details, ...(cause === undefined ? {} : { cause }) })
 
 const makeDeliveryError = (message: string, destinationType?: AlertDestinationType) =>
 	new AlertDeliveryError({
@@ -423,19 +434,19 @@ const parsePublicConfig = (
 	row: AlertDestinationRow,
 ): Effect.Effect<DestinationPublicConfig, AlertValidationError> =>
 	Schema.decodeUnknownEffect(PublicConfigFromJson)(row.configJson).pipe(
-		Effect.mapError(() => makeValidationError("Stored destination config is invalid")),
+		Effect.mapError((cause) => makeValidationError("Stored destination config is invalid", [], cause)),
 	)
 
 const parseSecretConfig = (json: string): Effect.Effect<DestinationSecretConfig, AlertValidationError> =>
 	Schema.decodeUnknownEffect(SecretConfigFromJson)(json).pipe(
-		Effect.mapError(() => makeValidationError("Stored destination secret is invalid")),
+		Effect.mapError((cause) => makeValidationError("Stored destination secret is invalid", [], cause)),
 	)
 
 type StoredDeliveryPayloadType = Schema.Schema.Type<typeof StoredDeliveryPayloadSchema>
 
 const parseDeliveryPayload = (json: string): Effect.Effect<StoredDeliveryPayloadType, AlertValidationError> =>
 	Schema.decodeUnknownEffect(DeliveryPayloadFromJson)(json).pipe(
-		Effect.mapError(() => makeValidationError("Stored delivery payload is invalid")),
+		Effect.mapError((cause) => makeValidationError("Stored delivery payload is invalid", [], cause)),
 	)
 
 const summarizeWebhookUrl = (url: string) =>
@@ -472,6 +483,10 @@ const buildPublicConfig = (request: AlertDestinationCreateRequest): DestinationP
 				hazelChannelId: r.hazelChannelId,
 				hazelChannelName: r.hazelChannelName,
 			}),
+			discord: (r) => ({
+				summary: summarizeWebhookUrl(r.webhookUrl),
+				channelLabel: null,
+			}),
 		}),
 	)
 
@@ -503,6 +518,10 @@ const buildSecretConfig = (request: AlertDestinationCreateRequest): DestinationS
 					"Hazel-OAuth secret config must be built via the channel-webhook provisioning path",
 				)
 			},
+			discord: (r) => ({
+				type: "discord" as const,
+				webhookUrl: r.webhookUrl.trim(),
+			}),
 		}),
 	)
 
@@ -525,9 +544,9 @@ const compileRulePlan = (rule: {
 	readonly metricType: AlertMetricType | null
 	readonly metricAggregation: AlertMetricAggregationValue | null
 	readonly apdexThresholdMs: number | null
-	readonly queryDataSource: string | null
-	readonly queryAggregation: string | null
-	readonly queryWhereClause: string | null
+	readonly queryBuilderDraft: QueryBuilderQueryDraftPayload | null
+	readonly rawQuerySql: string | null
+	readonly rawQueryReducer: QueryEngineAlertReducer | null
 	readonly comparator: AlertComparator
 	readonly windowMinutes: number
 	readonly groupBy: AlertGroupBy | null
@@ -630,96 +649,101 @@ const compileRulePlan = (rule: {
 				filters,
 			})
 			sampleCountStrategy = "metric_data_points"
-		} else if (rule.signalType === "query") {
-			if (rule.queryDataSource == null || rule.queryAggregation == null) {
+		} else if (rule.signalType === "builder_query") {
+			// Reuse the exact compiler that dashboard query-builder charts use, so
+			// an alert and a chart built from the same draft evaluate identically.
+			if (rule.queryBuilderDraft == null) {
 				return yield* Effect.fail(
-					makeValidationError("query alerts require queryDataSource and queryAggregation"),
+					makeValidationError("builder_query alerts require a queryBuilderDraft"),
 				)
 			}
-			const filterSet = buildAlertQueryFilterSet({
-				queryDataSource: rule.queryDataSource as AlertQueryDataSource,
-				serviceName: rule.serviceName,
-				metricName: rule.metricName,
-				metricType: rule.metricType,
-				queryWhereClause: rule.queryWhereClause,
+			const built = buildTimeseriesQuerySpec(rule.queryBuilderDraft)
+			if (built.error != null || built.query == null) {
+				return yield* Effect.fail(
+					makeValidationError(built.error ?? "Failed to build query builder spec", [
+						...built.warnings,
+					]),
+				)
+			}
+			// Force the evaluation window's bucket size; the draft's stepInterval is
+			// a chart-rendering concern and irrelevant to threshold evaluation.
+			query = decodeQuerySpecSync({ ...built.query, bucketSeconds })
+			sampleCountStrategy =
+				rule.queryBuilderDraft.dataSource === "logs"
+					? "log_count"
+					: rule.queryBuilderDraft.dataSource === "metrics"
+						? "metric_data_points"
+						: "trace_count"
+		} else if (rule.signalType === "raw_query") {
+			const sql = rule.rawQuerySql?.trim() ?? ""
+			if (sql.length === 0) {
+				return yield* Effect.fail(makeValidationError("raw_query alerts require rawQuerySql"))
+			}
+			if (!sql.includes("$__orgFilter")) {
+				return yield* Effect.fail(
+					makeValidationError("raw_query SQL must reference $__orgFilter for org scoping"),
+				)
+			}
+			return new CompiledAlertQueryPlan({
+				kind: "raw_sql",
+				query: null,
+				rawSql: sql,
+				reducer: rule.rawQueryReducer ?? "identity",
+				sampleCountStrategy: null,
+				noDataBehavior,
 			})
-
-			if (filterSet == null) {
-				return yield* Effect.fail(
-					makeValidationError("metrics query alerts require metricName and metricType"),
-				)
-			}
-
-			if (filterSet.source === "traces") {
-				const groupResolved = yield* resolveRuleGroupBy("traces")
-				const filters: Record<string, unknown> = { ...filterSet.filters }
-				if (groupResolved && groupResolved.attributeKeys.length > 0) {
-					filters.groupByAttributeKeys = [...groupResolved.attributeKeys]
-				}
-				query = decodeQuerySpecSync({
-					kind: "timeseries",
-					source: "traces",
-					metric: rule.queryAggregation,
-					groupBy: groupResolved ? [...groupResolved.tokens] : ["none"],
-					bucketSeconds,
-					filters: Object.keys(filters).length > 0 ? filters : undefined,
-				})
-				sampleCountStrategy = "trace_count"
-			} else if (filterSet.source === "logs") {
-				const groupResolved = yield* resolveRuleGroupBy("logs")
-				query = decodeQuerySpecSync({
-					kind: "timeseries",
-					source: "logs",
-					metric: "count",
-					groupBy: groupResolved ? [...groupResolved.tokens] : ["none"],
-					bucketSeconds,
-					filters: filterSet.filters,
-				})
-				sampleCountStrategy = "log_count"
-			} else {
-				const groupResolved = yield* resolveRuleGroupBy("metrics")
-				const filters: Record<string, unknown> = { ...filterSet.filters }
-				if (groupResolved && groupResolved.attributeKeys.length > 0) {
-					filters.groupByAttributeKey = groupResolved.attributeKeys[0]
-				}
-				query = decodeQuerySpecSync({
-					kind: "timeseries",
-					source: "metrics",
-					metric: rule.queryAggregation,
-					groupBy: groupResolved ? [...groupResolved.tokens] : ["none"],
-					bucketSeconds,
-					filters,
-				})
-				sampleCountStrategy = "metric_data_points"
-			}
 		} else {
 			return yield* Effect.fail(makeValidationError(`Unsupported signal type: ${rule.signalType}`))
 		}
 
-		return yield* Schema.decodeUnknownEffect(CompiledAlertQueryPlan)({
+		return new CompiledAlertQueryPlan({
+			kind: "spec",
 			query,
+			rawSql: null,
 			reducer: "identity",
 			sampleCountStrategy,
 			noDataBehavior,
-		}).pipe(Effect.mapError(() => makeValidationError("Failed to compile alert rule plan")))
+		})
 	})
 
 const QuerySpecFromJson = Schema.fromJsonString(QuerySpec)
 
 const parseCompiledPlan = (
-	row: Pick<AlertRuleRow, "querySpecJson" | "reducer" | "sampleCountStrategy" | "noDataBehavior">,
-): Effect.Effect<Schema.Schema.Type<typeof CompiledAlertQueryPlan>, AlertValidationError> =>
-	Schema.decodeUnknownEffect(QuerySpecFromJson)(row.querySpecJson).pipe(
+	row: Pick<
+		AlertRuleRow,
+		"querySpecJson" | "rawQuerySql" | "reducer" | "sampleCountStrategy" | "noDataBehavior"
+	>,
+): Effect.Effect<Schema.Schema.Type<typeof CompiledAlertQueryPlan>, AlertValidationError> => {
+	if (row.rawQuerySql != null) {
+		return Schema.decodeUnknownEffect(CompiledAlertQueryPlan)({
+			kind: "raw_sql",
+			query: null,
+			rawSql: row.rawQuerySql,
+			reducer: row.reducer,
+			sampleCountStrategy: null,
+			noDataBehavior: row.noDataBehavior,
+		}).pipe(
+			Effect.mapError((cause) =>
+				makeValidationError("Stored compiled alert plan is invalid", [], cause),
+			),
+		)
+	}
+	return Schema.decodeUnknownEffect(QuerySpecFromJson)(row.querySpecJson ?? "").pipe(
 		Effect.flatMap((query) =>
 			Schema.decodeUnknownEffect(CompiledAlertQueryPlan)({
+				kind: "spec",
 				query,
+				rawSql: null,
 				reducer: row.reducer,
 				sampleCountStrategy: row.sampleCountStrategy,
 				noDataBehavior: row.noDataBehavior,
 			}),
 		),
-		Effect.mapError(() => makeValidationError("Stored compiled alert plan is invalid")),
+		Effect.mapError((cause) =>
+			makeValidationError("Stored compiled alert plan is invalid", [], cause),
+		),
 	)
+}
 
 const rowToDestinationDocument = (row: AlertDestinationRow, publicConfig: DestinationPublicConfig) =>
 	new AlertDestinationDocument({
@@ -741,11 +765,22 @@ const serviceNamesFromRow = (row: AlertRuleRow): ReadonlyArray<string> =>
 const excludeServiceNamesFromRow = (row: AlertRuleRow): ReadonlyArray<string> =>
 	row.excludeServiceNamesJson ? safeParseStringArray(row.excludeServiceNamesJson) : []
 
-const rowToRuleDocument = (row: AlertRuleRow, destinationIds: ReadonlyArray<string>) => {
+/** Most recent evaluation error for a rule, aggregated across its group states. */
+interface RuleEvaluationState {
+	readonly error: string | null
+	readonly evaluatedAt: number | null
+}
+
+const rowToRuleDocument = (
+	row: AlertRuleRow,
+	destinationIds: ReadonlyArray<string>,
+	evaluationState?: RuleEvaluationState,
+) => {
 	const serviceNames = serviceNamesFromRow(row)
 	return new AlertRuleDocument({
 		id: decodeAlertRuleIdSync(row.id),
 		name: row.name,
+		notes: row.notes ?? null,
 		enabled: row.enabled === 1,
 		severity: decodeAlertSeveritySync(row.severity),
 		serviceNames: [...serviceNames],
@@ -765,12 +800,16 @@ const rowToRuleDocument = (row: AlertRuleRow, destinationIds: ReadonlyArray<stri
 		metricAggregation:
 			row.metricAggregation != null ? decodeAlertMetricAggregationSync(row.metricAggregation) : null,
 		apdexThresholdMs: row.apdexThresholdMs,
-		queryDataSource:
-			row.queryDataSource != null ? decodeAlertQueryDataSourceSync(row.queryDataSource) : null,
-		queryAggregation:
-			row.queryAggregation != null ? decodeAlertQueryAggregationSync(row.queryAggregation) : null,
-		queryWhereClause: row.queryWhereClause ?? null,
+		queryBuilderDraft: parseStoredQueryBuilderDraft(row.queryBuilderDraftJson),
+		rawQuerySql: row.rawQuerySql ?? null,
+		rawQueryReducer:
+			row.signalType === "raw_query" ? decodeQueryEngineAlertReducerSync(row.reducer) : null,
 		destinationIds: destinationIds.map((id) => decodeAlertDestinationIdSync(id)),
+		lastEvaluationError: evaluationState?.error ?? null,
+		lastEvaluatedAt:
+			evaluationState?.evaluatedAt != null
+				? decodeIsoDateTimeStringSync(new Date(evaluationState.evaluatedAt).toISOString())
+				: null,
 		createdAt: decodeIsoDateTimeStringSync(new Date(row.createdAt).toISOString()),
 		updatedAt: decodeIsoDateTimeStringSync(new Date(row.updatedAt).toISOString()),
 		createdBy: row.createdBy,
@@ -888,8 +927,8 @@ export interface AlertsServiceShape {
 		| AlertPersistenceError
 		| AlertNotFoundError
 		| AlertDeliveryError
-		| TinybirdQueryError
-		| TinybirdQuotaExceededError
+		| WarehouseQueryError
+		| WarehouseQuotaExceededError
 	>
 	readonly listIncidents: (orgId: OrgId) => Effect.Effect<AlertIncidentsListResponse, AlertPersistenceError>
 	readonly listRuleChecks: (
@@ -914,12 +953,12 @@ export interface AlertsServiceShape {
 		},
 		AlertPersistenceError | AlertDeliveryError | AlertValidationError | AlertNotFoundError
 		// Note: warehouse tagged errors flow up from evaluateRule but are caught
-		// inside the per-rule Effect.catchAll in the scheduler tick, so the tick
+		// inside the per-rule Effect.catch in the scheduler tick, so the tick
 		// itself never surfaces them.
 	>
 }
 
-export class AlertsService extends Context.Service<AlertsService, AlertsServiceShape>()("AlertsService", {
+export class AlertsService extends Context.Service<AlertsService, AlertsServiceShape>()("@maple/api/services/AlertsService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
@@ -928,7 +967,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 		const runtime = yield* AlertRuntime
 		const hazelOAuth = yield* HazelOAuthService
 		const encryptionKey = yield* parseEncryptionKey(Redacted.value(env.MAPLE_INGEST_KEY_ENCRYPTION_KEY))
-		const now = () => runtime.now()
+		const now = runtime.now
 		const makeUuid = () => runtime.makeUuid()
 		const deliveryTimeoutMs = () => runtime.deliveryTimeoutMs()
 		const workerId = makeUuid()
@@ -1016,7 +1055,9 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			value: string,
 		): Effect.Effect<ReadonlyArray<AlertDestinationId>, AlertValidationError> =>
 			Schema.decodeUnknownEffect(DestinationIdArrayFromJson)(value).pipe(
-				Effect.mapError(() => makeValidationError("Stored rule destinations are invalid")),
+				Effect.mapError((cause) =>
+					makeValidationError("Stored rule destinations are invalid", [], cause),
+				),
 			)
 
 		const normalizeRuleRow = Effect.fn("AlertsService.normalizeRuleRow")(function* (
@@ -1048,12 +1089,10 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 						? decodeAlertMetricAggregationSync(row.metricAggregation)
 						: null,
 				apdexThresholdMs: row.apdexThresholdMs,
-				queryDataSource: row.queryDataSource ?? null,
-				queryAggregation:
-					row.queryAggregation != null
-						? decodeAlertQueryAggregationSync(row.queryAggregation)
-						: null,
-				queryWhereClause: row.queryWhereClause ?? null,
+				queryBuilderDraft: parseStoredQueryBuilderDraft(row.queryBuilderDraftJson),
+				rawQuerySql: row.rawQuerySql ?? null,
+				rawQueryReducer:
+					row.signalType === "raw_query" ? decodeQueryEngineAlertReducerSync(row.reducer) : null,
 				destinationIds: yield* parseDestinationIds(row.destinationIdsJson),
 				compiledPlan: yield* parseCompiledPlan(row),
 				createdAt: row.createdAt,
@@ -1101,22 +1140,25 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 					details.push("metricAggregation is required for metric alerts")
 				}
 			}
-			if (request.signalType === "query") {
-				if (!request.queryDataSource) details.push("queryDataSource is required for query alerts")
-				if (!request.queryAggregation) details.push("queryAggregation is required for query alerts")
-				if (request.queryDataSource === "metrics") {
-					if (!metricName) details.push("metricName is required for metrics query alerts")
-					if (!request.metricType) details.push("metricType is required for metrics query alerts")
+			if (request.signalType === "builder_query") {
+				if (!request.queryBuilderDraft) {
+					details.push("queryBuilderDraft is required for builder_query alerts")
 				}
 			}
-			const allowsMetricFields =
-				request.signalType === "metric" ||
-				(request.signalType === "query" && request.queryDataSource === "metrics")
+			if (request.signalType === "raw_query") {
+				const sql = request.rawQuerySql?.trim() ?? ""
+				if (sql.length === 0) {
+					details.push("rawQuerySql is required for raw_query alerts")
+				} else if (!sql.includes("$__orgFilter")) {
+					details.push("rawQuerySql must reference $__orgFilter for org scoping")
+				}
+			}
+			const allowsMetricFields = request.signalType === "metric"
 			if (!allowsMetricFields && request.metricType) {
-				details.push("metricType is only supported for metric or query alerts")
+				details.push("metricType is only supported for metric alerts")
 			}
 			if (!allowsMetricFields && metricName) {
-				details.push("metricName is only supported for metric or query alerts")
+				details.push("metricName is only supported for metric alerts")
 			}
 			if (request.signalType !== "metric" && request.metricAggregation) {
 				details.push("metricAggregation is only supported for metric alerts")
@@ -1136,6 +1178,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				return yield* Effect.fail(makeValidationError("Invalid alert rule", details))
 			}
 
+			const nowMs = yield* now
 			const normalizedBase = {
 				id: decodeAlertRuleIdSync(makeUuid()),
 				name,
@@ -1158,12 +1201,12 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				metricType: request.metricType ?? null,
 				metricAggregation: request.metricAggregation ?? null,
 				apdexThresholdMs: request.apdexThresholdMs ?? (request.signalType === "apdex" ? 500 : null),
-				queryDataSource: request.queryDataSource ?? null,
-				queryAggregation: request.queryAggregation ?? null,
-				queryWhereClause: request.queryWhereClause ?? null,
+				queryBuilderDraft: request.queryBuilderDraft ?? null,
+				rawQuerySql: normalizeOptionalString(request.rawQuerySql),
+				rawQueryReducer: request.rawQueryReducer ?? null,
 				destinationIds,
-				createdAt: now(),
-				updatedAt: now(),
+				createdAt: nowMs,
+				updatedAt: nowMs,
 			}
 			const compiledPlan = yield* compileRulePlan(normalizedBase)
 
@@ -1207,7 +1250,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 
 		// Collapse alert-domain semantic errors (validation/execution/timeout from
 		// the query engine layer) into AlertValidation/AlertDelivery, but let the
-		// Tinybird tagged errors (TinybirdQueryError + TinybirdQuotaExceededError)
+		// Tinybird tagged errors (WarehouseQueryError + WarehouseQuotaExceededError)
 		// propagate so the client receives the tag + structured fields
 		// (upstreamStatus, setting, pipe). formatBackendError on the frontend
 		// handles them.
@@ -1217,8 +1260,8 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				| QueryEngineValidationError
 				| QueryEngineExecutionError
 				| QueryEngineTimeoutError
-				| TinybirdQueryError
-				| TinybirdQuotaExceededError,
+				| WarehouseQueryError
+				| WarehouseQuotaExceededError,
 				R
 			>,
 		) =>
@@ -1247,20 +1290,39 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			ReadonlyArray<{ evaluation: EvaluatedRule; groupKey: string }>,
 			| AlertValidationError
 			| AlertDeliveryError
-			| TinybirdQueryError
-			| TinybirdQuotaExceededError
+			| WarehouseQueryError
+			| WarehouseQuotaExceededError
 		> {
-			const endMs = now()
+			const endMs = yield* now
 			const startMs = endMs - rule.windowMinutes * 60_000
-			const observations = yield* queryEngine
-				.evaluate(systemTenant(orgId), {
-					startTime: toTinybirdDateTime(startMs),
-					endTime: toTinybirdDateTime(endMs),
-					query: rule.compiledPlan.query,
-					reducer: rule.compiledPlan.reducer,
-					sampleCountStrategy: rule.compiledPlan.sampleCountStrategy,
-				})
-				.pipe(catchQueryEngineErrors)
+			const plan = rule.compiledPlan
+			let observations: ReadonlyArray<GroupedAlertObservation>
+			if (plan.kind === "raw_sql") {
+				observations = yield* queryEngine
+					.evaluateRawSql(systemTenant(orgId), {
+						startTime: toTinybirdDateTime(startMs),
+						endTime: toTinybirdDateTime(endMs),
+						sql: plan.rawSql ?? "",
+						reducer: plan.reducer,
+						windowMinutes: rule.windowMinutes,
+					})
+					.pipe(catchQueryEngineErrors)
+			} else {
+				if (plan.query == null || plan.sampleCountStrategy == null) {
+					return yield* Effect.fail(
+						makeValidationError("Compiled alert plan is missing its query spec"),
+					)
+				}
+				observations = yield* queryEngine
+					.evaluate(systemTenant(orgId), {
+						startTime: toTinybirdDateTime(startMs),
+						endTime: toTinybirdDateTime(endMs),
+						query: plan.query,
+						reducer: plan.reducer,
+						sampleCountStrategy: plan.sampleCountStrategy,
+					})
+					.pipe(catchQueryEngineErrors)
+			}
 
 			return observations.map((obs) => ({
 				evaluation: applyEvaluationLogic(rule, obs),
@@ -1409,7 +1471,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			destinationId: AlertDestinationId,
 			errorMessage: string | null,
 		) {
-			const timestamp = now()
+			const timestamp = yield* now
 			yield* dbExecute((db) =>
 				db
 					.update(alertDestinations)
@@ -1470,38 +1532,41 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			},
 			linkUrl: context.linkUrl,
 			chatUrl: buildAlertChatUrl(env.MAPLE_APP_BASE_URL, context),
-			sentAt: new Date(now()).toISOString(),
+			sentAt: new Date(context.sentAtMs).toISOString(),
 		})
 
-		const toDeliveryAttemptFailure = (error: unknown): DeliveryAttemptFailure => {
-			if (error instanceof AlertValidationError) {
-				return {
-					message: error.message,
-					kind: "payload",
-					retryable: false,
-				}
-			}
-
-			if (error instanceof AlertDeliveryError) {
-				return {
-					message: error.message,
-					kind: error.message.includes("timed out") ? "timeout" : "transport",
-					retryable: true,
-				}
-			}
-
-			if (error instanceof AlertNotFoundError) {
-				return {
-					message: error.message,
-					kind: "destination",
-					retryable: false,
-				}
-			}
-
-			return {
-				message: error instanceof Error ? error.message : "Delivery failed",
-				kind: "unknown",
-				retryable: false,
+		const toDeliveryAttemptFailure = (
+			error:
+				| AlertValidationError
+				| AlertDeliveryError
+				| AlertNotFoundError
+				| AlertPersistenceError,
+		): DeliveryAttemptFailure => {
+			switch (error._tag) {
+				case "@maple/http/errors/AlertValidationError":
+					return {
+						message: error.message,
+						kind: "payload",
+						retryable: false,
+					}
+				case "@maple/http/errors/AlertDeliveryError":
+					return {
+						message: error.message,
+						kind: error.message.includes("timed out") ? "timeout" : "transport",
+						retryable: true,
+					}
+				case "@maple/http/errors/AlertNotFoundError":
+					return {
+						message: error.message,
+						kind: "destination",
+						retryable: false,
+					}
+				default:
+					return {
+						message: error.message,
+						kind: "unknown",
+						retryable: false,
+					}
 			}
 		}
 
@@ -1565,6 +1630,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 						value: evaluation.value,
 						sampleCount: evaluation.sampleCount,
 						linkUrl: resolveNotificationLinkUrl(rule, incident.groupKey),
+						sentAtMs: scheduledAt,
 					})
 
 					for (const destinationId of rule.destinationIds) {
@@ -1587,11 +1653,15 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				})
 		}
 
-		const computeRetryDelayMs = (attemptNumber: number) => {
+		// Exponential backoff up to 15 min, plus 0–999 ms jitter sourced from
+		// Effect's `Random` service so tests can fix the seed deterministically.
+		const computeRetryDelayMs = Effect.fn("AlertsService.computeRetryDelayMs")(function* (
+			attemptNumber: number,
+		) {
 			const base = Math.min(60_000 * Math.pow(2, attemptNumber - 1), 15 * 60_000)
-			const jitter = Math.floor(Math.random() * 1_000)
+			const jitter = yield* Random.nextIntBetween(0, 1_000)
 			return base + jitter
-		}
+		})
 
 		const listDestinations = Effect.fn("AlertsService.listDestinations")(function* (orgId: OrgId) {
 			const rows = yield* dbExecute((db) =>
@@ -1622,6 +1692,8 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				yield* validateDestinationUrl(request.url, "url")
 			} else if (request.type === "hazel") {
 				yield* validateDestinationUrl(request.webhookUrl, "webhookUrl")
+			} else if (request.type === "discord") {
+				yield* validateDestinationUrl(request.webhookUrl, "webhookUrl")
 			}
 			const destinationId = makeUuid()
 			const publicConfig = buildPublicConfig(request)
@@ -1651,7 +1723,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 							)
 					: buildSecretConfig(request)
 			const encryptedSecret = yield* encryptSecret(JSON.stringify(secretConfig), encryptionKey)
-			const timestamp = now()
+			const timestamp = yield* now
 
 			const row = {
 				id: destinationId,
@@ -1690,8 +1762,6 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			}
 
 			const hydrated = yield* hydrateDestination(existing)
-			let nextPublicConfig = hydrated.publicConfig
-			let nextSecretConfig = hydrated.secretConfig
 
 			// Validate any URL the request supplies before we persist it. Each
 			// branch only validates when the field is non-empty so the existing
@@ -1702,151 +1772,187 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				yield* validateDestinationUrl(request.url, "url")
 			} else if (request.type === "hazel" && request.webhookUrl != null && request.webhookUrl.trim().length > 0) {
 				yield* validateDestinationUrl(request.webhookUrl, "webhookUrl")
+			} else if (
+				request.type === "discord" &&
+				request.webhookUrl != null &&
+				request.webhookUrl.trim().length > 0
+			) {
+				yield* validateDestinationUrl(request.webhookUrl, "webhookUrl")
 			}
 
-			switch (request.type) {
-				case "slack":
-					nextPublicConfig = {
-						summary:
-							normalizeOptionalString(request.channelLabel) ?? hydrated.publicConfig.summary,
-						channelLabel:
-							normalizeOptionalString(request.channelLabel) ??
-							hydrated.publicConfig.channelLabel,
-					}
-					nextSecretConfig = {
-						type: "slack",
-						webhookUrl:
-							normalizeOptionalString(request.webhookUrl) ??
-							(hydrated.secretConfig.type === "slack" ? hydrated.secretConfig.webhookUrl : ""),
-					}
-					break
-				case "pagerduty":
-					nextPublicConfig = hydrated.publicConfig
-					nextSecretConfig = {
-						type: "pagerduty",
-						integrationKey:
-							normalizeOptionalString(request.integrationKey) ??
-							(hydrated.secretConfig.type === "pagerduty"
-								? hydrated.secretConfig.integrationKey
-								: ""),
-					}
-					break
-				case "webhook":
-					nextPublicConfig = {
-						summary:
-							request.url != null && request.url.trim().length > 0
-								? summarizeWebhookUrl(request.url)
-								: hydrated.publicConfig.summary,
-						channelLabel: null,
-					}
-					nextSecretConfig = {
-						type: "webhook",
-						url:
-							normalizeOptionalString(request.url) ??
-							(hydrated.secretConfig.type === "webhook" ? hydrated.secretConfig.url : ""),
-						signingSecret:
-							request.signingSecret === undefined
-								? hydrated.secretConfig.type === "webhook"
-									? hydrated.secretConfig.signingSecret
-									: null
-								: normalizeOptionalString(request.signingSecret),
-					}
-					break
-				case "hazel":
-					nextPublicConfig = {
-						summary:
-							request.webhookUrl != null && request.webhookUrl.trim().length > 0
-								? summarizeWebhookUrl(request.webhookUrl)
-								: hydrated.publicConfig.summary,
-						channelLabel: null,
-					}
-					nextSecretConfig = {
-						type: "hazel",
-						webhookUrl:
-							normalizeOptionalString(request.webhookUrl) ??
-							(hydrated.secretConfig.type === "hazel" ? hydrated.secretConfig.webhookUrl : ""),
-						signingSecret:
-							request.signingSecret === undefined
-								? hydrated.secretConfig.type === "hazel"
-									? hydrated.secretConfig.signingSecret
-									: null
-								: normalizeOptionalString(request.signingSecret),
-					}
-					break
-				case "hazel-oauth": {
-					const previousSecret =
-						hydrated.secretConfig.type === "hazel-oauth" ? hydrated.secretConfig : null
-					const nextOrganizationId =
-						normalizeOptionalString(request.hazelOrganizationId) ??
-						previousSecret?.hazelOrganizationId ??
-						""
-					const nextOrganizationName =
-						normalizeOptionalString(request.hazelOrganizationName) ??
-						previousSecret?.hazelOrganizationName ??
-						""
-					const requestLogoUrl = request.hazelOrganizationLogoUrl
-					const nextOrganizationLogoUrl =
-						requestLogoUrl === undefined
-							? (hydrated.publicConfig.hazelOrganizationLogoUrl ?? null)
-							: requestLogoUrl
-					const nextChannelId =
-						normalizeOptionalString(request.hazelChannelId) ??
-						previousSecret?.hazelChannelId ??
-						""
-					const nextChannelName =
-						normalizeOptionalString(request.hazelChannelName) ??
-						previousSecret?.hazelChannelName ??
-						""
-					const nextName = normalizeOptionalString(request.name) ?? existing.name
-					const channelChanged =
-						previousSecret == null || previousSecret.hazelChannelId !== nextChannelId
+			const { nextPublicConfig, nextSecretConfig } = yield* Match.value(request).pipe(
+				Match.discriminatorsExhaustive("type")({
+					slack: (r) =>
+						Effect.succeed({
+							nextPublicConfig: {
+								summary:
+									normalizeOptionalString(r.channelLabel) ?? hydrated.publicConfig.summary,
+								channelLabel:
+									normalizeOptionalString(r.channelLabel) ??
+									hydrated.publicConfig.channelLabel,
+							} satisfies DestinationPublicConfig,
+							nextSecretConfig: {
+								type: "slack" as const,
+								webhookUrl:
+									normalizeOptionalString(r.webhookUrl) ??
+									(hydrated.secretConfig.type === "slack"
+										? hydrated.secretConfig.webhookUrl
+										: ""),
+							} satisfies DestinationSecretConfig,
+						}),
+					pagerduty: (r) =>
+						Effect.succeed({
+							nextPublicConfig: hydrated.publicConfig,
+							nextSecretConfig: {
+								type: "pagerduty" as const,
+								integrationKey:
+									normalizeOptionalString(r.integrationKey) ??
+									(hydrated.secretConfig.type === "pagerduty"
+										? hydrated.secretConfig.integrationKey
+										: ""),
+							} satisfies DestinationSecretConfig,
+						}),
+					webhook: (r) =>
+						Effect.succeed({
+							nextPublicConfig: {
+								summary:
+									r.url != null && r.url.trim().length > 0
+										? summarizeWebhookUrl(r.url)
+										: hydrated.publicConfig.summary,
+								channelLabel: null,
+							} satisfies DestinationPublicConfig,
+							nextSecretConfig: {
+								type: "webhook" as const,
+								url:
+									normalizeOptionalString(r.url) ??
+									(hydrated.secretConfig.type === "webhook" ? hydrated.secretConfig.url : ""),
+								signingSecret:
+									r.signingSecret === undefined
+										? hydrated.secretConfig.type === "webhook"
+											? hydrated.secretConfig.signingSecret
+											: null
+										: normalizeOptionalString(r.signingSecret),
+							} satisfies DestinationSecretConfig,
+						}),
+					hazel: (r) =>
+						Effect.succeed({
+							nextPublicConfig: {
+								summary:
+									r.webhookUrl != null && r.webhookUrl.trim().length > 0
+										? summarizeWebhookUrl(r.webhookUrl)
+										: hydrated.publicConfig.summary,
+								channelLabel: null,
+							} satisfies DestinationPublicConfig,
+							nextSecretConfig: {
+								type: "hazel" as const,
+								webhookUrl:
+									normalizeOptionalString(r.webhookUrl) ??
+									(hydrated.secretConfig.type === "hazel"
+										? hydrated.secretConfig.webhookUrl
+										: ""),
+								signingSecret:
+									r.signingSecret === undefined
+										? hydrated.secretConfig.type === "hazel"
+											? hydrated.secretConfig.signingSecret
+											: null
+										: normalizeOptionalString(r.signingSecret),
+							} satisfies DestinationSecretConfig,
+						}),
+					"hazel-oauth": (r) =>
+						Effect.gen(function* () {
+							const previousSecret =
+								hydrated.secretConfig.type === "hazel-oauth" ? hydrated.secretConfig : null
+							const nextOrganizationId =
+								normalizeOptionalString(r.hazelOrganizationId) ??
+								previousSecret?.hazelOrganizationId ??
+								""
+							const nextOrganizationName =
+								normalizeOptionalString(r.hazelOrganizationName) ??
+								previousSecret?.hazelOrganizationName ??
+								""
+							const requestLogoUrl = r.hazelOrganizationLogoUrl
+							const nextOrganizationLogoUrl =
+								requestLogoUrl === undefined
+									? (hydrated.publicConfig.hazelOrganizationLogoUrl ?? null)
+									: requestLogoUrl
+							const nextChannelId =
+								normalizeOptionalString(r.hazelChannelId) ??
+								previousSecret?.hazelChannelId ??
+								""
+							const nextChannelName =
+								normalizeOptionalString(r.hazelChannelName) ??
+								previousSecret?.hazelChannelName ??
+								""
+							const nextName = normalizeOptionalString(r.name) ?? existing.name
+							const channelChanged =
+								previousSecret == null || previousSecret.hazelChannelId !== nextChannelId
 
-					// TODO: when Hazel exposes DELETE /api/v1/channel-webhooks/:id,
-					// revoke the old webhook here on channel change.
-					const provisioned = channelChanged
-						? yield* hazelOAuth
-								.createChannelWebhook(orgId, {
-									channelId: nextChannelId,
-									name: nextName,
-								})
-								.pipe(
-									Effect.mapError((error) =>
-										makeValidationError(
-											`Could not provision Hazel channel webhook: ${error.message}`,
-										),
-									),
-								)
-						: null
+							// TODO: when Hazel exposes DELETE /api/v1/channel-webhooks/:id,
+							// revoke the old webhook here on channel change.
+							const provisioned = channelChanged
+								? yield* hazelOAuth
+										.createChannelWebhook(orgId, {
+											channelId: nextChannelId,
+											name: nextName,
+										})
+										.pipe(
+											Effect.mapError((error) =>
+												makeValidationError(
+													`Could not provision Hazel channel webhook: ${error.message}`,
+												),
+											),
+										)
+								: null
 
-					const webhookId = provisioned?.id ?? previousSecret!.webhookId
-					const webhookUrl = provisioned?.webhookUrl ?? previousSecret!.webhookUrl
-					const webhookToken = provisioned?.token ?? previousSecret!.webhookToken
+							const webhookId = provisioned?.id ?? previousSecret!.webhookId
+							const webhookUrl = provisioned?.webhookUrl ?? previousSecret!.webhookUrl
+							const webhookToken = provisioned?.token ?? previousSecret!.webhookToken
 
-					nextPublicConfig = {
-						summary: `${nextOrganizationName} · #${nextChannelName}`,
-						channelLabel: `#${nextChannelName}`,
-						hazelOrganizationId: nextOrganizationId,
-						hazelOrganizationName: nextOrganizationName,
-						hazelOrganizationLogoUrl: nextOrganizationLogoUrl,
-						hazelChannelId: nextChannelId,
-						hazelChannelName: nextChannelName,
-					}
-					nextSecretConfig = {
-						type: "hazel-oauth",
-						hazelOrganizationId: nextOrganizationId,
-						hazelOrganizationName: nextOrganizationName,
-						hazelChannelId: nextChannelId,
-						hazelChannelName: nextChannelName,
-						webhookId,
-						webhookUrl,
-						webhookToken,
-					}
-					break
-				}
-			}
+							return {
+								nextPublicConfig: {
+									summary: `${nextOrganizationName} · #${nextChannelName}`,
+									channelLabel: `#${nextChannelName}`,
+									hazelOrganizationId: nextOrganizationId,
+									hazelOrganizationName: nextOrganizationName,
+									hazelOrganizationLogoUrl: nextOrganizationLogoUrl,
+									hazelChannelId: nextChannelId,
+									hazelChannelName: nextChannelName,
+								} satisfies DestinationPublicConfig,
+								nextSecretConfig: {
+									type: "hazel-oauth" as const,
+									hazelOrganizationId: nextOrganizationId,
+									hazelOrganizationName: nextOrganizationName,
+									hazelChannelId: nextChannelId,
+									hazelChannelName: nextChannelName,
+									webhookId,
+									webhookUrl,
+									webhookToken,
+								} satisfies DestinationSecretConfig,
+							}
+						}),
+					discord: (r) =>
+						Effect.succeed({
+							nextPublicConfig: {
+								summary:
+									r.webhookUrl != null && r.webhookUrl.trim().length > 0
+										? summarizeWebhookUrl(r.webhookUrl)
+										: hydrated.publicConfig.summary,
+								channelLabel: null,
+							} satisfies DestinationPublicConfig,
+							nextSecretConfig: {
+								type: "discord" as const,
+								webhookUrl:
+									normalizeOptionalString(r.webhookUrl) ??
+									(hydrated.secretConfig.type === "discord"
+										? hydrated.secretConfig.webhookUrl
+										: ""),
+							} satisfies DestinationSecretConfig,
+						}),
+				}),
+			)
 
 			const encryptedSecret = yield* encryptSecret(JSON.stringify(nextSecretConfig), encryptionKey)
-			const timestamp = now()
+			const timestamp = yield* now
 			const nextName = normalizeOptionalString(request.name) ?? existing.name
 			const nextEnabled = request.enabled === undefined ? existing.enabled : request.enabled ? 1 : 0
 
@@ -1953,6 +2059,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				value: 0,
 				sampleCount: 0,
 				linkUrl: composeLinkUrl(null),
+				sentAtMs: yield* now,
 			}).pipe(
 				Effect.tapError((error) => {
 					const message =
@@ -1989,10 +2096,11 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			const normalized = yield* normalizeRule(request)
 			yield* requireDestinationIds(orgId, normalized.destinationIds)
 			const ruleId = existingId ?? normalized.id
-			const timestamp = now()
+			const timestamp = yield* now
 
 			const ruleFields = {
 				name: normalized.name,
+				notes: normalizeOptionalString(request.notes),
 				enabled: normalized.enabled ? 1 : 0,
 				severity: normalized.severity,
 				serviceNamesJson:
@@ -2015,11 +2123,16 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				metricType: normalized.metricType,
 				metricAggregation: normalized.metricAggregation,
 				apdexThresholdMs: normalized.apdexThresholdMs,
-				queryDataSource: normalized.queryDataSource,
-				queryAggregation: normalized.queryAggregation,
-				queryWhereClause: normalized.queryWhereClause,
+				queryBuilderDraftJson:
+					normalized.queryBuilderDraft != null
+						? JSON.stringify(normalized.queryBuilderDraft)
+						: null,
+				rawQuerySql: normalized.rawQuerySql,
 				destinationIdsJson: JSON.stringify(normalized.destinationIds),
-				querySpecJson: JSON.stringify(normalized.compiledPlan.query),
+				querySpecJson:
+					normalized.compiledPlan.query != null
+						? JSON.stringify(normalized.compiledPlan.query)
+						: null,
 				reducer: normalized.compiledPlan.reducer,
 				sampleCountStrategy: normalized.compiledPlan.sampleCountStrategy,
 				noDataBehavior: normalized.compiledPlan.noDataBehavior,
@@ -2060,8 +2173,33 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 					.orderBy(desc(alertRules.updatedAt)),
 			)
 
+			// Surface the most recent evaluation error per rule. `lastError` is
+			// cleared to null on a healthy evaluation, so a non-null value means
+			// that group is currently failing; pick the freshest one.
+			const stateRows = yield* dbExecute((db) =>
+				db
+					.select({
+						ruleId: alertRuleStates.ruleId,
+						lastError: alertRuleStates.lastError,
+						lastEvaluatedAt: alertRuleStates.lastEvaluatedAt,
+					})
+					.from(alertRuleStates)
+					.where(eq(alertRuleStates.orgId, orgId)),
+			)
+			const errorByRule = new Map<string, RuleEvaluationState>()
+			for (const state of stateRows) {
+				if (state.lastError == null) continue
+				const existing = errorByRule.get(state.ruleId)
+				if (existing == null || (state.lastEvaluatedAt ?? 0) > (existing.evaluatedAt ?? 0)) {
+					errorByRule.set(state.ruleId, {
+						error: state.lastError,
+						evaluatedAt: state.lastEvaluatedAt,
+					})
+				}
+			}
+
 			const rules = rows.map((row) =>
-				rowToRuleDocument(row, safeParseStringArray(row.destinationIdsJson)),
+				rowToRuleDocument(row, safeParseStringArray(row.destinationIdsJson), errorByRule.get(row.id)),
 			)
 
 			return new AlertRulesListResponse({ rules })
@@ -2233,6 +2371,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 							d.row != null && d.row.enabled === 1,
 					)
 
+				const sentAtMs = yield* now
 				yield* Effect.forEach(
 					enabledDestinations,
 					({ id: destinationId, row: destination }) =>
@@ -2254,6 +2393,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 							value: evaluation.value,
 							sampleCount: evaluation.sampleCount,
 							linkUrl: resolveNotificationLinkUrl(normalized, null),
+							sentAtMs,
 						}),
 					{ concurrency: "unbounded" },
 				)
@@ -2519,7 +2659,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			})
 
 		const processQueuedDeliveries = Effect.fn("AlertsService.processQueuedDeliveries")(function* () {
-			const currentTime = now()
+			const currentTime = yield* now
 			const rows = yield* dbExecute((db) =>
 				db
 					.select()
@@ -2614,7 +2754,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				const groupKey = incidentRow?.groupKey ?? payloadRule?.groupKey ?? null
 
 				const enrichedSecret = yield* enrichSecretForDispatch(hydrated.row, hydrated.secretConfig)
-				const deliveryStart = now()
+				const deliveryStart = yield* now
 				const result = yield* dispatchDelivery(
 					{
 						deliveryKey: row.deliveryKey,
@@ -2647,10 +2787,11 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 							{ serviceNames: ruleServiceNames, groupBy: ruleGroupBy },
 							groupKey,
 						),
+						sentAtMs: deliveryStart,
 					},
 					row.payloadJson,
 				)
-				yield* Metric.update(AlertingMetrics.deliveryAttemptDurationMs, now() - deliveryStart)
+				yield* Metric.update(AlertingMetrics.deliveryAttemptDurationMs, (yield* now) - deliveryStart)
 				yield* Metric.update(AlertingMetrics.deliveriesSucceededTotal, 1)
 
 				yield* finalizeClaimedDelivery(row.id, currentTime, {
@@ -2686,55 +2827,65 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				)
 			})
 
-			for (const row of rows) {
-				yield* processOneDelivery(row).pipe(
-					Effect.catch((error) => {
-						const failure = toDeliveryAttemptFailure(error)
-						failureCount += 1
-						return Effect.gen(function* () {
-							yield* Metric.update(AlertingMetrics.deliveriesFailedTotal, 1)
-							yield* finalizeClaimedDelivery(row.id, currentTime, {
-								status: "failed",
-								attemptedAt: currentTime,
-								errorMessage: failure.message,
-							})
+			const recoverDeliveryFailure = Effect.fnUntraced(function* (
+				row: AlertDeliveryEventRow,
+				error: AlertValidationError | AlertDeliveryError | AlertPersistenceError,
+			) {
+				const failure = toDeliveryAttemptFailure(error)
+				failureCount += 1
+				yield* Metric.update(AlertingMetrics.deliveriesFailedTotal, 1)
+				yield* finalizeClaimedDelivery(row.id, currentTime, {
+					status: "failed",
+					attemptedAt: currentTime,
+					errorMessage: failure.message,
+				})
 
-							if (failure.retryable && row.attemptNumber < MAX_DELIVERY_ATTEMPTS) {
-								// Carry the original delivery payload through the retry. Empty
-								// payloads here would force the next attempt to fall back on
-								// rule-row defaults, losing observed value, sample count,
-								// dedupe context, and links.
-								const retryPayload = (yield* parseDeliveryPayload(row.payloadJson).pipe(
-									Effect.orElseSucceed(() => ({})),
-								)) as Record<string, unknown>
-								yield* insertDeliveryEvent(
-									row.orgId as OrgId,
-									row.incidentId ? decodeAlertIncidentIdSync(row.incidentId) : null,
-									decodeAlertRuleIdSync(row.ruleId),
-									decodeAlertDestinationIdSync(row.destinationId),
-									decodeAlertEventTypeSync(row.eventType),
-									retryPayload,
-									currentTime + computeRetryDelayMs(row.attemptNumber),
-									row.deliveryKey,
-									row.attemptNumber + 1,
-								)
-							}
+				if (failure.retryable && row.attemptNumber < MAX_DELIVERY_ATTEMPTS) {
+					// Carry the original delivery payload through the retry. Empty
+					// payloads here would force the next attempt to fall back on
+					// rule-row defaults, losing observed value, sample count,
+					// dedupe context, and links.
+					const retryPayload = (yield* parseDeliveryPayload(row.payloadJson).pipe(
+						Effect.orElseSucceed(() => ({})),
+					)) as Record<string, unknown>
+					yield* insertDeliveryEvent(
+						row.orgId as OrgId,
+						row.incidentId ? decodeAlertIncidentIdSync(row.incidentId) : null,
+						decodeAlertRuleIdSync(row.ruleId),
+						decodeAlertDestinationIdSync(row.destinationId),
+						decodeAlertEventTypeSync(row.eventType),
+						retryPayload,
+						currentTime + (yield* computeRetryDelayMs(row.attemptNumber)),
+						row.deliveryKey,
+						row.attemptNumber + 1,
+					)
+				}
 
-							yield* Effect.logWarning("Alert delivery attempt failed").pipe(
-								Effect.annotateLogs({
-									workerId,
-									deliveryKey: row.deliveryKey,
-									attemptNumber: row.attemptNumber,
-									destinationId: row.destinationId,
-									failureKind: failure.kind,
-									errorMessage: failure.message,
-									willRetry: failure.retryable && row.attemptNumber < MAX_DELIVERY_ATTEMPTS,
-								}),
-							)
-						})
+				yield* Effect.logWarning("Alert delivery attempt failed").pipe(
+					Effect.annotateLogs({
+						workerId,
+						deliveryKey: row.deliveryKey,
+						attemptNumber: row.attemptNumber,
+						destinationId: row.destinationId,
+						failureKind: failure.kind,
+						errorMessage: failure.message,
+						willRetry: failure.retryable && row.attemptNumber < MAX_DELIVERY_ATTEMPTS,
 					}),
 				)
-			}
+			})
+
+			yield* Effect.forEach(rows, (row) =>
+				processOneDelivery(row).pipe(
+					Effect.catchTags({
+						"@maple/http/errors/AlertValidationError": (error) =>
+							recoverDeliveryFailure(row, error),
+						"@maple/http/errors/AlertDeliveryError": (error) =>
+							recoverDeliveryFailure(row, error),
+						"@maple/http/errors/AlertPersistenceError": (error) =>
+							recoverDeliveryFailure(row, error),
+					}),
+				),
+			)
 
 			return {
 				processedCount,
@@ -3001,6 +3152,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				const pad = (n: number, w = 2) => n.toString().padStart(w, "0")
 				return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`
 			}
+			const evaluationEndMs = yield* now
 			const checkRow: AlertChecksRow = {
 				OrgId: row.orgId,
 				RuleId: row.id,
@@ -3019,7 +3171,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				ConsecutiveHealthy: capturedConsecutiveHealthy,
 				IncidentId: capturedIncidentId,
 				IncidentTransition: capturedTransition,
-				EvaluationDurationMs: Math.max(0, now() - timestamp),
+				EvaluationDurationMs: Math.max(0, evaluationEndMs - timestamp),
 			}
 			// Buffer instead of POSTing per-evaluation; the scheduler tick flushes
 			// all rows once at the end (one POST per orgId). Awaited flush keeps
@@ -3112,7 +3264,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 
 			if (toResolve.length === 0) return
 
-			const timestamp = now()
+			const timestamp = yield* now
 			const syntheticEvaluation = makeSyntheticResolveEvaluation(
 				normalized,
 				"Auto-resolved: rule configuration changed",
@@ -3259,19 +3411,16 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 					),
 			)
 
-		const recordEvaluationStatus = (evaluation: EvaluatedRule) => {
-			switch (evaluation.status) {
-				case "breached":
-					return Metric.update(AlertingMetrics.rulesBreachedTotal, 1)
-				case "healthy":
-					return Metric.update(AlertingMetrics.rulesHealthyTotal, 1)
-				case "skipped":
-					return Metric.update(AlertingMetrics.rulesSkippedTotal, 1)
-			}
-		}
+		const recordEvaluationStatus = (evaluation: EvaluatedRule) =>
+			Match.value(evaluation.status).pipe(
+				Match.when("breached", () => Metric.update(AlertingMetrics.rulesBreachedTotal, 1)),
+				Match.when("healthy", () => Metric.update(AlertingMetrics.rulesHealthyTotal, 1)),
+				Match.when("skipped", () => Metric.update(AlertingMetrics.rulesSkippedTotal, 1)),
+				Match.exhaustive,
+			)
 
 		const runSchedulerTick = Effect.fn("AlertsService.runSchedulerTick")(function* () {
-			const tickStart = now()
+			const tickStart = yield* now
 			const rows = yield* dbExecute((db) =>
 				db
 					.select()
@@ -3284,17 +3433,49 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			let evaluationFailureCount = 0
 			const pendingChecks = yield* Ref.make<AlertChecksRow[]>([])
 
+			const recordEvaluationFailure = Effect.fnUntraced(function* (
+				row: AlertRuleRow,
+				error:
+					| AlertValidationError
+					| AlertDeliveryError
+					| AlertNotFoundError
+					| AlertPersistenceError
+					| WarehouseQueryError
+					| WarehouseQuotaExceededError,
+				failureCategory: string,
+				fields?: {
+					readonly upstreamStatus?: number
+					readonly quotaSetting?: string
+					readonly pipe?: string
+				},
+			) {
+				evaluationFailureCount += 1
+				yield* Metric.update(AlertingMetrics.evaluationFailuresTotal, 1)
+				yield* Effect.logError("Alert rule evaluation failed").pipe(
+					Effect.annotateLogs({
+						workerId,
+						ruleId: row.id,
+						orgId: row.orgId,
+						failureCategory,
+						errorMessage: error.message,
+						upstreamStatus: fields?.upstreamStatus,
+						quotaSetting: fields?.quotaSetting,
+						pipe: fields?.pipe,
+					}),
+				)
+			})
+
 			yield* Effect.forEach(
 				rows,
 				(row) =>
 					Effect.gen(function* () {
-						const timestamp = now()
+						const timestamp = yield* now
 						const brandedRuleId = decodeAlertRuleIdSync(row.id)
 						const claimed = yield* claimRule(brandedRuleId, timestamp)
 						if (claimed.rowsAffected === 0) return
 
 						yield* Effect.gen(function* () {
-							const ruleStart = now()
+							const ruleStart = yield* now
 							const normalized = yield* normalizeRuleRow(row)
 
 							if (normalized.groupBy != null && normalized.serviceNames.length === 0) {
@@ -3331,7 +3512,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 								)
 								yield* Metric.update(
 									AlertingMetrics.ruleEvaluationDurationMs,
-									now() - ruleStart,
+									(yield* now) - ruleStart,
 								)
 								return
 							}
@@ -3375,7 +3556,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 								)
 								yield* Metric.update(
 									AlertingMetrics.ruleEvaluationDurationMs,
-									now() - ruleStart,
+									(yield* now) - ruleStart,
 								)
 								return
 							}
@@ -3393,47 +3574,25 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 									pendingChecks,
 								)
 							}
-							yield* Metric.update(AlertingMetrics.ruleEvaluationDurationMs, now() - ruleStart)
+							yield* Metric.update(AlertingMetrics.ruleEvaluationDurationMs, (yield* now) - ruleStart)
 						}).pipe(
-							Effect.catch((error) => {
-								evaluationFailureCount += 1
-								return Effect.gen(function* () {
-									yield* Metric.update(AlertingMetrics.evaluationFailuresTotal, 1)
-									const taggedFailureCategory =
-										error instanceof AlertValidationError
-											? "validation"
-											: error instanceof AlertDeliveryError
-												? "evaluation"
-												: error instanceof TinybirdQuotaExceededError
-													? "tinybird_quota"
-													: error instanceof TinybirdQueryError
-														? `tinybird_${error.category ?? "query"}`
-														: "unknown"
-									const upstreamStatus =
-										error instanceof TinybirdQueryError ? error.upstreamStatus : undefined
-									const quotaSetting =
-										error instanceof TinybirdQuotaExceededError ? error.setting : undefined
-									const pipe =
-										error instanceof TinybirdQueryError ||
-										error instanceof TinybirdQuotaExceededError
-											? error.pipe
-											: undefined
-									yield* Effect.logError("Alert rule evaluation failed").pipe(
-										Effect.annotateLogs({
-											workerId,
-											ruleId: row.id,
-											orgId: row.orgId,
-											failureCategory: taggedFailureCategory,
-											errorMessage:
-												error instanceof Error
-													? error.message
-													: "Alert rule evaluation failed",
-											upstreamStatus,
-											quotaSetting,
-											pipe,
-										}),
-									)
-								})
+							Effect.catchTags({
+								"@maple/http/errors/AlertValidationError": (error) =>
+									recordEvaluationFailure(row, error, "validation"),
+								"@maple/http/errors/AlertDeliveryError": (error) =>
+									recordEvaluationFailure(row, error, "evaluation"),
+								"@maple/http/errors/AlertPersistenceError": (error) =>
+									recordEvaluationFailure(row, error, "unknown"),
+								"@maple/http/errors/WarehouseQuotaExceededError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_quota", {
+										quotaSetting: error.setting,
+										pipe: error.pipe,
+									}),
+								"@maple/http/errors/WarehouseQueryError": (error) =>
+									recordEvaluationFailure(row, error, `tinybird_${error.category ?? "query"}`, {
+										upstreamStatus: error.upstreamStatus,
+										pipe: error.pipe,
+									}),
 							}),
 						)
 					}),
@@ -3485,7 +3644,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 
 			const deliveryResult = yield* processQueuedDeliveries()
 			yield* Metric.update(AlertingMetrics.rulesEvaluatedTotal, rows.length)
-			yield* Metric.update(AlertingMetrics.tickDurationMs, now() - tickStart)
+			yield* Metric.update(AlertingMetrics.tickDurationMs, (yield* now) - tickStart)
 			return {
 				evaluatedCount: rows.length,
 				processedCount: deliveryResult.processedCount,
@@ -3513,6 +3672,4 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

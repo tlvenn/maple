@@ -5,6 +5,7 @@ import {
 	DashboardTemplateNotFoundError,
 	DashboardTemplatesListResponse,
 	DashboardValidationError,
+	DashboardPersesImportResponse,
 	MapleApi,
 	PortableDashboardDocument,
 } from "@maple/domain/http"
@@ -12,6 +13,7 @@ import { Effect } from "effect"
 import { DashboardPersistenceService } from "../services/DashboardPersistenceService"
 import { getTemplateById, listTemplateMetadata } from "../dashboard-templates"
 import type { TemplateParameterValues } from "../dashboard-templates"
+import { convertPersesDashboardToPortable } from "../services/perses-dashboard-import"
 
 export const HttpDashboardsLive = HttpApiBuilder.group(MapleApi, "dashboards", (handlers) =>
 	Effect.gen(function* () {
@@ -30,15 +32,29 @@ export const HttpDashboardsLive = HttpApiBuilder.group(MapleApi, "dashboards", (
 					return yield* persistence.list(tenant.orgId)
 				}),
 			)
+			.handle("importPerses", ({ payload }) =>
+				Effect.gen(function* () {
+					const converted = yield* convertPersesDashboardToPortable(payload.dashboard)
+					const tenant = yield* CurrentTenant.Context
+					const dashboard = yield* persistence.create(
+						tenant.orgId,
+						tenant.userId,
+						converted.dashboard,
+					)
+
+					return new DashboardPersesImportResponse({
+						dashboard,
+						warnings: [...converted.warnings],
+					})
+				}),
+			)
 			.handle("upsert", ({ params, payload }) =>
 				Effect.gen(function* () {
 					if (params.dashboardId !== payload.dashboard.id) {
-						return yield* Effect.fail(
-							new DashboardValidationError({
-								message: "Dashboard ID mismatch",
-								details: ["Path dashboardId must match payload.dashboard.id"],
-							}),
-						)
+						return yield* new DashboardValidationError({
+							message: "Dashboard ID mismatch",
+							details: ["Path dashboardId must match payload.dashboard.id"],
+						})
 					}
 
 					const tenant = yield* CurrentTenant.Context
@@ -100,25 +116,21 @@ export const HttpDashboardsLive = HttpApiBuilder.group(MapleApi, "dashboards", (
 				Effect.gen(function* () {
 					const template = getTemplateById(params.templateId)
 					if (!template) {
-						return yield* Effect.fail(
-							new DashboardTemplateNotFoundError({
-								templateId: params.templateId,
-								message: `Template "${params.templateId}" not found`,
-							}),
-						)
+						return yield* new DashboardTemplateNotFoundError({
+							templateId: params.templateId,
+							message: `Template "${params.templateId}" not found`,
+						})
 					}
 
-					const provided: TemplateParameterValues = (payload.parameters ?? {}) as TemplateParameterValues
+					const provided: TemplateParameterValues = payload.parameters ?? {}
 					const missing = template.parameters
 						.filter((p) => p.required && !provided[p.key])
 						.map((p) => p.key)
 					if (missing.length > 0) {
-						return yield* Effect.fail(
-							new DashboardValidationError({
-								message: "Missing required template parameters",
-								details: missing,
-							}),
-						)
+						return yield* new DashboardValidationError({
+							message: "Missing required template parameters",
+							details: missing,
+						})
 					}
 
 					const built = yield* Effect.try({

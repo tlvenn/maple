@@ -1,6 +1,5 @@
 import * as React from "react"
 import { Reorder, useDragControls } from "motion/react"
-import { Atom, useAtom } from "@/lib/effect-atom"
 import { Button } from "@maple/ui/components/ui/button"
 import { Input } from "@maple/ui/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
@@ -220,8 +219,7 @@ export function ListConfigPanel() {
 		listRootOnly?: boolean
 		listColumns?: ListColumnDraft[]
 	}) => setState((current) => ({ ...current, ...updates }))
-	const showFieldSuggestionsAtom = React.useMemo(() => Atom.make<number | null>(null), [])
-	const [showFieldSuggestions, setShowFieldSuggestions] = useAtom(showFieldSuggestionsAtom)
+	const [showFieldSuggestions, setShowFieldSuggestions] = React.useState<number | null>(null)
 
 	// Stable IDs for Reorder — kept in sync with columns array.
 	// addColumn/removeColumn/reorderColumns update the ref before calling onChange,
@@ -375,18 +373,18 @@ export function ListConfigPanel() {
 					return (
 						<div className="mt-1.5 space-y-1.5">
 							{slow.length > 0 && (
-								<div className="space-y-1 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+								<div className="space-y-1 rounded-md border border-warning/20 bg-warning/5 px-3 py-2">
 									{slow.map((h) => (
-										<p key={h.key} className="text-[11px] text-amber-500">
+										<p key={h.key} className="text-[11px] text-warning">
 											{h.reason}
 										</p>
 									))}
 								</div>
 							)}
 							{fast.length > 0 && (
-								<div className="space-y-1 rounded-md border border-emerald-500/20 bg-emerald-500/5 px-3 py-2">
+								<div className="space-y-1 rounded-md border border-success/20 bg-success/5 px-3 py-2">
 									{fast.map((h) => (
-										<p key={h.key} className="text-[11px] text-emerald-500">
+										<p key={h.key} className="text-[11px] text-success">
 											{h.reason}
 										</p>
 									))}

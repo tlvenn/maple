@@ -1,4 +1,6 @@
-import type { ReactNode } from "react"
+import { useMemo, useState, type ReactNode } from "react"
+import { cn } from "@maple/ui/utils"
+import { ChartLegendSlotContext, type ChartLegendItem } from "@maple/ui/components/ui/chart"
 import {
 	GripDotsIcon,
 	TrashIcon,
@@ -6,6 +8,7 @@ import {
 	CopyIcon,
 	DotsVerticalIcon,
 	ChatBubbleSparkleIcon,
+	BellIcon,
 } from "@/components/icons"
 
 import { Card, CardContent, CardHeader, CardTitle, CardAction } from "@maple/ui/components/ui/card"
@@ -18,13 +21,25 @@ import {
 	DropdownMenuSeparator,
 } from "@maple/ui/components/ui/dropdown-menu"
 import type { WidgetMode, WidgetDataState } from "@/components/dashboard-builder/types"
+import { useWidgetActions } from "@/components/dashboard-builder/widgets/widget-actions-context"
 
 interface WidgetShellProps {
 	title: string
 	mode: WidgetMode
+	/**
+	 * Action callbacks. When omitted, they fall back to the nearest
+	 * `WidgetActionsProvider`; explicit props override context (used by the
+	 * widget lab, which renders widgets outside a dashboard provider).
+	 */
 	onRemove?: () => void
 	onClone?: () => void
 	onConfigure?: () => void
+	/** When set, a "Create alert" menu item is shown (in edit and view mode). */
+	onCreateAlert?: () => void
+	/** Headline stat rendered at the top-right of the card header. */
+	headerValue?: ReactNode
+	/** Summary stat rendered below the card content. */
+	footer?: ReactNode
 	contentClassName?: string
 	children: ReactNode
 }
@@ -35,25 +50,68 @@ export function WidgetShell({
 	onRemove,
 	onClone,
 	onConfigure,
+	onCreateAlert,
+	headerValue,
+	footer,
 	contentClassName,
 	children,
 }: WidgetShellProps) {
+	const ctx = useWidgetActions()
+	const remove = onRemove ?? ctx?.remove
+	const clone = onClone ?? ctx?.clone
+	const configure = onConfigure ?? ctx?.configure
+	const createAlert = onCreateAlert ?? ctx?.createAlert
 	const isEditable = mode === "edit"
+	// The menu is also shown in view mode when "Create alert" is available, so
+	// alerts can be spun off a chart without entering dashboard edit mode.
+	const showMenu = isEditable || createAlert != null
+	const [menuOpen, setMenuOpen] = useState(false)
+	const [legendItems, setLegendItems] = useState<ChartLegendItem[]>([])
+	const legendSlot = useMemo(() => ({ setItems: setLegendItems }), [])
 
 	return (
 		<Card className="h-full flex flex-col">
-			<CardHeader className="border-b py-2">
-				<div className="flex items-center gap-2">
+			<CardHeader className="py-2.5">
+				<div className="flex min-w-0 items-center gap-2">
 					{isEditable && (
 						<div className="widget-drag-handle cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground">
 							<GripDotsIcon size={14} />
 						</div>
 					)}
-					<CardTitle className="flex-1 truncate text-xs">{title}</CardTitle>
+					<CardTitle className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+						{title}
+					</CardTitle>
+					{headerValue != null && (
+						<div className="ml-auto shrink-0 font-mono font-semibold text-xs tabular-nums">
+							{headerValue}
+						</div>
+					)}
+					{legendItems.length >= 2 && (
+						<div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-1">
+							{legendItems.map((item) => (
+								<span
+									key={item.key}
+									className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[10px] text-muted-foreground"
+								>
+									<span
+										className="size-2 shrink-0 rounded-[2px]"
+										style={{ backgroundColor: item.color }}
+									/>
+									{item.label}
+								</span>
+							))}
+						</div>
+					)}
 				</div>
-				{isEditable && (
-					<CardAction>
-						<DropdownMenu>
+				{showMenu && (
+					<CardAction
+						className={cn(
+							!isEditable &&
+								"opacity-0 transition-opacity focus-within:opacity-100 group-hover/card:opacity-100",
+							!isEditable && menuOpen && "opacity-100",
+						)}
+					>
+						<DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
 							<DropdownMenuTrigger
 								render={
 									<Button variant="ghost" size="icon-xs">
@@ -62,22 +120,28 @@ export function WidgetShell({
 								}
 							/>
 							<DropdownMenuContent align="end">
-								{onConfigure && (
-									<DropdownMenuItem onClick={onConfigure}>
+								{isEditable && configure && (
+									<DropdownMenuItem onClick={configure}>
 										<PencilIcon size={14} />
 										Edit
 									</DropdownMenuItem>
 								)}
-								{onClone && (
-									<DropdownMenuItem onClick={onClone}>
+								{isEditable && clone && (
+									<DropdownMenuItem onClick={clone}>
 										<CopyIcon size={14} />
 										Clone
 									</DropdownMenuItem>
 								)}
-								{onRemove && (
+								{createAlert && (
+									<DropdownMenuItem onClick={createAlert}>
+										<BellIcon size={14} />
+										Create alert
+									</DropdownMenuItem>
+								)}
+								{isEditable && remove && (
 									<>
 										<DropdownMenuSeparator />
-										<DropdownMenuItem variant="destructive" onClick={onRemove}>
+										<DropdownMenuItem variant="destructive" onClick={remove}>
 											<TrashIcon size={14} />
 											Delete
 										</DropdownMenuItem>
@@ -88,7 +152,14 @@ export function WidgetShell({
 					</CardAction>
 				)}
 			</CardHeader>
-			<CardContent className={contentClassName ?? "flex-1 min-h-0 p-2"}>{children}</CardContent>
+			<CardContent className={contentClassName ?? "flex-1 min-h-0 p-2"}>
+				<ChartLegendSlotContext.Provider value={legendSlot}>
+					{children}
+				</ChartLegendSlotContext.Provider>
+			</CardContent>
+			{footer != null && (
+				<div className="shrink-0 px-3 pb-2.5 text-[11px] text-muted-foreground">{footer}</div>
+			)}
 		</Card>
 	)
 }
@@ -101,9 +172,15 @@ interface WidgetFrameProps {
 	title: string
 	dataState: WidgetDataState
 	mode: WidgetMode
-	onRemove: () => void
+	/**
+	 * Action callbacks. When omitted, they fall back to the nearest
+	 * `WidgetActionsProvider`; explicit props override context (used by the
+	 * widget lab, which renders widgets outside a dashboard provider).
+	 */
+	onRemove?: () => void
 	onClone?: () => void
 	onConfigure?: () => void
+	onCreateAlert?: () => void
 	onFix?: () => void
 	contentClassName?: string
 	loadingSkeleton: ReactNode
@@ -117,11 +194,17 @@ export function WidgetFrame({
 	onRemove,
 	onClone,
 	onConfigure,
+	onCreateAlert,
 	onFix,
 	contentClassName,
 	loadingSkeleton,
 	children,
 }: WidgetFrameProps) {
+	// `WidgetShell` resolves the menu actions against context itself; `fix`
+	// drives the inline error CTA below, so it is resolved here too.
+	const ctx = useWidgetActions()
+	const fix = onFix ?? ctx?.fix
+
 	return (
 		<WidgetShell
 			title={title}
@@ -129,6 +212,7 @@ export function WidgetFrame({
 			onRemove={onRemove}
 			onClone={onClone}
 			onConfigure={onConfigure}
+			onCreateAlert={onCreateAlert}
 			contentClassName={contentClassName}
 		>
 			{dataState.status === "loading" ? (
@@ -148,11 +232,11 @@ export function WidgetFrame({
 								{dataState.message}
 							</span>
 						)}
-						{onFix && dataState.kind === "decode" && (
+						{fix && dataState.kind === "decode" && (
 							<Button
 								variant="outline"
 								size="xs"
-								onClick={onFix}
+								onClick={fix}
 								className="mt-1 h-6 gap-1 text-[10px]"
 							>
 								<ChatBubbleSparkleIcon size={12} />

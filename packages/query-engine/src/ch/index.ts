@@ -120,6 +120,7 @@ export {
 	type InferQueryOutput,
 	from,
 	fromQuery,
+	fromUnion,
 } from "./query"
 
 // Compilation
@@ -152,6 +153,8 @@ export {
 	attributeKeysQuery,
 	spanAttributeValuesQuery,
 	resourceAttributeValuesQuery,
+	logAttributeValuesQuery,
+	metricAttributeValuesQuery,
 	type AttributeKeysQueryOpts,
 	type AttributeKeysOutput,
 	type AttributeValuesOpts,
@@ -180,9 +183,11 @@ export {
 // Queries — Logs
 export {
 	logsTimeseriesQuery,
+	canUseLogsAggregatesHourly,
 	logsBreakdownQuery,
 	logsCountQuery,
 	logsListQuery,
+	getLogByKeyQuery,
 	logsFacetsQuery,
 	errorRateByServiceQuery,
 	type LogsTimeseriesOpts,
@@ -192,9 +197,36 @@ export {
 	type LogsCountOutput,
 	type LogsListOpts,
 	type LogsListOutput,
+	type LogByKeyOpts,
 	type LogsFacetsOutput,
 	type ErrorRateByServiceOutput,
 } from "./queries/logs"
+
+// Queries — Session Replays
+export {
+	sessionReplaysListQuery,
+	getSessionReplayQuery,
+	sessionReplayEventsQuery,
+	sessionsForTraceQuery,
+	sessionTraceSummariesQuery,
+	type SessionReplaysListOpts,
+	type SessionReplaysListOutput,
+	type SessionReplayDetailOutput,
+	type SessionReplayEventsOutput,
+	type SessionsForTraceOpts,
+	type SessionsForTraceOutput,
+	type SessionTraceSummariesOpts,
+	type SessionTraceSummaryOutput,
+} from "./queries/session-replays"
+
+// Queries — Session Events (distilled stream)
+export {
+	sessionTranscriptQuery,
+	searchSessionsByEventQuery,
+	type SessionTranscriptOutput,
+	type SearchSessionsByEventOpts,
+	type SearchSessionsByEventOutput,
+} from "./queries/session-events"
 
 // Queries — Services
 export {
@@ -216,10 +248,10 @@ export {
 
 // Queries — Errors
 export {
-	errorFingerprint,
 	errorsByTypeQuery,
 	errorsTimeseriesQuery,
 	spanHierarchyQuery,
+	spanDetailQuery,
 	tracesDurationStatsQuery,
 	tracesFacetsQuery,
 	errorsFacetsQuery,
@@ -234,6 +266,8 @@ export {
 	type ErrorsTimeseriesOutput,
 	type SpanHierarchyOpts,
 	type SpanHierarchyOutput,
+	type SpanDetailOpts,
+	type SpanDetailOutput,
 	type TracesDurationStatsOpts,
 	type TracesDurationStatsOutput,
 	type TracesFacetsOpts,
@@ -253,15 +287,34 @@ export {
 // Queries — Service Map
 export {
 	serviceDependenciesSQL,
+	serviceDependenciesForServiceQuery,
 	serviceDbEdgesSQL,
+	serviceDbEdgesForServiceQuery,
 	servicePlatformsSQL,
+	serviceMapEdgeJoinSQL,
 	type ServiceDependenciesOpts,
+	type ServiceDependenciesForServiceOpts,
 	type ServiceDependenciesOutput,
 	type ServiceDbEdgesOpts,
+	type ServiceDbEdgesForServiceOpts,
 	type ServiceDbEdgesOutput,
 	type ServicePlatformsOpts,
 	type ServicePlatformsOutput,
+	serviceExternalEdgesSQL,
+	type ServiceExternalEdgesOpts,
+	type ServiceExternalEdgesOutput,
 } from "./queries/service-map"
+
+// Queries — Service Map hourly edge rollup
+export {
+	serviceMapEdgesRollupSQL,
+	serviceMapEdgesExistingHoursSQL,
+	serviceMapResolutionsRollupSQL,
+	type ServiceMapEdgesRollupParams,
+	type ServiceMapEdgesHourlyOutput,
+	type ServiceMapEdgesExistingHour,
+	type ServiceAddressResolutionsHourlyOutput,
+} from "./queries/service-map-rollup"
 
 // Queries — Service Infrastructure (service.name ↔ k8s workload join)
 export {
@@ -281,6 +334,21 @@ export {
 	type ListRuleChecksOpts,
 	type ListRuleChecksOutput,
 } from "./queries/alert-checks"
+
+// Queries — Internal observability (Maple's own self-instrumentation)
+export {
+	dbStatementSamplesQuery,
+	type DbStatementSamplesOpts,
+	type DbStatementSamplesOutput,
+} from "./queries/internal"
+
+// Queries — Top Operations (per-service operation ranking by metric)
+export {
+	topOperationsQuery,
+	type TopOperationsMetric,
+	type TopOperationsOpts,
+	type TopOperationsOutput,
+} from "./queries/top-operations"
 
 // Queries — Infrastructure (host-centric aggregations over hostmetrics)
 export {

@@ -1,12 +1,12 @@
 import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
-import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { truncate, formatNumber } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { mineLogPatterns } from "@maple/query-engine/observability"
-import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
 
 export function registerMineLogPatternsTool(server: McpToolRegistrar) {
 	server.tool(
@@ -41,6 +41,13 @@ export function registerMineLogPatternsTool(server: McpToolRegistrar) {
 			const sampleSize = Math.min(Math.max(Number(sample_size) || 10_000, 1), 50_000)
 			const lim = Math.min(Math.max(Number(limit) || 50, 1), 200)
 			const tenant = yield* resolveTenant
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				service: service ?? "all",
+				severity: severity ?? "all",
+				sampleSize,
+				limit: lim,
+			})
 
 			const result = yield* mineLogPatterns({
 				timeRange: { startTime: st, endTime: et },
@@ -51,9 +58,13 @@ export function registerMineLogPatternsTool(server: McpToolRegistrar) {
 				sampleSize,
 				limit: lim,
 			}).pipe(
-				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
-				Effect.mapError((e) => new McpQueryError({ message: e.message, pipe: "list_logs" })),
+				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
+				Effect.catchTag("@maple/query-engine/errors/ObservabilityError", (e) =>
+					Effect.fail(new McpQueryError({ message: e.message, pipe: "mine_log_patterns", cause: e })),
+				),
 			)
+
+			yield* Effect.annotateCurrentSpan("resultCount", result.patterns.length)
 
 			if (result.patterns.length === 0) {
 				return {

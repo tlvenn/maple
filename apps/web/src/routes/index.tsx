@@ -8,9 +8,11 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { PageRefreshProvider } from "@/components/time-range-picker/page-refresh-context"
 import { TimeRangeHeaderControls } from "@/components/time-range-picker/time-range-header-controls"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
+import { formatErrorRate } from "@maple/ui/lib/format"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
 import { useRetainedRefreshableResultValue } from "@/hooks/use-retained-refreshable-result-value"
 import { ServiceUsageCards } from "@/components/dashboard/service-usage-cards"
+import { ServiceHealthOverview, ServiceHealthList } from "@/components/dashboard/service-health-section"
 import { MetricsGrid } from "@/components/dashboard/metrics-grid"
 import { SetupChecklist } from "@/components/dashboard/setup-checklist"
 import { FirstActionHint } from "@/components/dashboard/first-action-hint"
@@ -18,11 +20,10 @@ import type { ChartLegendMode, ChartTooltipMode } from "@maple/ui/components/cha
 import {
 	getCustomChartTimeSeriesResultAtom,
 	getOverviewTimeSeriesResultAtom,
-	getServiceOverviewResultAtom,
 	getServicesFacetsResultAtom,
-} from "@/lib/services/atoms/tinybird-query-atoms"
-import type { CustomChartTimeSeriesResponse } from "@/api/tinybird/custom-charts"
-import type { ServiceDetailTimeSeriesPoint } from "@/api/tinybird/services"
+} from "@/lib/services/atoms/warehouse-query-atoms"
+import type { CustomChartTimeSeriesResponse } from "@/api/warehouse/custom-charts"
+import type { ServiceDetailTimeSeriesPoint, ServicesFacetsResponse } from "@/api/warehouse/services"
 import { disabledResultAtom } from "@/lib/services/atoms/disabled-result-atom"
 import { applyTimeRangeSearch } from "@/components/time-range-picker/search"
 
@@ -85,37 +86,47 @@ const OVERVIEW_CHARTS: OverviewChartConfig[] = [
 
 function DashboardPage() {
 	const search = Route.useSearch()
-	const defaultPreset = useDefaultPreset()
+
+	// Stable 24h range, computed once per mount. Drives the single facets call
+	// shared by `useDefaultPreset` and `DashboardContent` so we issue one HTTP
+	// request instead of two. Environments / commit SHAs / service names move
+	// slowly enough that a fixed 24h window is fine for the dropdown — and it
+	// matches the old probe's range, so demo-detection behavior is unchanged.
+	// `TinybirdDateTime` requires `YYYY-MM-DD HH:mm:ss` (no `T`, no millis), so
+	// we strip the ISO suffix instead of passing `.toISOString()` raw.
+	const facetsRange = useMemo(() => {
+		const fmt = (d: Date) => d.toISOString().replace("T", " ").slice(0, 19)
+		const end = new Date()
+		const start = new Date(end.getTime() - 24 * 60 * 60 * 1000)
+		return { startTime: fmt(start), endTime: fmt(end) }
+	}, [])
+
+	const facetsResult = useRetainedRefreshableResultValue(
+		getServicesFacetsResultAtom({ data: facetsRange }),
+	)
+
+	const defaultPreset = useMemo(() => {
+		if (!Result.isSuccess(facetsResult)) return "24h"
+		const services = facetsResult.value.data.services
+		if (services.length === 0) return "24h"
+		const allDemo = services.every((s) => s.name.startsWith("demo-"))
+		return allDemo ? "6h" : "24h"
+	}, [facetsResult])
+
 	return (
 		<PageRefreshProvider timePreset={search.timePreset ?? defaultPreset}>
-			<DashboardContent defaultPreset={defaultPreset} />
+			<DashboardContent defaultPreset={defaultPreset} facetsResult={facetsResult} />
 		</PageRefreshProvider>
 	)
 }
 
-function useDefaultPreset() {
-	const probeRange = useMemo(() => {
-		const end = new Date()
-		const start = new Date(end.getTime() - 24 * 60 * 60 * 1000)
-		return { startTime: start.toISOString(), endTime: end.toISOString() }
-	}, [])
-
-	const servicesProbeResult = useRetainedRefreshableResultValue(
-		getServiceOverviewResultAtom({ data: probeRange }),
-	)
-
-	return useMemo(() => {
-		if (!Result.isSuccess(servicesProbeResult)) return "24h"
-		const services = servicesProbeResult.value.data
-		if (services.length === 0) return "24h"
-		const allDemo = services.every(
-			(s) => typeof s.serviceName === "string" && s.serviceName.startsWith("demo-"),
-		)
-		return allDemo ? "6h" : "24h"
-	}, [servicesProbeResult])
-}
-
-function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
+function DashboardContent({
+	defaultPreset,
+	facetsResult,
+}: {
+	defaultPreset: string
+	facetsResult: Result.Result<ServicesFacetsResponse, unknown>
+}) {
 	const search = Route.useSearch()
 	const navigate = useNavigate({ from: Route.fullPath })
 
@@ -148,15 +159,6 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 		})
 	}
 
-	const facetsResult = useRetainedRefreshableResultValue(
-		getServicesFacetsResultAtom({
-			data: {
-				startTime: effectiveStartTime,
-				endTime: effectiveEndTime,
-			},
-		}),
-	)
-
 	const environments = Result.builder(facetsResult)
 		.onSuccess((response) => response.data.environments)
 		.orElse(() => [])
@@ -174,6 +176,13 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 
 	// Wait for facets before fetching data to avoid a cascading double-fetch
 	// when environmentFilter changes from undefined → ["production"]
+	//
+	// The hook is handed a different atom on the `facetsReady` flip (disabled →
+	// real), but both branches yield stable atom identities: the real atom comes
+	// from an `Atom.family` keyed by encoded params, and `disabledResultAtom()`
+	// returns a single module-scoped `keepAlive` atom (same reference every call).
+	// So this is a one-time mount transition, not a per-render churn — no
+	// in-render `Atom.make` and no lost state.
 	const facetsReady = !Result.isInitial(facetsResult)
 
 	const overviewResult = useRetainedRefreshableResultValue(
@@ -212,8 +221,11 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 		(Result.isSuccess(overviewResult) && overviewResult.waiting) ||
 		(Result.isSuccess(logVolumeResult) && logVolumeResult.waiting)
 
-	const overviewPoints = Result.builder(overviewResult)
-		.onSuccess((response) => response.data as unknown as Record<string, unknown>[])
+	// Overview points are typed structs; the chart grid consumes a generic
+	// `Record<string, unknown>[]`. Each point's fields are all primitive, so
+	// spreading widens to the record shape without an `as unknown` round-trip.
+	const overviewPoints: Record<string, unknown>[] = Result.builder(overviewResult)
+		.onSuccess((response) => response.data.map((point) => ({ ...point })))
 		.orElse(() => EMPTY_ARRAY)
 
 	const logPoints = Result.builder(logVolumeResult)
@@ -247,6 +259,18 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 			"log-volume": logPoints,
 		}
 
+		const totalVolume = overviewPoints.reduce(
+			(sum, point) => sum + (typeof point.throughput === "number" ? point.throughput : 0),
+			0,
+		)
+		// `errorRate` is a fraction (errors / requests); volume-weight it across buckets.
+		const weightedErrors = overviewPoints.reduce((sum, point) => {
+			const requests = typeof point.throughput === "number" ? point.throughput : 0
+			const rate = typeof point.errorRate === "number" ? point.errorRate : 0
+			return sum + requests * rate
+		}, 0)
+		const avgErrorRate = totalVolume > 0 ? weightedErrors / totalVolume : 0
+
 		return OVERVIEW_CHARTS.map((chart) => ({
 			id: chart.id,
 			chartId: chart.chartId,
@@ -257,6 +281,19 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 			tooltip: chart.tooltip,
 			rateMode: chart.rateMode,
 			isLoading: loadingMap[chart.id] ?? false,
+			headerValue:
+				chart.id === "error-rate" && !isOverviewLoading ? (
+					<span className="text-chart-error">{formatErrorRate(avgErrorRate)}</span>
+				) : undefined,
+			footer:
+				chart.id === "throughput" && !isOverviewLoading ? (
+					<>
+						Total{" "}
+						<span className="font-medium text-foreground tabular-nums">
+							{totalVolume.toLocaleString()}
+						</span>
+					</>
+				) : undefined,
 		}))
 	}, [overviewPoints, logPoints, isOverviewLoading, isLogVolumeLoading])
 
@@ -280,7 +317,7 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 						value={selectedEnvironment}
 						onValueChange={handleEnvironmentChange}
 					>
-						<SelectTrigger>
+						<SelectTrigger size="sm">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -302,8 +339,22 @@ function DashboardContent({ defaultPreset }: { defaultPreset: string }) {
 		>
 			<FirstActionHint />
 			<SetupChecklist />
+			<ServiceHealthOverview
+				startTime={effectiveStartTime}
+				endTime={effectiveEndTime}
+				timePreset={search.timePreset ?? defaultPreset}
+				environments={environmentFilter}
+				facetsReady={facetsReady}
+			/>
 			<ServiceUsageCards startTime={effectiveStartTime} endTime={effectiveEndTime} />
 			<MetricsGrid items={metrics} className="mt-4" waiting={!!isWaiting} syncId="home-overview" />
+			<ServiceHealthList
+				startTime={effectiveStartTime}
+				endTime={effectiveEndTime}
+				timePreset={search.timePreset ?? defaultPreset}
+				environments={environmentFilter}
+				facetsReady={facetsReady}
+			/>
 		</DashboardLayout>
 	)
 }

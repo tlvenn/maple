@@ -1,7 +1,7 @@
 import { HttpApiBuilder } from "effect/unstable/httpapi"
-import { CurrentTenant, MapleApi } from "@maple/domain/http"
+import { CurrentTenant, MapleApi, SpanId, TraceId } from "@maple/domain/http"
 import { ObservabilityApiError } from "@maple/domain/http/observability"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import {
 	listServices,
 	searchTraces,
@@ -10,10 +10,20 @@ import {
 	diagnoseService,
 	searchLogs,
 } from "@maple/query-engine/observability"
-import { makeTinybirdExecutorFromTenant } from "../services/TinybirdExecutorLive"
+import { ObservabilityError } from "@maple/query-engine/observability"
+import { makeWarehouseExecutorFromTenant } from "../lib/WarehouseExecutorLive"
 
-const mapError = (e: { message: string; pipe?: string }) =>
+const mapError = (e: ObservabilityError) =>
 	new ObservabilityApiError({ message: e.message, pipe: e.pipe, cause: e })
+
+const decodeTraceId = Schema.decodeSync(TraceId)
+const decodeSpanId = Schema.decodeSync(SpanId)
+
+const brandLogIds = <T extends { readonly traceId?: string; readonly spanId?: string }>(log: T) => ({
+	...log,
+	traceId: log.traceId ? decodeTraceId(log.traceId) : undefined,
+	spanId: log.spanId ? decodeSpanId(log.spanId) : undefined,
+})
 
 export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observability", (handlers) =>
 	Effect.gen(function* () {
@@ -22,7 +32,7 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
 					const services = yield* listServices(payload).pipe(
-						Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+						Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 						Effect.mapError(mapError),
 					)
 					return { services: [...services] }
@@ -32,7 +42,7 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
 					return yield* searchTraces(payload).pipe(
-						Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+						Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 						Effect.mapError(mapError),
 						Effect.map((r) => ({
 							...r,
@@ -45,7 +55,7 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
 					const result = yield* inspectTrace(payload.traceId).pipe(
-						Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+						Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 						Effect.mapError(mapError),
 					)
 					return {
@@ -53,8 +63,8 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 						serviceCount: result.serviceCount,
 						spanCount: result.spanCount,
 						rootDurationMs: result.rootDurationMs,
-						spans: result.spans as any,
-						logs: result.logs as any,
+						spans: result.spans,
+						logs: result.logs.map(brandLogIds),
 					}
 				}),
 			)
@@ -62,7 +72,7 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
 					const errors = yield* findErrors(payload).pipe(
-						Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+						Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 						Effect.mapError(mapError),
 					)
 					return { errors: [...errors] }
@@ -72,16 +82,19 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
 					const result = yield* diagnoseService(payload).pipe(
-						Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+						Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 						Effect.mapError(mapError),
 					)
 					return {
 						serviceName: result.serviceName,
 						timeRange: result.timeRange,
-						health: result.health as any,
-						topErrors: result.topErrors as any,
-						recentTraces: result.recentTraces as any,
-						recentLogs: result.recentLogs as any,
+						health: result.health,
+						topErrors: result.topErrors,
+						recentTraces: result.recentTraces.map((trace) => ({
+							...trace,
+							traceId: decodeTraceId(trace.traceId),
+						})),
+						recentLogs: result.recentLogs.map(brandLogIds),
 					}
 				}),
 			)
@@ -89,13 +102,13 @@ export const HttpObservabilityLive = HttpApiBuilder.group(MapleApi, "observabili
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
 					const result = yield* searchLogs(payload).pipe(
-						Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+						Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 						Effect.mapError(mapError),
 					)
 					return {
 						timeRange: result.timeRange,
 						total: result.total,
-						logs: result.logs as any,
+						logs: result.logs.map(brandLogIds),
 						pagination: result.pagination,
 					}
 				}),

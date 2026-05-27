@@ -29,15 +29,15 @@ import {
 } from "@maple/domain/clickhouse"
 import { orgClickHouseSettings } from "@maple/db"
 import { eq } from "drizzle-orm"
-import { Effect, Layer, Option, Redacted, Schema, Context } from "effect"
+import { Clock, Context, Effect, Layer, Option, Redacted, Ref, Schema } from "effect"
 import {
 	decryptAes256Gcm,
 	encryptAes256Gcm,
 	parseBase64Aes256GcmKey,
 	type EncryptedValue,
-} from "./Crypto"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+} from "../lib/Crypto"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 import { validateExternalUrl } from "../lib/url-validator"
 
 /**
@@ -155,13 +155,17 @@ const encryptToken = (
 	plaintext: string,
 	encryptionKey: Buffer,
 ): Effect.Effect<EncryptedValue, OrgClickHouseSettingsEncryptionError> =>
-	encryptAes256Gcm(plaintext, encryptionKey, () => toEncryptionError("Failed to encrypt ClickHouse password"))
+	encryptAes256Gcm(plaintext, encryptionKey, () =>
+		toEncryptionError("Failed to encrypt ClickHouse password"),
+	)
 
 const decryptToken = (
 	encrypted: EncryptedValue,
 	encryptionKey: Buffer,
 ): Effect.Effect<string, OrgClickHouseSettingsEncryptionError> =>
-	decryptAes256Gcm(encrypted, encryptionKey, () => toEncryptionError("Failed to decrypt ClickHouse password"))
+	decryptAes256Gcm(encrypted, encryptionKey, () =>
+		toEncryptionError("Failed to decrypt ClickHouse password"),
+	)
 
 // Both `qualifyStatementForDatabase` and `CLICKHOUSE_MV_SOURCE_TABLES` live
 // in `@maple/domain/clickhouse` now (so the `@maple/clickhouse-cli` package
@@ -316,16 +320,15 @@ const decodeStatus = (raw: string | null | undefined): "connected" | "error" | n
 	return null
 }
 
-// --- Desired-schema cache ----------------------------------------------------
+// --- Desired-schema parsing --------------------------------------------------
 //
-// We parse the bundled snapshot statements once on first use and reuse the
-// result. Parsing is cheap, but the snapshot is also static across the
-// process lifetime so re-parsing on every request would be wasted work.
+// We parse the bundled snapshot statements from the static migration snapshot.
+// Parsing is cheap, but the snapshot is also static across the process
+// lifetime so the service memoizes the result in a `Ref` (created in `make`)
+// to avoid re-parsing on every request without resorting to module-global
+// mutable state.
 
-let cachedDesiredTables: ReadonlyArray<DesiredTable> | null = null
-
-const getDesiredTables = (): ReadonlyArray<DesiredTable> => {
-	if (cachedDesiredTables) return cachedDesiredTables
+const parseDesiredTables = (): ReadonlyArray<DesiredTable> => {
 	const out: DesiredTable[] = []
 	for (const stmt of clickHouseMigrations[0]?.statements ?? []) {
 		const parsed = parseEmittedStatement(stmt)
@@ -337,7 +340,6 @@ const getDesiredTables = (): ReadonlyArray<DesiredTable> => {
 			createStatement: stmt,
 		})
 	}
-	cachedDesiredTables = out
 	return out
 }
 
@@ -468,16 +470,97 @@ const parseJsonEachRow = <T>(text: string): ReadonlyArray<T> => {
 	return out
 }
 
+// ---------------------------------------------------------------------------
+// Linear migration runner
+//
+// `applySchema` is migration-aware: it replays the ordered `clickHouseMigrations`
+// deltas (the same list `@maple/clickhouse-cli` bundles) and tracks applied
+// versions in `_maple_schema_migrations`. This is what lets MV *body* changes
+// (a frozen `CREATE MATERIALIZED VIEW`) actually reach an existing cluster —
+// the snapshot diff below only does additive `ALTER TABLE ADD COLUMN` and a
+// presence-only MV check, so on its own it can never recreate a drifted MV.
+// The two stay compatible by using the identical bookkeeping table + protocol
+// as the CLI's `applyMigrations`.
+// ---------------------------------------------------------------------------
+
+const MIGRATIONS_TABLE = "_maple_schema_migrations"
+const quoteIdent = (name: string): string => `\`${name.replace(/`/g, "``")}\``
+
+const ensureMigrationsTable = (config: ClickHouseExecConfig) =>
+	execClickHouse(
+		config,
+		`CREATE TABLE IF NOT EXISTS ${quoteIdent(MIGRATIONS_TABLE)} (
+			version UInt32,
+			applied_at DateTime64(3) DEFAULT now64(3),
+			description String
+		) ENGINE = MergeTree ORDER BY version`,
+	)
+
+const readAppliedMigrationVersions = (config: ClickHouseExecConfig) =>
+	Effect.gen(function* () {
+		const text = yield* execClickHouse(
+			config,
+			`SELECT version FROM ${quoteIdent(MIGRATIONS_TABLE)} FORMAT JSONEachRow`,
+		)
+		return new Set(parseJsonEachRow<{ version: number }>(text).map((r) => Number(r.version)))
+	})
+
+const recordAppliedMigration = (config: ClickHouseExecConfig, version: number, description: string) =>
+	execClickHouse(
+		config,
+		`INSERT INTO ${quoteIdent(MIGRATIONS_TABLE)} (version, description) VALUES (${version}, '${description.replace(/'/g, "''")}')`,
+	)
+
+/**
+ * Replay every bundled migration the target hasn't recorded yet, in order.
+ * Each migration's statements run sequentially; the version is recorded only
+ * after all its statements succeed. Returns human-readable labels of what ran.
+ */
+const runPendingMigrations = Effect.fn("OrgClickHouseSettingsService.runPendingMigrations")(function* (
+	config: ClickHouseExecConfig,
+) {
+	yield* ensureMigrationsTable(config)
+	const applied = yield* readAppliedMigrationVersions(config)
+	const ran: string[] = []
+	yield* Effect.forEach(
+		clickHouseMigrations,
+		(migration) =>
+				Effect.gen(function* () {
+					if (applied.has(migration.version)) return
+				yield* Effect.forEach(
+					migration.statements,
+					(stmt) => execClickHouse(config, qualifyStatementForDatabase(stmt, config.database)),
+					{ concurrency: 1, discard: true },
+				)
+				yield* recordAppliedMigration(config, migration.version, migration.description)
+				ran.push(`migration ${migration.version}: ${migration.description}`)
+			}),
+		{ concurrency: 1, discard: true },
+	)
+	return ran
+})
+
 // --- Service -----------------------------------------------------------------
 
 export class OrgClickHouseSettingsService extends Context.Service<
 	OrgClickHouseSettingsService,
 	OrgClickHouseSettingsServiceShape
->()("OrgClickHouseSettingsService", {
+>()("@maple/api/services/OrgClickHouseSettingsService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
 		const encryptionKey = yield* parseEncryptionKey(Redacted.value(env.MAPLE_INGEST_KEY_ENCRYPTION_KEY))
+
+		// Memoize the parsed desired-schema snapshot per service instance. The
+		// snapshot is static, so we parse it at most once and reuse it.
+		const desiredTablesCache = yield* Ref.make<ReadonlyArray<DesiredTable> | null>(null)
+		const getDesiredTables = Effect.gen(function* () {
+			const cached = yield* Ref.get(desiredTablesCache)
+			if (cached) return cached
+			const parsed = parseDesiredTables()
+			yield* Ref.set(desiredTablesCache, parsed)
+			return parsed
+		})
 
 		const requireAdmin = Effect.fn("OrgClickHouseSettingsService.requireAdmin")(function* (
 			roles: ReadonlyArray<RoleName>,
@@ -531,9 +614,7 @@ export class OrgClickHouseSettingsService extends Context.Service<
 					)
 				: Effect.succeed("")
 
-		const toResponse = (
-			row: ActiveRow | null | undefined,
-		): OrgClickHouseSettingsResponse =>
+		const toResponse = (row: ActiveRow | null | undefined): OrgClickHouseSettingsResponse =>
 			new OrgClickHouseSettingsResponse({
 				configured: row != null,
 				chUrl: row?.chUrl ?? null,
@@ -590,13 +671,10 @@ export class OrgClickHouseSettingsService extends Context.Service<
 			if (plainPassword.length === 0 && Option.isSome(existingRow)) {
 				const existing = existingRow.value
 				const sameEndpoint =
-					existing.chUrl === url &&
-					existing.chUser === user &&
-					existing.chDatabase === dbName
+					existing.chUrl === url && existing.chUser === user && existing.chDatabase === dbName
 				if (!sameEndpoint) {
 					return yield* new OrgClickHouseSettingsValidationError({
-						message:
-							"Password is required when changing the ClickHouse URL, user, or database",
+						message: "Password is required when changing the ClickHouse URL, user, or database",
 					})
 				}
 				plainPassword = yield* decryptStoredPassword(existing)
@@ -606,15 +684,12 @@ export class OrgClickHouseSettingsService extends Context.Service<
 			// host or token surfaces here rather than after the user closes the
 			// dialog. No DDL is run — applying the schema is a separate explicit
 			// action via the diff/apply endpoints.
-			yield* execClickHouse(
-				{ url, user, password: plainPassword, database: dbName },
-				"SELECT 1",
-			)
+			yield* execClickHouse({ url, user, password: plainPassword, database: dbName }, "SELECT 1")
 
 			const encryptedPassword =
 				plainPassword.length > 0 ? yield* encryptToken(plainPassword, encryptionKey) : null
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			yield* database
 				.execute((db) =>
 					db
@@ -694,7 +769,7 @@ export class OrgClickHouseSettingsService extends Context.Service<
 			const row = yield* requireActiveRow(orgId)
 			const config = yield* loadConfigForRow(row)
 			const actual = yield* fetchActualSchema(config)
-			const entries = computeSchemaDiff({ tables: getDesiredTables() }, actual)
+			const entries = computeSchemaDiff({ tables: yield* getDesiredTables }, actual)
 			return new OrgClickHouseSchemaDiffResponse({
 				expectedSchemaVersion: clickHouseProjectRevision,
 				appliedSchemaVersion: row.schemaVersion ?? null,
@@ -712,13 +787,20 @@ export class OrgClickHouseSettingsService extends Context.Service<
 			yield* requireAdmin(roles)
 			const row = yield* requireActiveRow(orgId)
 			const config = yield* loadConfigForRow(row)
-			const desired = getDesiredTables()
-			const desiredByName = new Map(desired.map((t) => [t.name, t]))
-			const actual = yield* fetchActualSchema(config)
-			const entries = computeSchemaDiff({ tables: desired }, actual)
 
 			const applied: string[] = []
 			const skipped: Array<{ name: string; reason: string }> = []
+
+			// Migration-aware step: replay ordered deltas (incl. MV DROP/CREATE
+			// recreations) the cluster hasn't recorded yet. The snapshot diff below
+			// then mops up any additive column drift not covered by a delta.
+			const ranMigrations = yield* runPendingMigrations(config)
+			applied.push(...ranMigrations)
+
+			const desired = yield* getDesiredTables
+			const desiredByName = new Map(desired.map((t) => [t.name, t]))
+			const actual = yield* fetchActualSchema(config)
+			const entries = computeSchemaDiff({ tables: desired }, actual)
 
 			// Track tables whose drift was *fully* resolved by additive ALTERs, so
 			// the schemaVersion bump below stays accurate.
@@ -766,21 +848,25 @@ export class OrgClickHouseSettingsService extends Context.Service<
 
 					const addedColumns: string[] = []
 					const unresolvableAdds: string[] = []
-					for (const drift of missingDrifts) {
-						const colDef = extractColumnDefinition(table.createStatement, drift.column)
-						if (!colDef) {
-							// Shouldn't happen — `missing` drift means the column is in the
-							// desired schema by definition — but guard against parser drift.
-							unresolvableAdds.push(drift.column)
-							continue
-						}
-						const alter = `ALTER TABLE \`${config.database}\`.\`${entry.name}\` ADD COLUMN IF NOT EXISTS ${colDef}`
-						yield* execClickHouse(config, alter)
-						addedColumns.push(drift.column)
-					}
+					yield* Effect.forEach(
+						missingDrifts,
+						(drift) =>
+							Effect.gen(function* () {
+								const colDef = extractColumnDefinition(table.createStatement, drift.column)
+								if (!colDef) {
+									// Shouldn't happen — `missing` drift means the column is in the
+									// desired schema by definition — but guard against parser drift.
+									unresolvableAdds.push(drift.column)
+									return
+								}
+								const alter = `ALTER TABLE \`${config.database}\`.\`${entry.name}\` ADD COLUMN IF NOT EXISTS ${colDef}`
+								yield* execClickHouse(config, alter)
+								addedColumns.push(drift.column)
+							}),
+						{ concurrency: 1, discard: true },
+					)
 
-					const remainingIssues =
-						typeMismatches.length + unresolvableAdds.length
+					const remainingIssues = typeMismatches.length + unresolvableAdds.length
 					if (remainingIssues === 0) {
 						applied.push(entry.name)
 						fullyResolvedDrift.add(entry.name)
@@ -807,7 +893,7 @@ export class OrgClickHouseSettingsService extends Context.Service<
 				// `up_to_date` entries are silently passed over.
 			}
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const allSatisfied = entries.every(
 				(e) =>
 					e.status === "up_to_date" ||
@@ -882,8 +968,6 @@ export class OrgClickHouseSettingsService extends Context.Service<
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 
 	static readonly get = (orgId: OrgId, roles: ReadonlyArray<RoleName>) =>
 		this.use((service) => service.get(orgId, roles))

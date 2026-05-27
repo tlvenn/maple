@@ -1,5 +1,5 @@
 import { optionalStringParam, requiredStringParam, type McpToolRegistrar } from "./types"
-import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange } from "../lib/time"
 import { formatDurationFromMs, formatPercent, formatNumber, truncate } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
@@ -7,7 +7,7 @@ import { toMcpQueryError } from "../lib/map-warehouse-error"
 import { Array as Arr, Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { diagnoseService } from "@maple/query-engine/observability"
-import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
 
 export function registerDiagnoseServiceTool(server: McpToolRegistrar) {
 	server.tool(
@@ -28,7 +28,7 @@ export function registerDiagnoseServiceTool(server: McpToolRegistrar) {
 				timeRange: { startTime: st, endTime: et },
 				environment: environment ?? undefined,
 			}).pipe(
-				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 				Effect.mapError(toMcpQueryError("service_overview")),
 			)
 
@@ -49,7 +49,9 @@ export function registerDiagnoseServiceTool(server: McpToolRegistrar) {
 			if (result.topErrors.length > 0) {
 				lines.push(``, `Top Errors:`)
 				for (const e of result.topErrors) {
-					lines.push(`  - ${truncate(e.errorType, 80)} (${formatNumber(e.count)}x)`)
+					lines.push(
+						`  - ${truncate(e.label, 80)} (${formatNumber(e.count)}x) [fingerprint ${e.fingerprintHash}]`,
+					)
 				}
 			} else {
 				lines.push(``, `No errors found for this service.`)

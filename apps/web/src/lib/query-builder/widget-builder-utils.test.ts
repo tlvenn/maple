@@ -39,12 +39,19 @@ function makeState(): QueryBuilderWidgetState {
 		statValueField: "",
 		unit: "number",
 		legendPosition: "bottom",
+		seriesStatsEnabled: false,
 		tableLimit: "",
 		listDataSource: "traces",
 		listWhereClause: "",
 		listLimit: "",
 		listColumns: [],
 		listRootOnly: true,
+		heatmapColorScale: "blues",
+		heatmapScaleType: "linear",
+		thresholds: [],
+		gaugeMin: "",
+		gaugeMax: "",
+		sparklineEnabled: false,
 	}
 }
 
@@ -126,6 +133,7 @@ describe("widget-builder hidden series behavior", () => {
 		const query = {
 			...createQueryDraft(0),
 			dataSource: "metrics" as const,
+			signalSource: "default" as const,
 			metricName: "http.server.requests",
 			metricType: "sum" as const,
 			isMonotonic: true,
@@ -139,8 +147,10 @@ describe("widget-builder hidden series behavior", () => {
 		const query = {
 			...createQueryDraft(0),
 			dataSource: "metrics" as const,
+			signalSource: "default" as const,
 			metricName: "system.memory.usage",
 			metricType: "gauge" as const,
+			isMonotonic: false,
 			aggregation: "avg",
 		}
 

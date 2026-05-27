@@ -1,5 +1,19 @@
 import type { IconProps } from "./icon"
 
+const paths: ReadonlyArray<string> = [
+	"M12 21V17",
+	"M11 2H13",
+	"M21 19L21 10",
+	"M3 19L3 10",
+	"M5 8.00999V7.99999",
+	"M7 6.00999V5.99999",
+	"M9 4.00999V3.99999",
+	"M15 4.00999V3.99999",
+	"M17 6.00999V5.99999",
+	"M19 8.00999V7.99999",
+	"M5 21H19",
+]
+
 function HouseIcon({ size = 24, className, ...props }: IconProps) {
 	return (
 		<svg
@@ -12,16 +26,9 @@ function HouseIcon({ size = 24, className, ...props }: IconProps) {
 			aria-hidden="true"
 			{...props}
 		>
-			<path
-				d="M9 21V16C9 14.34 10.34 13 12 13C13.65 13 15 14.34 15 16V21"
-				stroke="currentColor"
-				strokeWidth="2"
-			/>
-			<path
-				d="M12 2L2 9.5V10.5L4 11V21H20V11L22 10.5V9.5L12 2Z"
-				stroke="currentColor"
-				strokeWidth="2"
-			/>
+			{paths.map((d, i) => (
+				<path key={i} d={d} stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+			))}
 		</svg>
 	)
 }

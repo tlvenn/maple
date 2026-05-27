@@ -1,16 +1,17 @@
 import { HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi"
 import { Schema } from "effect"
+import { SpanId, TraceId } from "../primitives"
 import { QueryEngineExecuteRequest, QueryEngineExecuteResponse, TinybirdDateTime } from "../query-engine"
 import { Authorization } from "./current-tenant"
-import { TinybirdQueryError, TinybirdQuotaExceededError } from "./tinybird"
+import { WarehouseQueryError, WarehouseQuotaExceededError } from "./warehouse"
 
 // ---------------------------------------------------------------------------
 // Dedicated endpoint schemas
 // ---------------------------------------------------------------------------
 
 export class SpanHierarchyRequest extends Schema.Class<SpanHierarchyRequest>("SpanHierarchyRequest")({
-	traceId: Schema.String,
-	spanId: Schema.optional(Schema.String),
+	traceId: TraceId,
+	spanId: Schema.optional(SpanId),
 	startTime: Schema.optional(TinybirdDateTime),
 	endTime: Schema.optional(TinybirdDateTime),
 }) {}
@@ -18,8 +19,8 @@ export class SpanHierarchyRequest extends Schema.Class<SpanHierarchyRequest>("Sp
 export class SpanHierarchyResponse extends Schema.Class<SpanHierarchyResponse>("SpanHierarchyResponse")({
 	data: Schema.Array(
 		Schema.Struct({
-			traceId: Schema.String,
-			spanId: Schema.String,
+			traceId: TraceId,
+			spanId: SpanId,
 			parentSpanId: Schema.String,
 			spanName: Schema.String,
 			serviceName: Schema.String,
@@ -34,6 +35,24 @@ export class SpanHierarchyResponse extends Schema.Class<SpanHierarchyResponse>("
 	),
 }) {}
 
+export class SpanDetailRequest extends Schema.Class<SpanDetailRequest>("SpanDetailRequest")({
+	traceId: TraceId,
+	spanId: SpanId,
+	startTime: Schema.optional(TinybirdDateTime),
+	endTime: Schema.optional(TinybirdDateTime),
+}) {}
+
+export class SpanDetailResponse extends Schema.Class<SpanDetailResponse>("SpanDetailResponse")({
+	data: Schema.NullOr(
+		Schema.Struct({
+			traceId: TraceId,
+			spanId: SpanId,
+			spanAttributes: Schema.String,
+			resourceAttributes: Schema.String,
+		}),
+	),
+}) {}
+
 const OptionalStringArray = Schema.optional(Schema.Array(Schema.String))
 
 export class ErrorsByTypeRequest extends Schema.Class<ErrorsByTypeRequest>("ErrorsByTypeRequest")({
@@ -42,14 +61,15 @@ export class ErrorsByTypeRequest extends Schema.Class<ErrorsByTypeRequest>("Erro
 	rootOnly: Schema.optional(Schema.Boolean),
 	services: OptionalStringArray,
 	deploymentEnvs: OptionalStringArray,
-	errorTypes: OptionalStringArray,
+	fingerprintHashes: OptionalStringArray,
 	limit: Schema.optional(Schema.Number),
 }) {}
 
 export class ErrorsByTypeResponse extends Schema.Class<ErrorsByTypeResponse>("ErrorsByTypeResponse")({
 	data: Schema.Array(
 		Schema.Struct({
-			errorType: Schema.String,
+			fingerprintHash: Schema.String,
+			errorLabel: Schema.String,
 			sampleMessage: Schema.String,
 			count: Schema.Number,
 			affectedServicesCount: Schema.Number,
@@ -63,7 +83,7 @@ export class ErrorsTimeseriesRequest extends Schema.Class<ErrorsTimeseriesReques
 	{
 		startTime: TinybirdDateTime,
 		endTime: TinybirdDateTime,
-		errorType: Schema.String,
+		fingerprintHash: Schema.String,
 		services: OptionalStringArray,
 		bucketSeconds: Schema.optional(Schema.Number),
 	},
@@ -86,7 +106,7 @@ export class ErrorsSummaryRequest extends Schema.Class<ErrorsSummaryRequest>("Er
 	rootOnly: Schema.optional(Schema.Boolean),
 	services: OptionalStringArray,
 	deploymentEnvs: OptionalStringArray,
-	errorTypes: OptionalStringArray,
+	fingerprintHashes: OptionalStringArray,
 }) {}
 
 export class ErrorsSummaryResponse extends Schema.Class<ErrorsSummaryResponse>("ErrorsSummaryResponse")({
@@ -106,7 +126,7 @@ export class ErrorDetailTracesRequest extends Schema.Class<ErrorDetailTracesRequ
 )({
 	startTime: TinybirdDateTime,
 	endTime: TinybirdDateTime,
-	errorType: Schema.String,
+	fingerprintHash: Schema.String,
 	rootOnly: Schema.optional(Schema.Boolean),
 	services: OptionalStringArray,
 	limit: Schema.optional(Schema.Number),
@@ -117,7 +137,7 @@ export class ErrorDetailTracesResponse extends Schema.Class<ErrorDetailTracesRes
 )({
 	data: Schema.Array(
 		Schema.Struct({
-			traceId: Schema.String,
+			traceId: TraceId,
 			startTime: Schema.String,
 			durationMicros: Schema.Number,
 			spanCount: Schema.Number,
@@ -224,13 +244,52 @@ export class ServiceDbEdgesResponse extends Schema.Class<ServiceDbEdgesResponse>
 	data: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
 }) {}
 
-const ServicePlatformLiteral = Schema.Literals(["kubernetes", "cloudflare", "lambda", "web", "unknown"])
+export class ServiceExternalEdgesRequest extends Schema.Class<ServiceExternalEdgesRequest>(
+	"ServiceExternalEdgesRequest",
+)({
+	startTime: TinybirdDateTime,
+	endTime: TinybirdDateTime,
+	serviceName: Schema.String,
+	deploymentEnv: Schema.optional(Schema.String),
+}) {}
 
-export class ServicePlatformsRequest extends Schema.Class<ServicePlatformsRequest>("ServicePlatformsRequest")({
+// Service-scoped variants for the service-detail page's Dependencies tab.
+// Same response shape as the org-wide ServiceDependencies* / ServiceDbEdges*
+// pair — adding `serviceName` lets the query pre-filter at the source instead
+// of fetching every org-wide edge and discarding ~95% of rows in the client.
+export class ServiceDependenciesForServiceRequest extends Schema.Class<ServiceDependenciesForServiceRequest>(
+	"ServiceDependenciesForServiceRequest",
+)({
+	serviceName: Schema.String,
 	startTime: TinybirdDateTime,
 	endTime: TinybirdDateTime,
 	deploymentEnv: Schema.optional(Schema.String),
 }) {}
+
+export class ServiceDbEdgesForServiceRequest extends Schema.Class<ServiceDbEdgesForServiceRequest>(
+	"ServiceDbEdgesForServiceRequest",
+)({
+	serviceName: Schema.String,
+	startTime: TinybirdDateTime,
+	endTime: TinybirdDateTime,
+	deploymentEnv: Schema.optional(Schema.String),
+}) {}
+
+export class ServiceExternalEdgesResponse extends Schema.Class<ServiceExternalEdgesResponse>(
+	"ServiceExternalEdgesResponse",
+)({
+	data: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+}) {}
+
+const ServicePlatformLiteral = Schema.Literals(["kubernetes", "cloudflare", "lambda", "web", "unknown"])
+
+export class ServicePlatformsRequest extends Schema.Class<ServicePlatformsRequest>("ServicePlatformsRequest")(
+	{
+		startTime: TinybirdDateTime,
+		endTime: TinybirdDateTime,
+		deploymentEnv: Schema.optional(Schema.String),
+	},
+) {}
 
 export class ServicePlatformsResponse extends Schema.Class<ServicePlatformsResponse>(
 	"ServicePlatformsResponse",
@@ -302,6 +361,22 @@ export class ListLogsRequest extends Schema.Class<ListLogsRequest>("ListLogsRequ
 }) {}
 
 export class ListLogsResponse extends Schema.Class<ListLogsResponse>("ListLogsResponse")({
+	data: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+}) {}
+
+// Exact-match lookup of one log by its composite key (logs have no primary id).
+// `timestamp` is the raw ClickHouse DateTime64 string and carries sub-second
+// precision (`YYYY-MM-DD HH:mm:ss.fffffffff`), so it is a plain string rather
+// than `TinybirdDateTime` (which only matches second-level precision).
+export class GetLogRequest extends Schema.Class<GetLogRequest>("GetLogRequest")({
+	timestamp: Schema.String,
+	serviceName: Schema.String,
+	traceId: Schema.optional(Schema.String),
+	spanId: Schema.optional(Schema.String),
+}) {}
+
+// `data` holds 0 or 1 rows — the requested log, or nothing if it aged out.
+export class GetLogResponse extends Schema.Class<GetLogResponse>("GetLogResponse")({
 	data: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
 }) {}
 
@@ -793,26 +868,49 @@ const QueryBuilderAddOnsSchema = Schema.Struct({
 	legend: Schema.Boolean,
 })
 
-export const QueryBuilderQueryDraftSchema = Schema.Struct({
+// Fields shared by every query-draft source. Metric-specific fields live only
+// on the metrics variant below — traces/logs queries never carry them.
+const queryDraftBaseFields = {
 	id: Schema.String,
 	name: Schema.String,
-	enabled: Schema.Boolean,
-	dataSource: Schema.Literals(["traces", "logs", "metrics"]),
-	signalSource: Schema.optional(Schema.Literals(["default", "meter"])),
-	metricName: Schema.String,
-	metricType: Schema.Literals(["sum", "gauge", "histogram", "exponential_histogram"]),
-	isMonotonic: Schema.optional(Schema.Boolean),
-	whereClause: Schema.String,
+	enabled: Schema.optional(Schema.Boolean),
+	hidden: Schema.optional(Schema.Boolean),
+	whereClause: Schema.optional(Schema.String),
 	aggregation: Schema.String,
-	stepInterval: Schema.String,
+	stepInterval: Schema.optional(Schema.String),
 	orderByDirection: Schema.optional(Schema.Literals(["desc", "asc"])),
-	addOns: QueryBuilderAddOnsSchema,
-	groupBy: Schema.mutable(Schema.Array(Schema.String)),
+	addOns: Schema.optional(QueryBuilderAddOnsSchema),
+	groupBy: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
 	having: Schema.optional(Schema.String),
 	orderBy: Schema.optional(Schema.String),
 	limit: Schema.optional(Schema.String),
 	legend: Schema.optional(Schema.String),
+}
+
+export const TracesQueryDraftSchema = Schema.Struct({
+	...queryDraftBaseFields,
+	dataSource: Schema.Literal("traces"),
 })
+
+export const LogsQueryDraftSchema = Schema.Struct({
+	...queryDraftBaseFields,
+	dataSource: Schema.Literal("logs"),
+})
+
+export const MetricsQueryDraftSchema = Schema.Struct({
+	...queryDraftBaseFields,
+	dataSource: Schema.Literal("metrics"),
+	signalSource: Schema.optional(Schema.Literals(["default", "meter"])),
+	metricName: Schema.optional(Schema.String),
+	metricType: Schema.optional(Schema.Literals(["sum", "gauge", "histogram", "exponential_histogram"])),
+	isMonotonic: Schema.optional(Schema.Boolean),
+})
+
+export const QueryBuilderQueryDraftSchema = Schema.Union([
+	TracesQueryDraftSchema,
+	LogsQueryDraftSchema,
+	MetricsQueryDraftSchema,
+])
 export type QueryBuilderQueryDraftPayload = Schema.Schema.Type<typeof QueryBuilderQueryDraftSchema>
 
 export class ExecuteQueryBuilderRequest extends Schema.Class<ExecuteQueryBuilderRequest>(
@@ -850,6 +948,55 @@ export class ExecuteQueryBuilderResponse extends Schema.Class<ExecuteQueryBuilde
 	warnings: Schema.optional(Schema.Array(Schema.String)),
 }) {}
 
+// ---------------------------------------------------------------------------
+// Raw SQL chart (Hyperdx-style — user-authored ClickHouse SQL with macros)
+// ---------------------------------------------------------------------------
+
+export const RawSqlDisplayType = Schema.Literals([
+	"line",
+	"area",
+	"bar",
+	"table",
+	"stat",
+	"pie",
+	"histogram",
+	"heatmap",
+	"funnel",
+])
+export type RawSqlDisplayType = Schema.Schema.Type<typeof RawSqlDisplayType>
+
+export class RawSqlExecuteRequest extends Schema.Class<RawSqlExecuteRequest>("RawSqlExecuteRequest")({
+	sql: Schema.String,
+	displayType: RawSqlDisplayType,
+	startTime: TinybirdDateTime,
+	endTime: TinybirdDateTime,
+	granularitySeconds: Schema.optional(Schema.Number),
+}) {}
+
+export class RawSqlExecuteResponse extends Schema.Class<RawSqlExecuteResponse>("RawSqlExecuteResponse")({
+	data: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+	meta: Schema.Struct({
+		rowCount: Schema.Number,
+		columns: Schema.Array(Schema.String),
+		granularitySeconds: Schema.Number,
+	}),
+}) {}
+
+export class RawSqlValidationError extends Schema.TaggedErrorClass<RawSqlValidationError>()(
+	"@maple/http/errors/RawSqlValidationError",
+	{
+		code: Schema.Literals([
+			"MissingOrgFilter",
+			"InvalidMacro",
+			"DisallowedStatement",
+			"MultipleStatements",
+			"UnresolvedMacro",
+		]),
+		message: Schema.String,
+	},
+	{ httpApiStatus: 400 },
+) {}
+
 export class QueryEngineValidationError extends Schema.TaggedErrorClass<QueryEngineValidationError>()(
 	"@maple/http/errors/QueryEngineValidationError",
 	{
@@ -884,16 +1031,16 @@ export class QueryEngineTimeoutError extends Schema.TaggedErrorClass<QueryEngine
 const queryEngineEndpointErrors = [
 	QueryEngineExecutionError,
 	QueryEngineTimeoutError,
-	TinybirdQueryError,
-	TinybirdQuotaExceededError,
+	WarehouseQueryError,
+	WarehouseQuotaExceededError,
 ] as const
 
 const validatedQueryEndpointErrors = [
 	QueryEngineValidationError,
 	QueryEngineExecutionError,
 	QueryEngineTimeoutError,
-	TinybirdQueryError,
-	TinybirdQuotaExceededError,
+	WarehouseQueryError,
+	WarehouseQuotaExceededError,
 ] as const
 
 export class QueryEngineApiGroup extends HttpApiGroup.make("queryEngine")
@@ -908,6 +1055,13 @@ export class QueryEngineApiGroup extends HttpApiGroup.make("queryEngine")
 		HttpApiEndpoint.post("spanHierarchy", "/span-hierarchy", {
 			payload: SpanHierarchyRequest,
 			success: SpanHierarchyResponse,
+			error: queryEngineEndpointErrors,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("spanDetail", "/span-detail", {
+			payload: SpanDetailRequest,
+			success: SpanDetailResponse,
 			error: queryEngineEndpointErrors,
 		}),
 	)
@@ -975,9 +1129,30 @@ export class QueryEngineApiGroup extends HttpApiGroup.make("queryEngine")
 		}),
 	)
 	.add(
+		HttpApiEndpoint.post("serviceDependenciesForService", "/service-dependencies-for-service", {
+			payload: ServiceDependenciesForServiceRequest,
+			success: ServiceDependenciesResponse,
+			error: queryEngineEndpointErrors,
+		}),
+	)
+	.add(
 		HttpApiEndpoint.post("serviceDbEdges", "/service-db-edges", {
 			payload: ServiceDbEdgesRequest,
 			success: ServiceDbEdgesResponse,
+			error: queryEngineEndpointErrors,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("serviceDbEdgesForService", "/service-db-edges-for-service", {
+			payload: ServiceDbEdgesForServiceRequest,
+			success: ServiceDbEdgesResponse,
+			error: queryEngineEndpointErrors,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("serviceExternalEdges", "/service-external-edges", {
+			payload: ServiceExternalEdgesRequest,
+			success: ServiceExternalEdgesResponse,
 			error: queryEngineEndpointErrors,
 		}),
 	)
@@ -1006,6 +1181,13 @@ export class QueryEngineApiGroup extends HttpApiGroup.make("queryEngine")
 		HttpApiEndpoint.post("listLogs", "/list-logs", {
 			payload: ListLogsRequest,
 			success: ListLogsResponse,
+			error: queryEngineEndpointErrors,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("getLog", "/get-log", {
+			payload: GetLogRequest,
+			success: GetLogResponse,
 			error: queryEngineEndpointErrors,
 		}),
 	)
@@ -1140,6 +1322,19 @@ export class QueryEngineApiGroup extends HttpApiGroup.make("queryEngine")
 			payload: WorkloadFacetsRequest,
 			success: WorkloadFacetsResponse,
 			error: queryEngineEndpointErrors,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("executeRawSql", "/execute-raw-sql", {
+			payload: RawSqlExecuteRequest,
+			success: RawSqlExecuteResponse,
+			error: [
+				RawSqlValidationError,
+				QueryEngineExecutionError,
+				QueryEngineTimeoutError,
+				WarehouseQueryError,
+				WarehouseQuotaExceededError,
+			] as const,
 		}),
 	)
 	.prefix("/api/query-engine")

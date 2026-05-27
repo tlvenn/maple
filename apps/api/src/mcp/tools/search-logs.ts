@@ -1,5 +1,5 @@
 import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
-import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { clampLimit, clampOffset } from "../lib/limits"
 import { truncate, formatNumber } from "../lib/format"
@@ -7,7 +7,7 @@ import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { searchLogs } from "@maple/query-engine/observability"
-import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
 
 export function registerSearchLogsTool(server: McpToolRegistrar) {
 	server.tool(
@@ -44,6 +44,13 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 			const lim = clampLimit(limit, { defaultValue: 30, max: 200 })
 			const off = clampOffset(offset, { max: 10_000 })
 			const tenant = yield* resolveTenant
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				service: service ?? "all",
+				severity: severity ?? "all",
+				limit: lim,
+				offset: off,
+			})
 
 			const result = yield* searchLogs({
 				timeRange: { startTime: st, endTime: et },
@@ -54,9 +61,13 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 				limit: lim,
 				offset: off,
 			}).pipe(
-				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
-				Effect.mapError((e) => new McpQueryError({ message: e.message, pipe: "list_logs" })),
+				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
+				Effect.catchTag("@maple/query-engine/errors/ObservabilityError", (e) =>
+					Effect.fail(new McpQueryError({ message: e.message, pipe: "search_logs", cause: e })),
+				),
 			)
+
+			yield* Effect.annotateCurrentSpan("resultCount", result.logs.length)
 
 			if (result.logs.length === 0) {
 				return { content: [{ type: "text", text: `No logs found matching filters (${st} — ${et})` }] }

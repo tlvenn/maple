@@ -19,13 +19,16 @@ import { Schema } from "effect"
 
 // ---------------------------------------------------------------------------
 // QueryBuilderError — tagged error for invariant violations in the DSL.
-// Catchable via `Effect.catchTag("QueryBuilderError")` at the service layer.
+// Catchable via `Effect.catchTag("@maple/query-engine/ch/QueryBuilderError")` at the service layer.
 // ---------------------------------------------------------------------------
 
-export class QueryBuilderError extends Schema.TaggedErrorClass<QueryBuilderError>()("QueryBuilderError", {
-	code: Schema.Literals(["SelectRequired", "UnresolvedParam"]),
-	message: Schema.String,
-}) {}
+export class QueryBuilderError extends Schema.TaggedErrorClass<QueryBuilderError>()(
+	"@maple/query-engine/ch/QueryBuilderError",
+	{
+		code: Schema.Literals(["SelectRequired", "UnresolvedParam"]),
+		message: Schema.String,
+	},
+) {}
 
 // ---------------------------------------------------------------------------
 // CompiledQuery — bundles the SQL string with its output type so consumers
@@ -80,6 +83,12 @@ export function compileCH<
 		// Compile the inner query lazily
 		const innerCompiled = compileCH(state.fromQuery, params, { skipFormat: true })
 		fromFragment = raw(`(${innerCompiled.sql}) AS ${state.fromQueryAlias}`)
+	} else if (state.fromUnion) {
+		// Compile the inner union without an outer FORMAT — the outer query
+		// owns formatting. Strips a trailing `\nFORMAT <fmt>` defensively.
+		const innerCompiled = compileUnion(state.fromUnion, params)
+		const innerSql = innerCompiled.sql.replace(/\nFORMAT \w+$/, "")
+		fromFragment = raw(`(\n${innerSql}\n) AS ${state.fromQueryAlias}`)
 	} else if (state.tableAlias) {
 		fromFragment = raw(`${state.tableName} AS ${state.tableAlias}`)
 	} else {

@@ -8,11 +8,15 @@ import {
 	applyNodeChanges,
 	type Node,
 	type NodeChange,
+	type NodePositionChange,
 	type ReactFlowInstance,
+	type Viewport,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
 
-import { Result } from "@/lib/effect-atom"
+import { useAuth } from "@clerk/clerk-react"
+import { Result, useAtom } from "@/lib/effect-atom"
+import { serviceMapLayoutAtomFamily } from "@/atoms/service-map-layout-atoms"
 import { Link } from "@tanstack/react-router"
 import { formatBackendError } from "@/lib/error-messages"
 
@@ -24,25 +28,26 @@ import { ScrollArea } from "@maple/ui/components/ui/scroll-area"
 import { Button } from "@maple/ui/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@maple/ui/components/ui/tabs"
-import { ArrowRightIcon, CubeIcon, DatabaseIcon, NetworkNodesIcon, XmarkIcon } from "@/components/icons"
+import { ArrowRightIcon, CubeIcon, NetworkNodesIcon, XmarkIcon } from "@/components/icons"
 import {
 	getServiceMapDbEdgesResultAtom,
 	getServiceMapResultAtom,
 	getServiceOverviewResultAtom,
 	getServicePlatformsResultAtom,
 	getServiceWorkloadsResultAtom,
-} from "@/lib/services/atoms/tinybird-query-atoms"
+} from "@/lib/services/atoms/warehouse-query-atoms"
 import type {
 	GetServiceMapInput,
 	ServiceDbEdge,
 	ServiceEdge,
 	ServicePlatform,
-} from "@/api/tinybird/service-map"
-import type { GetServiceOverviewInput, ServiceOverview } from "@/api/tinybird/services"
-import type { ServiceWorkload } from "@/api/tinybird/service-infra"
+} from "@/api/warehouse/service-map"
+import type { GetServiceOverviewInput, ServiceOverview } from "@/api/warehouse/services"
+import type { ServiceWorkload } from "@/api/warehouse/service-infra"
 import { useInfraEnabled } from "@/hooks/use-infra-enabled"
 import { ServiceMapNode } from "./service-map-node"
 import { ServiceMapEdge } from "./service-map-edge"
+import { getDbDescriptor } from "./service-map-db"
 import {
 	buildFlowElements,
 	DB_NODE_PREFIX,
@@ -180,7 +185,7 @@ function ServiceDetailPanel({
 			</div>
 
 			<Tabs defaultValue="service" className="flex flex-col flex-1 min-h-0">
-				<TabsList variant="line" className="shrink-0 px-4 pt-2">
+				<TabsList variant="underline" className="shrink-0 px-4 pt-2">
 					<TabsTrigger value="service">
 						<NetworkNodesIcon size={12} />
 						Service
@@ -540,10 +545,10 @@ function DatabaseDetailPanel({
 	const errorRate = totalCalls > 0 ? totalErrors / totalCalls : 0
 	const callsPerSecond = totalCalls / Math.max(durationSeconds, 1)
 	const avgLatencyMs =
-		totalCalls > 0
-			? callers.reduce((sum, e) => sum + e.avgDurationMs * e.callCount, 0) / totalCalls
-			: 0
+		totalCalls > 0 ? callers.reduce((sum, e) => sum + e.avgDurationMs * e.callCount, 0) / totalCalls : 0
 	const p95LatencyMs = callers.reduce((max, e) => Math.max(max, e.p95DurationMs), 0)
+
+	const { category, Icon: DbIcon, color: dbColor, branded: dbBranded } = getDbDescriptor(dbSystem)
 
 	return (
 		<div className="flex flex-col h-full bg-background overflow-hidden">
@@ -552,12 +557,16 @@ function DatabaseDetailPanel({
 				<div className="flex items-center gap-2 min-w-0">
 					<div
 						className="w-[3px] h-[18px] rounded-sm shrink-0"
-						style={{ backgroundColor: "oklch(0.55 0.05 250)" }}
+						style={{ backgroundColor: dbColor }}
 					/>
-					<DatabaseIcon size={14} className="text-muted-foreground/80 shrink-0" />
+					<DbIcon
+						size={14}
+						className="shrink-0"
+						style={dbBranded ? undefined : { color: dbColor }}
+					/>
 					<span className="text-sm font-semibold text-foreground truncate">{dbSystem}</span>
 					<span className="text-[9px] font-medium tracking-wide text-muted-foreground/60 uppercase shrink-0">
-						database
+						{category}
 					</span>
 				</div>
 				<Button variant="ghost" size="icon-xs" onClick={onClose}>
@@ -778,6 +787,9 @@ function ServiceMapCanvas({
 	const [layoutConfig, setLayoutConfig] = useState<LayoutConfig>({ ...DEFAULT_LAYOUT_CONFIG })
 	const [colorMode, setColorMode] = useState<ServiceMapColorMode>("service")
 
+	const { orgId } = useAuth()
+	const [layout, setLayout] = useAtom(serviceMapLayoutAtomFamily(orgId ?? "default"))
+
 	const { layoutedNodes, flowEdges, services } = useMemo(() => {
 		const { nodes: rawNodes, edges: rawEdges } = buildFlowElements({
 			edges: serviceEdges,
@@ -796,17 +808,19 @@ function ServiceMapCanvas({
 		return { layoutedNodes: positioned, flowEdges: rawEdges, services: allServices }
 	}, [serviceEdges, dbEdges, platforms, runtimes, overviews, workloads, durationSeconds, layoutConfig])
 
-	// Merge layout positions with selection + color-mode state
+	// Merge layout positions with selection + color-mode state. Persisted drag
+	// positions (keyed by node id) override the deterministic auto-layout.
 	const nodesWithSelection = useMemo(() => {
 		return layoutedNodes.map((node) => ({
 			...node,
+			position: layout.positions[node.id] ?? node.position,
 			data: {
 				...node.data,
 				selected: node.id === selectedServiceId,
 				colorMode,
 			},
 		}))
-	}, [layoutedNodes, selectedServiceId, colorMode])
+	}, [layoutedNodes, selectedServiceId, colorMode, layout.positions])
 
 	// Track nodes with full ReactFlow state (dimensions, positions from drag, etc.)
 	const [nodes, setNodes] = useState(nodesWithSelection)
@@ -831,26 +845,56 @@ function ServiceMapCanvas({
 		})
 	}
 
-	// Programmatic fitView after ALL nodes are measured (the fitView prop fires too early)
+	// Programmatic fitView after ALL nodes are measured (the fitView prop fires too early).
+	// Skip auto-fit entirely when a saved viewport exists so the restored camera survives.
 	const rfInstance = useRef<ReactFlowInstance | null>(null)
-	const hasFitView = useRef(false)
+	const hasFitView = useRef(layout.viewport != null)
 
-	const onNodesChange = useCallback((changes: NodeChange[]) => {
-		setNodes((prev) => {
-			const next = applyNodeChanges(changes, prev) as typeof prev
+	const onNodesChange = useCallback(
+		(changes: NodeChange[]) => {
+			setNodes((prev) => {
+				const next = applyNodeChanges(changes, prev) as typeof prev
 
-			if (!hasFitView.current && rfInstance.current && changes.some((c) => c.type === "dimensions")) {
-				const allMeasured =
-					next.length > 0 && next.every((n) => n.measured?.width && n.measured?.height)
-				if (allMeasured) {
-					hasFitView.current = true
-					setTimeout(() => rfInstance.current?.fitView(), 0)
+				if (
+					!hasFitView.current &&
+					rfInstance.current &&
+					changes.some((c) => c.type === "dimensions")
+				) {
+					const allMeasured =
+						next.length > 0 && next.every((n) => n.measured?.width && n.measured?.height)
+					if (allMeasured) {
+						hasFitView.current = true
+						setTimeout(() => rfInstance.current?.fitView(), 0)
+					}
 				}
-			}
 
-			return next
-		})
-	}, [])
+				return next
+			})
+
+			// Persist finished drags only (dragging === false), keyed by node id.
+			const dragEnds = changes.filter(
+				(c): c is NodePositionChange =>
+					c.type === "position" && c.dragging === false && c.position != null,
+			)
+			if (dragEnds.length > 0) {
+				setLayout((prev) => {
+					const positions = { ...prev.positions }
+					for (const c of dragEnds) {
+						positions[c.id] = { x: c.position!.x, y: c.position!.y }
+					}
+					return { ...prev, positions }
+				})
+			}
+		},
+		[setLayout],
+	)
+
+	const onMoveEnd = useCallback(
+		(_: unknown, viewport: Viewport) => {
+			setLayout((prev) => ({ ...prev, viewport }))
+		},
+		[setLayout],
+	)
 
 	const handleNodeClick = useCallback((_: React.MouseEvent, node: Node<ServiceNodeData>) => {
 		setSelectedServiceId((prev) => (prev === node.id ? null : node.id))
@@ -890,7 +934,7 @@ function ServiceMapCanvas({
 								>
 									<SelectTrigger
 										size="sm"
-										className="h-6 text-[11px] capitalize border-0 bg-transparent px-1.5"
+										className="h-6 min-w-0 text-[11px] capitalize border-0 bg-transparent px-1.5"
 									>
 										<SelectValue />
 									</SelectTrigger>
@@ -907,6 +951,8 @@ function ServiceMapCanvas({
 								onNodesChange={onNodesChange}
 								onNodeClick={handleNodeClick}
 								onPaneClick={handlePaneClick}
+								onMoveEnd={onMoveEnd}
+								defaultViewport={layout.viewport ?? undefined}
 								onInit={(instance) => {
 									rfInstance.current = instance as unknown as ReactFlowInstance
 								}}
@@ -1000,19 +1046,21 @@ function ServiceMapCanvas({
 							{colorMode === "platform" && (
 								<>
 									<span className="text-foreground/30">|</span>
-									{(["kubernetes", "cloudflare", "lambda", "web", "unknown"] as const).map((p) => (
-										<div key={p} className="flex items-center gap-1.5">
-											<div
-												className="size-2.5 rounded-sm shrink-0"
-												style={{
-													backgroundColor: getPlatformColor(
-														p === "unknown" ? undefined : p,
-													),
-												}}
-											/>
-											<span className="font-medium capitalize">{p}</span>
-										</div>
-									))}
+									{(["kubernetes", "cloudflare", "lambda", "web", "unknown"] as const).map(
+										(p) => (
+											<div key={p} className="flex items-center gap-1.5">
+												<div
+													className="size-2.5 rounded-sm shrink-0"
+													style={{
+														backgroundColor: getPlatformColor(
+															p === "unknown" ? undefined : p,
+														),
+													}}
+												/>
+												<span className="font-medium capitalize">{p}</span>
+											</div>
+										),
+									)}
 								</>
 							)}
 							<span className="flex-1" />

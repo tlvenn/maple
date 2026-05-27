@@ -41,7 +41,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@maple/ui/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@maple/ui/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { CornerDownLeftIcon, ImageIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react"
+import { CornerDownLeftIcon, ImageIcon, PlusIcon, SquareIcon, XmarkIcon } from "@/components/icons"
 import { nanoid } from "nanoid"
 import { Children, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 
@@ -970,7 +970,7 @@ export const PromptInputSubmit = ({
 	} else if (status === "streaming") {
 		Icon = <SquareIcon className="size-4" />
 	} else if (status === "error") {
-		Icon = <XIcon className="size-4" />
+		Icon = <XmarkIcon className="size-4" />
 	}
 
 	const handleClick = useCallback(
@@ -1009,7 +1009,7 @@ export type PromptInputSelectTriggerProps = ComponentProps<typeof SelectTrigger>
 export const PromptInputSelectTrigger = ({ className, ...props }: PromptInputSelectTriggerProps) => (
 	<SelectTrigger
 		className={cn(
-			"border-none bg-transparent font-medium text-muted-foreground shadow-none transition-colors",
+			"min-w-0 border-none bg-transparent font-medium text-muted-foreground shadow-none transition-colors",
 			"hover:bg-accent hover:text-foreground aria-expanded:bg-accent aria-expanded:text-foreground",
 			className,
 		)}
@@ -1093,9 +1093,7 @@ export const PromptInputTabItem = ({ className, ...props }: PromptInputTabItemPr
 
 export type PromptInputCommandProps = ComponentProps<typeof Command>
 
-export const PromptInputCommand = ({ className, ...props }: PromptInputCommandProps) => (
-	<Command className={cn(className)} {...props} />
-)
+export const PromptInputCommand = (props: PromptInputCommandProps) => <Command {...props} />
 
 export type PromptInputCommandInputProps = ComponentProps<typeof CommandInput>
 

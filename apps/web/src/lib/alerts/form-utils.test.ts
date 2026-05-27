@@ -1,7 +1,40 @@
 import { describe, expect, it } from "vitest"
-import { defaultRuleForm, flattenAlertChartData, signalToQueryParams } from "./form-utils"
+import {
+	buildRuleRequest,
+	defaultRuleForm,
+	deriveRuleQueryIssues,
+	domainThresholdToForm,
+	flattenAlertChartData,
+	formThresholdToDomain,
+	rawSqlHasValueColumn,
+	signalToQueryParams,
+	type RuleFormState,
+} from "./form-utils"
 
 const makePoint = (bucket: string, series: Record<string, number>) => ({ bucket, series })
+
+function queryRuleForm(overrides: Partial<RuleFormState["queryBuilderDraft"]>): RuleFormState {
+	const base = defaultRuleForm()
+	const groupBy = "groupBy" in overrides ? (overrides.groupBy ?? []) : []
+	const queryBuilderDraft = {
+		...base.queryBuilderDraft,
+		...overrides,
+		addOns: {
+			groupBy: groupBy.length > 0,
+			having: false,
+			orderBy: false,
+			limit: false,
+			legend: false,
+			...overrides.addOns,
+		},
+		groupBy,
+	} as RuleFormState["queryBuilderDraft"]
+	return {
+		...base,
+		signalType: "builder_query" as const,
+		queryBuilderDraft,
+	}
+}
 
 describe("flattenAlertChartData", () => {
 	it("filters to only selected services when multiple are specified", () => {
@@ -62,16 +95,73 @@ describe("flattenAlertChartData", () => {
 	})
 })
 
+describe("rule notes", () => {
+	it("defaults to an empty note", () => {
+		expect(defaultRuleForm().notes).toBe("")
+	})
+
+	it("carries a trimmed note onto the upsert request", () => {
+		const request = buildRuleRequest({
+			...defaultRuleForm(),
+			name: "Error rate",
+			notes: "  See runbook: https://wiki/incidents  ",
+		})
+
+		expect(request.notes).toBe("See runbook: https://wiki/incidents")
+	})
+
+	it("sends null when the note is blank or whitespace-only", () => {
+		expect(buildRuleRequest({ ...defaultRuleForm(), name: "A", notes: "" }).notes).toBeNull()
+		expect(buildRuleRequest({ ...defaultRuleForm(), name: "A", notes: "   " }).notes).toBeNull()
+	})
+})
+
+describe("threshold unit conversion", () => {
+	it("converts error_rate thresholds between percent (form) and ratio (domain)", () => {
+		// User enters 5 (%), domain stores 0.05 (ratio) — the unit the query
+		// engine emits and AlertsService compares against.
+		expect(formThresholdToDomain("error_rate", "5")).toBe(0.05)
+		expect(formThresholdToDomain("error_rate", "50")).toBe(0.5)
+		expect(domainThresholdToForm("error_rate", 0.05)).toBe("5")
+		expect(domainThresholdToForm("error_rate", 0.5)).toBe("50")
+	})
+
+	it("passes non-error_rate thresholds through unchanged", () => {
+		expect(formThresholdToDomain("p95_latency", "500")).toBe(500)
+		expect(domainThresholdToForm("p95_latency", 500)).toBe("500")
+		expect(formThresholdToDomain("throughput", "1000")).toBe(1000)
+	})
+
+	it("stores error_rate threshold as a ratio on the upsert request", () => {
+		// The default form threshold "5" must round-trip to the 0.05 ratio the
+		// MCP tool also uses — so a default error-rate alert can actually fire.
+		const request = buildRuleRequest({
+			...defaultRuleForm(),
+			name: "Error rate",
+			signalType: "error_rate",
+		})
+		expect(request.threshold).toBe(0.05)
+	})
+
+	it("keeps latency thresholds in their native units on the upsert request", () => {
+		const request = buildRuleRequest({
+			...defaultRuleForm(),
+			name: "P95",
+			signalType: "p95_latency",
+			threshold: "500",
+		})
+		expect(request.threshold).toBe(500)
+	})
+})
+
 describe("signalToQueryParams", () => {
 	it("parses traces query filters from the where clause for alert previews", () => {
-		const form = {
-			...defaultRuleForm(),
-			signalType: "query" as const,
-			queryDataSource: "traces" as const,
-			queryAggregation: "count",
-			queryWhereClause:
+		const form = queryRuleForm({
+			dataSource: "traces",
+			aggregation: "count",
+			whereClause:
 				'service.name = "checkout" AND span.name = "GET /checkout" AND has_error = true',
-		}
+		})
 
 		expect(signalToQueryParams(form)).toEqual({
 			source: "traces",
@@ -85,13 +175,11 @@ describe("signalToQueryParams", () => {
 	})
 
 	it("parses logs query filters from the where clause for alert previews", () => {
-		const form = {
-			...defaultRuleForm(),
-			signalType: "query" as const,
-			queryDataSource: "logs" as const,
-			queryAggregation: "count",
-			queryWhereClause: 'service.name = "checkout" AND severity = "error"',
-		}
+		const form = queryRuleForm({
+			dataSource: "logs",
+			aggregation: "count",
+			whereClause: 'service.name = "checkout" AND severity = "error"',
+		})
 
 		expect(signalToQueryParams(form)).toEqual({
 			source: "logs",
@@ -104,15 +192,13 @@ describe("signalToQueryParams", () => {
 	})
 
 	it("parses metrics query service filters from the where clause for alert previews", () => {
-		const form = {
-			...defaultRuleForm(),
-			signalType: "query" as const,
-			queryDataSource: "metrics" as const,
-			queryAggregation: "avg",
+		const form = queryRuleForm({
+			dataSource: "metrics",
+			aggregation: "avg",
 			metricName: "cpu.usage",
-			metricType: "gauge" as const,
-			queryWhereClause: 'service.name = "worker"',
-		}
+			metricType: "gauge",
+			whereClause: 'service.name = "worker"',
+		})
 
 		expect(signalToQueryParams(form)).toEqual({
 			source: "metrics",
@@ -123,5 +209,48 @@ describe("signalToQueryParams", () => {
 				serviceName: "worker",
 			},
 		})
+	})
+
+	it("preserves query-builder attribute grouping for alert previews", () => {
+		const form = queryRuleForm({
+			dataSource: "traces",
+			aggregation: "count",
+			whereClause:
+				'service.name = "openrev-integrations" AND root_only = true AND attr.http.request.header.integration_id exists',
+			groupBy: ["attr.http.request.header.integration_id"],
+		})
+
+		expect(signalToQueryParams(form)).toMatchObject({
+			source: "traces",
+			metric: "count",
+			groupBy: "attribute",
+			filters: {
+				serviceName: "openrev-integrations",
+				rootSpansOnly: true,
+				groupByAttributeKeys: ["http.request.header.integration_id"],
+			},
+		})
+	})
+})
+
+describe("raw SQL alert query validation", () => {
+	it("recognizes explicit value aliases and value columns", () => {
+		expect(rawSqlHasValueColumn("SELECT count() AS value FROM traces WHERE $__orgFilter")).toBe(true)
+		expect(rawSqlHasValueColumn('SELECT "value" FROM traces WHERE $__orgFilter')).toBe(true)
+		expect(rawSqlHasValueColumn("SELECT group, value FROM traces WHERE $__orgFilter")).toBe(true)
+	})
+
+	it("flags chart-shaped SQL without an alert value column", () => {
+		const sql =
+			"SELECT toStartOfInterval(Timestamp, INTERVAL $__interval_s SECOND) AS bucket, count() AS errors FROM traces WHERE $__orgFilter GROUP BY bucket"
+
+		expect(rawSqlHasValueColumn(sql)).toBe(false)
+		expect(
+			deriveRuleQueryIssues({
+				...defaultRuleForm(),
+				signalType: "raw_query",
+				rawQuerySql: sql,
+			}),
+		).toEqual(["SQL value column"])
 	})
 })

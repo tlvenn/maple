@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useAgent } from "agents/react"
 import { useAgentChat } from "@cloudflare/ai-chat/react"
 import { useAuth } from "@clerk/clerk-react"
@@ -38,8 +38,39 @@ import { Suggestions, Suggestion } from "@/components/ai-elements/suggestion"
 import { Shimmer } from "@/components/ai-elements/shimmer"
 import { ThinkingIndicator } from "@/components/ai-elements/thinking-indicator"
 import { Tool } from "@/components/ai-elements/tool"
+import { ToolGroup } from "@/components/ai-elements/tool-group"
 import { ApprovalCard } from "./approval-card"
 import type { UIMessage } from "ai"
+
+type ToolPart = {
+	type: string
+	toolCallId: string
+	toolName?: string
+	state: string
+	input?: unknown
+	output?: unknown
+	errorText?: string
+	approval?: { id: string }
+}
+
+function isToolPart(part: UIMessage["parts"][number]): boolean {
+	return part.type.startsWith("tool-") || part.type === "dynamic-tool"
+}
+
+function toolNameFor(part: ToolPart): string {
+	if (part.type.startsWith("tool-")) return part.type.replace(/^tool-/, "")
+	return part.toolName ?? "unknown"
+}
+
+function isPendingApproval(part: ToolPart): boolean {
+	return part.state === "approval-requested" && part.approval?.id != null
+}
+
+function deriveToolStatus(state: string): "running" | "completed" | "error" {
+	if (state === "output-available") return "completed"
+	if (state === "output-error" || state === "output-denied") return "error"
+	return "running"
+}
 
 function shouldShowThinkingIndicator(
 	message: UIMessage,
@@ -65,6 +96,7 @@ interface ChatConversationProps {
 	tabId: string
 	isActive: boolean
 	onFirstMessage?: (tabId: string, text: string) => void
+	onLoadingChange?: (tabId: string, loading: boolean) => void
 	mode?: "alert" | "widget-fix"
 	alertContext?: AlertContext
 	widgetFixContext?: WidgetFixContext
@@ -74,6 +106,7 @@ export function ChatConversation({
 	tabId,
 	isActive,
 	onFirstMessage,
+	onLoadingChange,
 	mode,
 	alertContext,
 	widgetFixContext,
@@ -109,7 +142,6 @@ export function ChatConversation({
 		host: chatAgentUrl,
 		query: async () => ({ token: (await getToken()) ?? null }),
 		queryDeps: [orgId],
-		cacheTtl: 30_000,
 	})
 
 	const prepareSendMessagesRequest = useMemo(
@@ -146,10 +178,30 @@ export function ChatConversation({
 		return base
 	}, [orgId, mode, alertContext, widgetFixContext, activeContexts, referrerPath])
 
+	const getInitialMessages = useMemo(
+		() => async ({ url }: { url: string }) => {
+			const token = await getToken()
+			const getMessagesUrl = new URL(url)
+			getMessagesUrl.pathname += "/get-messages"
+			const response = await fetch(getMessagesUrl.toString(), {
+				headers: token ? { Authorization: `Bearer ${token}` } : {},
+			})
+			if (!response.ok) return []
+			const text = await response.text()
+			if (!text.trim()) return []
+			try {
+				return JSON.parse(text)
+			} catch {
+				return []
+			}
+		},
+		[getToken],
+	)
+
 	const { messages, sendMessage, status, addToolApprovalResponse } = useAgentChat({
 		agent,
 		body,
-		getInitialMessages: null,
+		getInitialMessages,
 		prepareSendMessagesRequest,
 	})
 
@@ -167,6 +219,12 @@ export function ChatConversation({
 	}, [messages.length, agentName])
 
 	const isLoading = status === "streaming" || status === "submitted"
+	useEffect(() => {
+		onLoadingChange?.(tabId, isLoading)
+	}, [tabId, isLoading, onLoadingChange])
+	useEffect(() => {
+		return () => onLoadingChange?.(tabId, false)
+	}, [tabId, onLoadingChange])
 	const isAlertMode = mode === "alert" && !!alertContext
 	const isWidgetFixMode = mode === "widget-fix" && !!widgetFixContext
 	const suggestions = useMemo(() => {
@@ -255,66 +313,96 @@ export function ChatConversation({
 								return (
 									<Message key={message.id} from={message.role}>
 										<MessageContent>
-											{message.parts.map((part, i) => {
-												if (part.type === "text") {
-													return <RichText key={i}>{part.text}</RichText>
-												}
-												if (
-													part.type.startsWith("tool-") ||
-													part.type === "dynamic-tool"
-												) {
-													const toolPart = part as {
-														type: string
-														toolCallId: string
-														toolName?: string
-														state: string
-														input?: unknown
-														output?: unknown
-														errorText?: string
-														approval?: { id: string }
-													}
-													const toolName = part.type.startsWith("tool-")
-														? part.type.replace(/^tool-/, "")
-														: (toolPart.toolName ?? "unknown")
-													if (
-														toolPart.state === "approval-requested" &&
-														toolPart.approval?.id
-													) {
-														return (
-															<ApprovalCard
-																key={toolPart.toolCallId ?? i}
-																toolName={toolName}
-																input={toolPart.input}
-																approvalId={toolPart.approval.id}
-																onApprove={(id) =>
-																	addToolApprovalResponse({
-																		id,
-																		approved: true,
-																	})
-																}
-																onDeny={(id) =>
-																	addToolApprovalResponse({
-																		id,
-																		approved: false,
-																	})
-																}
-															/>
+											{(() => {
+												const nodes: ReactNode[] = []
+												let toolBuf: ToolPart[] = []
+												const flushTools = () => {
+													if (toolBuf.length === 0) return
+													const buf = toolBuf
+													toolBuf = []
+													if (buf.length === 1) {
+														const t = buf[0]!
+														nodes.push(
+															<Tool
+																key={t.toolCallId ?? `tool-${nodes.length}`}
+																toolName={toolNameFor(t)}
+																toolCallId={t.toolCallId}
+																state={t.state}
+																input={t.input}
+																output={t.output}
+																errorText={t.errorText}
+															/>,
 														)
+														return
 													}
-													return (
-														<Tool
-															key={toolPart.toolCallId ?? i}
-															toolName={toolName}
-															toolCallId={toolPart.toolCallId}
-															state={toolPart.state}
-															input={toolPart.input}
-															output={toolPart.output}
-															errorText={toolPart.errorText}
-														/>
+													const runningCount = buf.filter(
+														(t) => deriveToolStatus(t.state) === "running",
+													).length
+													const errorCount = buf.filter(
+														(t) => deriveToolStatus(t.state) === "error",
+													).length
+													nodes.push(
+														<ToolGroup
+															key={`group-${buf[0]!.toolCallId ?? nodes.length}`}
+															count={buf.length}
+															runningCount={runningCount}
+															errorCount={errorCount}
+															defaultOpen={runningCount > 0}
+														>
+															{buf.map((t) => (
+																<Tool
+																	key={t.toolCallId}
+																	toolName={toolNameFor(t)}
+																	toolCallId={t.toolCallId}
+																	state={t.state}
+																	input={t.input}
+																	output={t.output}
+																	errorText={t.errorText}
+																/>
+															))}
+														</ToolGroup>,
 													)
 												}
-												return null
-											})}
+												for (let i = 0; i < message.parts.length; i++) {
+													const part = message.parts[i]!
+													if (part.type === "text") {
+														flushTools()
+														nodes.push(<RichText key={`text-${i}`}>{part.text}</RichText>)
+														continue
+													}
+													if (isToolPart(part)) {
+														const tp = part as ToolPart
+														if (isPendingApproval(tp)) {
+															flushTools()
+															nodes.push(
+																<ApprovalCard
+																	key={tp.toolCallId ?? `approval-${i}`}
+																	toolName={toolNameFor(tp)}
+																	input={tp.input}
+																	approvalId={tp.approval!.id}
+																	onApprove={(id) =>
+																		addToolApprovalResponse({
+																			id,
+																			approved: true,
+																		})
+																	}
+																	onDeny={(id) =>
+																		addToolApprovalResponse({
+																			id,
+																			approved: false,
+																		})
+																	}
+																/>,
+															)
+															continue
+														}
+														toolBuf.push(tp)
+														continue
+													}
+												}
+												flushTools()
+												return nodes
+											})()}
 											{shouldShowThinkingIndicator(
 												message,
 												isLoading,
@@ -337,7 +425,7 @@ export function ChatConversation({
 				<ConversationScrollButton />
 			</Conversation>
 
-			<div className="mx-auto w-full max-w-3xl px-4 pb-4">
+			<div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
 				{(messages.length > 0 || isAlertMode || isWidgetFixMode) && (
 					<Suggestions className="mb-3">
 						{suggestions.map((s) => (

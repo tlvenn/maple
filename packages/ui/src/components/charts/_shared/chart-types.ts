@@ -10,15 +10,28 @@ export interface ChartReferenceLine {
 	strokeDasharray?: string
 }
 
+export interface ChartThreshold {
+	value: number
+	color: string
+	label?: string
+}
+
 export interface BaseChartProps {
 	data?: Record<string, unknown>[]
 	className?: string
 	legend?: ChartLegendMode
+	/** When true, the legend block includes the per-series Min/Max/Mean/Last table. */
+	seriesStats?: boolean
 	tooltip?: ChartTooltipMode
 	rateMode?: "per_second"
 	stacked?: boolean
 	curveType?: "linear" | "monotone"
 	referenceLines?: ChartReferenceLine[]
+	/**
+	 * Horizontal threshold lines drawn across the y-axis. Used to mark
+	 * "danger zone" values on time-series charts.
+	 */
+	thresholds?: ChartThreshold[]
 	unit?: string
 	logScale?: boolean
 	softMin?: number
@@ -43,11 +56,14 @@ export interface BaseChartProps {
 	}
 	heatmap?: {
 		colorScale?: "viridis" | "magma" | "cividis" | "blues" | "reds"
-		bucketCount?: number
+		scaleType?: "linear" | "log"
+	}
+	funnel?: {
+		showStepPercent?: boolean
 	}
 }
 
-export type ChartCategory = "bar" | "area" | "line" | "pie" | "histogram" | "heatmap"
+export type ChartCategory = "bar" | "area" | "line" | "pie" | "histogram" | "heatmap" | "funnel"
 
 export interface ChartRegistryEntry {
 	id: string

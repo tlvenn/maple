@@ -54,13 +54,13 @@ import {
 	orgIngestKeys,
 } from "@maple/db"
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm"
-import { CH } from "@maple/query-engine"
-import { Array as Arr, Cause, Context, Effect, Layer, Schema } from "effect"
+import { CH, parseWarehouseDateTime, warehouseDateTimeToIso } from "@maple/query-engine"
+import { Array as Arr, Cause, Clock, Context, Effect, Layer, Schedule, Schema } from "effect"
 import type { TenantContext } from "./AuthService"
-import { Database, DatabaseError, type DatabaseClient } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Database, DatabaseError, type DatabaseClient } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 import { NotificationDispatcher } from "./NotificationDispatcher"
-import { WarehouseQueryService } from "./WarehouseQueryService"
+import { WarehouseQueryService } from "../lib/WarehouseQueryService"
 
 const decodeErrorIssueIdSync = Schema.decodeUnknownSync(ErrorIssueDocument.fields.id)
 const decodeErrorIncidentIdSync = Schema.decodeUnknownSync(ErrorIncidentDocument.fields.id)
@@ -109,6 +109,28 @@ export const makePersistenceError = (error: unknown): ErrorPersistenceError => {
 	}
 	return new ErrorPersistenceError(baseFor("Error persistence failure", error))
 }
+
+// Concurrent ticks against D1 (file-locked SQLite under the hood) occasionally surface
+// busy/locked errors. They're harmless to retry — the next attempt usually succeeds in
+// ms. Only this predicate's match retries; anything else fails fast.
+const BUSY_ERROR_PATTERN = /SQLITE_BUSY|database is locked|D1_BUSY|busy/i
+
+const causeMessage = (cause: unknown): string | undefined => {
+	if (cause instanceof Error) return cause.message
+	if (typeof cause === "string") return cause
+	return undefined
+}
+
+export const isBusyDatabaseError = (error: DatabaseError): boolean => {
+	if (BUSY_ERROR_PATTERN.test(error.message)) return true
+	const inner = causeMessage(error.cause)
+	if (inner && BUSY_ERROR_PATTERN.test(inner)) return true
+	return false
+}
+
+const BUSY_RETRY_SCHEDULE = Schedule.exponential("50 millis", 2.0).pipe(
+	Schedule.both(Schedule.recurs(3)),
+)
 
 // ---------------------------------------------------------------------------
 // Transition matrix. Rows = from, values = set of allowed "to" states.
@@ -277,14 +299,13 @@ export interface ErrorsServiceShape {
 	>
 }
 
-export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceShape>()("ErrorsService", {
+export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceShape>()("@maple/api/services/ErrorsService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const warehouse = yield* WarehouseQueryService
 		const env = yield* Env
 		const dispatcher = yield* NotificationDispatcher
 
-		const now = () => Date.now()
 		const newErrorIssueId = () => decodeErrorIssueIdSync(randomUUID())
 		const newErrorIncidentId = () => decodeErrorIncidentIdSync(randomUUID())
 		const newActorId = () => decodeActorIdSync(randomUUID())
@@ -292,6 +313,10 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 
 		const dbExecute = <T>(fn: (db: DatabaseClient) => Promise<T>) =>
 			database.execute(fn).pipe(
+				Effect.retry({
+					schedule: BUSY_RETRY_SCHEDULE,
+					while: isBusyDatabaseError,
+				}),
 				Effect.tapError((error) =>
 					Effect.logError("ErrorsService dbExecute failed").pipe(
 						Effect.annotateLogs({
@@ -384,7 +409,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 			)
 			if (existing[0]) return rowToActor(existing[0])
 
-			const timestamp = now()
+			const timestamp = yield* Clock.currentTimeMillis
 			const id = newActorId()
 			const insert: ActorInsert = {
 				id,
@@ -417,8 +442,8 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 			return rowToActor(row)
 		})
 
-		const ensureSystemActor = (orgId: OrgId) =>
-			Effect.gen(function* () {
+		const ensureSystemActor = Effect.fn("ErrorsService.ensureSystemActor")(
+			function* (orgId: OrgId) {
 				const existing = yield* dbExecute((db) =>
 					db
 						.select()
@@ -434,7 +459,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				)
 				if (existing[0]) return rowToActor(existing[0])
 
-				const timestamp = now()
+				const timestamp = yield* Clock.currentTimeMillis
 				const id = newActorId()
 				const insert: ActorInsert = {
 					id,
@@ -471,7 +496,8 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 					)
 				}
 				return rowToActor(row)
-			})
+			},
+		)
 
 		const registerAgent: ErrorsServiceShape["registerAgent"] = Effect.fn("ErrorsService.registerAgent")(
 			function* (orgId, byUserId, request) {
@@ -493,7 +519,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 					)
 				}
 
-				const timestamp = now()
+				const timestamp = yield* Clock.currentTimeMillis
 				const id = newActorId()
 				const capabilities = request.capabilities ?? []
 				const insert: ActorInsert = {
@@ -595,6 +621,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				serviceName: row.serviceName,
 				exceptionType: row.exceptionType,
 				exceptionMessage: row.exceptionMessage,
+				errorLabel: row.errorLabel,
 				topFrame: row.topFrame,
 				workflowState: row.workflowState,
 				priority: row.priority,
@@ -718,21 +745,22 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				readonly payload?: Record<string, unknown>
 				readonly timestamp?: number
 			} = {},
-		) => {
-			const timestamp = opts.timestamp ?? now()
-			const insert: ErrorIssueEventInsert = {
-				id: newEventId(),
-				orgId,
-				issueId,
-				actorId: actorId ?? null,
-				type,
-				fromState: opts.fromState ?? null,
-				toState: opts.toState ?? null,
-				payloadJson: JSON.stringify(opts.payload ?? {}),
-				createdAt: timestamp,
-			}
-			return dbExecute((db) => db.insert(errorIssueEvents).values(insert))
-		}
+		) =>
+			Effect.gen(function* () {
+				const timestamp = opts.timestamp ?? (yield* Clock.currentTimeMillis)
+				const insert: ErrorIssueEventInsert = {
+					id: newEventId(),
+					orgId,
+					issueId,
+					actorId: actorId ?? null,
+					type,
+					fromState: opts.fromState ?? null,
+					toState: opts.toState ?? null,
+					payloadJson: JSON.stringify(opts.payload ?? {}),
+					createdAt: timestamp,
+				}
+				return yield* dbExecute((db) => db.insert(errorIssueEvents).values(insert))
+			})
 
 		const listIssueEvents: ErrorsServiceShape["listIssueEvents"] = Effect.fn(
 			"ErrorsService.listIssueEvents",
@@ -775,11 +803,11 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 					conditions.push(eq(errorIssues.assignedActorId, opts.assignedActorId))
 				if (!opts.includeArchived) conditions.push(isNull(errorIssues.archivedAt))
 				if (opts.endTime) {
-					const endMs = Date.parse(opts.endTime)
+					const endMs = parseWarehouseDateTime(opts.endTime)
 					if (Number.isFinite(endMs)) conditions.push(lt(errorIssues.firstSeenAt, endMs))
 				}
 				if (opts.startTime) {
-					const startMs = Date.parse(opts.startTime)
+					const startMs = parseWarehouseDateTime(opts.startTime)
 					if (Number.isFinite(startMs)) conditions.push(gt(errorIssues.lastSeenAt, startMs))
 				}
 
@@ -809,8 +837,10 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 			function* (orgId, issueId, opts) {
 				yield* Effect.annotateCurrentSpan({ orgId, issueId })
 				const issueRow = yield* requireIssue(orgId, issueId)
-				const endMs = opts.endTime ? Date.parse(opts.endTime) : now()
-				const startMs = opts.startTime ? Date.parse(opts.startTime) : endMs - DEFAULT_DETAIL_WINDOW_MS
+				const endMs = opts.endTime ? parseWarehouseDateTime(opts.endTime) : (yield* Clock.currentTimeMillis)
+				const startMs = opts.startTime
+						? parseWarehouseDateTime(opts.startTime)
+						: endMs - DEFAULT_DETAIL_WINDOW_MS
 				const bucketSeconds = opts.bucketSeconds ?? 3600
 				const sampleLimit = opts.sampleLimit ?? 25
 
@@ -866,7 +896,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				const timeseries = timeseriesRows.map(
 					(row) =>
 						new ErrorIssueTimeseriesPoint({
-							bucket: decodeIsoDateTimeStringSync(new Date(String(row.bucket)).toISOString()),
+							bucket: decodeIsoDateTimeStringSync(warehouseDateTimeToIso(String(row.bucket))),
 							count: Number(row.count ?? 0),
 						}),
 				)
@@ -878,7 +908,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 							spanId: decodeSpanIdSync(String(row.spanId ?? "")),
 							serviceName: String(row.serviceName ?? ""),
 							timestamp: decodeIsoDateTimeStringSync(
-								new Date(String(row.timestamp)).toISOString(),
+								warehouseDateTimeToIso(String(row.timestamp)),
 							),
 							exceptionMessage: String(row.exceptionMessage ?? ""),
 							durationMicros: Number(row.durationMicros ?? 0),
@@ -925,7 +955,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				readonly payload?: Record<string, unknown>
 			} = {},
 		) {
-			const timestamp = opts.timestamp ?? now()
+			const timestamp = opts.timestamp ?? (yield* Clock.currentTimeMillis)
 			const fromState = row.workflowState
 			if (fromState === toState) {
 				return row
@@ -1018,7 +1048,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				if (opts.snoozeUntil === null) {
 					snoozeUntilMs = null
 				} else {
-					const parsed = Date.parse(opts.snoozeUntil)
+					const parsed = parseWarehouseDateTime(opts.snoozeUntil)
 					if (!Number.isFinite(parsed)) {
 						return yield* Effect.fail(
 							new ErrorValidationError({
@@ -1055,7 +1085,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 
 		const claimIssue: ErrorsServiceShape["claimIssue"] = Effect.fn("ErrorsService.claimIssue")(
 			function* (orgId, actorId, issueId, leaseDurationMs) {
-				const timestamp = now()
+				const timestamp = yield* Clock.currentTimeMillis
 				const leaseMs = leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS
 				const leaseExpiresAt = timestamp + leaseMs
 				yield* Effect.annotateCurrentSpan({ orgId, issueId, actorId, leaseMs })
@@ -1147,7 +1177,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 		const heartbeatIssue: ErrorsServiceShape["heartbeatIssue"] = Effect.fn(
 			"ErrorsService.heartbeatIssue",
 		)(function* (orgId, actorId, issueId) {
-			const timestamp = now()
+			const timestamp = yield* Clock.currentTimeMillis
 			const current = yield* requireIssue(orgId, issueId)
 			if (current.leaseHolderActorId !== actorId) {
 				return yield* Effect.fail(leaseConflict(issueId, current))
@@ -1174,7 +1204,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 
 		const releaseIssue: ErrorsServiceShape["releaseIssue"] = Effect.fn("ErrorsService.releaseIssue")(
 			function* (orgId, actorId, issueId, opts) {
-				const timestamp = now()
+				const timestamp = yield* Clock.currentTimeMillis
 				const current = yield* requireIssue(orgId, issueId)
 				if (current.leaseHolderActorId !== null && current.leaseHolderActorId !== actorId) {
 					return yield* Effect.fail(leaseConflict(issueId, current))
@@ -1216,7 +1246,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 
 		const assignIssue: ErrorsServiceShape["assignIssue"] = Effect.fn("ErrorsService.assignIssue")(
 			function* (orgId, byActorId, issueId, toActorId) {
-				const timestamp = now()
+				const timestamp = yield* Clock.currentTimeMillis
 				const current = yield* requireIssue(orgId, issueId)
 				if (toActorId !== null) {
 					const actorRow = yield* selectActorRow(orgId, toActorId)
@@ -1251,7 +1281,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 		const commentOnIssue: ErrorsServiceShape["commentOnIssue"] = Effect.fn(
 			"ErrorsService.commentOnIssue",
 		)(function* (orgId, actorId, issueId, body, opts) {
-			const timestamp = now()
+			const timestamp = yield* Clock.currentTimeMillis
 			yield* requireIssue(orgId, issueId)
 			const type: ErrorIssueEventType = opts?.kind === "agent_note" ? "agent_note" : "comment"
 			const payload: Record<string, unknown> = {
@@ -1291,7 +1321,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 
 		const proposeFix: ErrorsServiceShape["proposeFix"] = Effect.fn("ErrorsService.proposeFix")(
 			function* (orgId, actorId, issueId, request) {
-				const timestamp = now()
+				const timestamp = yield* Clock.currentTimeMillis
 				const current = yield* requireIssue(orgId, issueId)
 				const payload: Record<string, unknown> = {
 					patchSummary: request.patchSummary,
@@ -1407,24 +1437,24 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				updatedBy: row.updatedBy,
 			})
 
-		const loadPolicyRow = (orgId: OrgId) =>
-			Effect.gen(function* () {
-				const rows = yield* dbExecute((db) =>
-					db
-						.select()
-						.from(errorNotificationPolicies)
-						.where(eq(errorNotificationPolicies.orgId, orgId))
-						.limit(1),
-				)
-				return rows[0] ?? null
-			})
+		const loadPolicyRow = Effect.fn("ErrorsService.loadPolicyRow")(function* (orgId: OrgId) {
+			const rows = yield* dbExecute((db) =>
+				db
+					.select()
+					.from(errorNotificationPolicies)
+					.where(eq(errorNotificationPolicies.orgId, orgId))
+					.limit(1),
+			)
+			return rows[0] ?? null
+		})
 
 		const getNotificationPolicy: ErrorsServiceShape["getNotificationPolicy"] = Effect.fn(
 			"ErrorsService.getNotificationPolicy",
 		)(function* (orgId) {
 			yield* Effect.annotateCurrentSpan({ orgId })
 			const row = yield* loadPolicyRow(orgId)
-			return rowToPolicy(row ?? defaultPolicy(orgId, now()))
+			const nowMs = yield* Clock.currentTimeMillis
+			return rowToPolicy(row ?? defaultPolicy(orgId, nowMs))
 		})
 
 		const upsertNotificationPolicy: ErrorsServiceShape["upsertNotificationPolicy"] = Effect.fn(
@@ -1432,8 +1462,8 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 		)(function* (orgId, userId, request) {
 			yield* Effect.annotateCurrentSpan({ orgId })
 			const existing = yield* loadPolicyRow(orgId)
-			const base = existing ?? defaultPolicy(orgId, now())
-			const timestamp = now()
+			const timestamp = yield* Clock.currentTimeMillis
+			const base = existing ?? defaultPolicy(orgId, timestamp)
 
 			const nextDestinations =
 				request.destinationIds !== undefined
@@ -1575,13 +1605,13 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				.pipe(Effect.asVoid)
 		}
 
-		const maybeNotifyTransition = (
-			orgId: OrgId,
-			actorId: ActorId | null,
-			row: ErrorIssueRow,
-			fromState: WorkflowState,
-		) =>
-			Effect.gen(function* () {
+		const maybeNotifyTransition = Effect.fn("ErrorsService.maybeNotifyTransition")(
+			function* (
+				orgId: OrgId,
+				actorId: ActorId | null,
+				row: ErrorIssueRow,
+				fromState: WorkflowState,
+			) {
 				const policyRow = yield* loadPolicyRow(orgId)
 				if (!policyRow || policyRow.enabled !== 1) return
 				const toState = row.workflowState
@@ -1614,10 +1644,11 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 						linkUrl: issueLinkUrl(row.id),
 					})
 					.pipe(Effect.asVoid)
-			})
+			},
+		)
 
-		const maybeNotifyClaim = (orgId: OrgId, actorId: ActorId, row: ErrorIssueRow) =>
-			Effect.gen(function* () {
+		const maybeNotifyClaim = Effect.fn("ErrorsService.maybeNotifyClaim")(
+			function* (orgId: OrgId, actorId: ActorId, row: ErrorIssueRow) {
 				const policyRow = yield* loadPolicyRow(orgId)
 				if (!policyRow || policyRow.enabled !== 1) return
 				if (policyRow.notifyOnClaim !== 1) return
@@ -1644,7 +1675,8 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 						linkUrl: issueLinkUrl(row.id),
 					})
 					.pipe(Effect.asVoid)
-			})
+			},
+		)
 
 		// ---------------------------------------------------------------
 		// Scheduled tick
@@ -1749,6 +1781,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 				serviceName: String(raw.serviceName ?? ""),
 				exceptionType: String(raw.exceptionType ?? ""),
 				exceptionMessage: String(raw.exceptionMessage ?? ""),
+				errorLabel: String(raw.errorLabel ?? ""),
 				topFrame: String(raw.topFrame ?? ""),
 				count: Number(raw.count ?? 0),
 				affectedServicesCount: Number(raw.affectedServicesCount ?? 0),
@@ -1758,8 +1791,8 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 
 			const fingerprintResults = yield* Effect.forEach(rows, (row) =>
 				Effect.gen(function* () {
-					const firstSeenMs = Date.parse(row.firstSeen)
-					const lastSeenMs = Date.parse(row.lastSeen)
+					const firstSeenMs = parseWarehouseDateTime(row.firstSeen)
+					const lastSeenMs = parseWarehouseDateTime(row.lastSeen)
 					const existing = yield* dbExecute((db) =>
 						db
 							.select()
@@ -1794,6 +1827,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 								.set({
 									lastSeenAt: lastSeenMs,
 									occurrenceCount: sql`${errorIssues.occurrenceCount} + ${row.count}`,
+									errorLabel: row.errorLabel,
 									updatedAt: windowEndMs,
 								})
 								.where(eq(errorIssues.id, prior.id)),
@@ -1822,6 +1856,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 								serviceName: row.serviceName,
 								exceptionType: row.exceptionType,
 								exceptionMessage: row.exceptionMessage,
+								errorLabel: row.errorLabel,
 								topFrame: row.topFrame,
 								workflowState: "triage",
 								priority: 3,
@@ -2128,7 +2163,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 		})
 
 		const runTick: ErrorsServiceShape["runTick"] = Effect.fn("ErrorsService.runTick")(function* () {
-			const endMs = now()
+			const endMs = yield* Clock.currentTimeMillis
 			const startMs = endMs - TICK_WINDOW_MS
 
 			const retentionRan = Math.floor(endMs / TICK_WINDOW_MS) % RETENTION_PHASE_EVERY_N_TICKS === 0
@@ -2179,7 +2214,7 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 							}),
 						),
 					),
-				{ concurrency: 16 },
+				{ concurrency: 4 },
 			)
 
 			const totals = results.reduce(
@@ -2232,6 +2267,4 @@ export class ErrorsService extends Context.Service<ErrorsService, ErrorsServiceS
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

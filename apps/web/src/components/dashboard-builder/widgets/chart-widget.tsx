@@ -1,7 +1,7 @@
 import { memo, Suspense } from "react"
 
-import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { getChartById } from "@maple/ui/components/charts/registry"
+import { ChartSkeleton } from "@maple/ui/components/charts/_shared/chart-skeleton"
 import { WidgetFrame } from "@/components/dashboard-builder/widgets/widget-shell"
 import type { WidgetDataState, WidgetDisplayConfig, WidgetMode } from "@/components/dashboard-builder/types"
 
@@ -9,9 +9,10 @@ interface ChartWidgetProps {
 	dataState: WidgetDataState
 	display: WidgetDisplayConfig
 	mode: WidgetMode
-	onRemove: () => void
+	onRemove?: () => void
 	onClone?: () => void
 	onConfigure?: () => void
+	onCreateAlert?: () => void
 	onFix?: () => void
 }
 
@@ -22,6 +23,7 @@ export const ChartWidget = memo(function ChartWidget({
 	onRemove,
 	onClone,
 	onConfigure,
+	onCreateAlert,
 	onFix,
 }: ChartWidgetProps) {
 	const chartId = display.chartId ?? "gradient-area"
@@ -31,7 +33,8 @@ export const ChartWidget = memo(function ChartWidget({
 	const ChartComponent = entry.component
 	const chartData =
 		dataState.status === "ready" && Array.isArray(dataState.data) ? dataState.data : undefined
-	const legend = display.chartPresentation?.legend ?? "visible"
+	const legend = display.chartPresentation?.legend ?? "hidden"
+	const seriesStats = display.chartPresentation?.seriesStats ?? legend !== "hidden"
 	const tooltip = display.chartPresentation?.tooltip
 
 	return (
@@ -42,14 +45,16 @@ export const ChartWidget = memo(function ChartWidget({
 			onRemove={onRemove}
 			onClone={onClone}
 			onConfigure={onConfigure}
+			onCreateAlert={onCreateAlert}
 			onFix={onFix}
-			loadingSkeleton={<Skeleton className="h-full w-full" />}
+			loadingSkeleton={<ChartSkeleton variant={entry.category} />}
 		>
-			<Suspense fallback={<Skeleton className="h-full w-full" />}>
+			<Suspense fallback={<ChartSkeleton variant={entry.category} />}>
 				<ChartComponent
 					data={chartData}
 					className="h-full w-full aspect-auto"
 					legend={legend}
+					seriesStats={seriesStats}
 					tooltip={tooltip}
 					stacked={display.stacked}
 					curveType={display.curveType}
@@ -58,6 +63,7 @@ export const ChartWidget = memo(function ChartWidget({
 					softMin={display.yAxis?.softMin}
 					softMax={display.yAxis?.softMax}
 					showPoints={display.chartPresentation?.showPoints}
+					thresholds={display.thresholds}
 				/>
 			</Suspense>
 		</WidgetFrame>

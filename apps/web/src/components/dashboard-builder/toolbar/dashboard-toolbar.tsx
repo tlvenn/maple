@@ -3,7 +3,6 @@ import {
 	PencilIcon,
 	CheckIcon,
 	GridIcon,
-	ChatBubbleSparkleIcon,
 	DotsVerticalIcon,
 	DownloadIcon,
 	HistoryIcon,
@@ -18,6 +17,7 @@ import {
 	DropdownMenuSeparator,
 } from "@maple/ui/components/ui/dropdown-menu"
 import { TimeRangePicker } from "@/components/time-range-picker/time-range-picker"
+import { ReloadControls } from "@/components/time-range-picker/reload-controls"
 import { useDashboardTimeRange } from "@/components/dashboard-builder/dashboard-providers"
 import { useDashboardActions } from "@/components/dashboard-builder/dashboard-actions-context"
 import { downloadPortableDashboard } from "@/components/dashboard-builder/portable-dashboard"
@@ -27,7 +27,6 @@ interface DashboardToolbarProps {
 	dashboard: Dashboard
 	onToggleEdit: () => void
 	onAddWidget: () => void
-	onOpenAi?: () => void
 	onOpenHistory?: () => void
 }
 
@@ -35,7 +34,6 @@ export function DashboardToolbar({
 	dashboard,
 	onToggleEdit,
 	onAddWidget,
-	onOpenAi,
 	onOpenHistory,
 }: DashboardToolbarProps) {
 	const { mode, readOnly, autoLayoutWidgets } = useDashboardActions()
@@ -52,7 +50,6 @@ export function DashboardToolbar({
 				startTime={resolvedTimeRange?.startTime}
 				endTime={resolvedTimeRange?.endTime}
 				presetValue={timeRange.type === "relative" ? timeRange.value : undefined}
-				showLiveControls
 				onChange={(range) => {
 					if (range.startTime && range.endTime) {
 						if (range.presetValue) {
@@ -71,17 +68,13 @@ export function DashboardToolbar({
 				}}
 			/>
 
+			<ReloadControls />
+
 			<div className="flex items-center gap-1">
 				{isEdit && (
 					<Button variant="outline" size="sm" onClick={onAddWidget} disabled={readOnly}>
 						<PlusIcon size={14} data-icon="inline-start" />
 						Add Widget
-					</Button>
-				)}
-				{onOpenAi && (
-					<Button variant="outline" size="sm" onClick={onOpenAi}>
-						<ChatBubbleSparkleIcon size={14} data-icon="inline-start" />
-						AI
 					</Button>
 				)}
 				<Button

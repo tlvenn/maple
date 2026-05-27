@@ -8,8 +8,8 @@ import * as CH from "../expr"
 import { param } from "../param"
 import { from, type ColumnAccessor } from "../query"
 import { unionAll, type CHUnionQuery } from "../union"
-import { ServiceOverviewSpans, ServiceUsage, Traces } from "../tables"
-import { apdexExprs } from "./query-helpers"
+import { ServiceOverviewSpans, ServiceUsage } from "../tables"
+import { apdexExprs, serviceOverviewWhereConditions } from "./query-helpers"
 
 // ---------------------------------------------------------------------------
 // Service overview
@@ -117,19 +117,20 @@ export interface ServiceApdexTimeseriesOutput {
 export function serviceApdexTimeseriesQuery(opts: ServiceApdexTimeseriesOpts) {
 	const thresholdMs = opts.apdexThresholdMs ?? 500
 
-	return from(Traces)
+	// Routes through `service_overview_spans` (the entry-point MV) rather than
+	// raw `traces`. The MV pre-filters at write time to
+	// `SpanKind IN ('Server','Consumer') OR ParentSpanId = ''` — exactly the
+	// root-span predicate apdex needs — and pre-extracts `DeploymentEnv` /
+	// `CommitSha` from ResourceAttributes. Cuts scan volume by ~20-100x vs.
+	// the raw-table path (same pattern `tracesTimeseriesQuery` already uses via
+	// `canUseServiceOverviewMv`).
+	return from(ServiceOverviewSpans)
 		.select(($) => ({
 			bucket: CH.toStartOfInterval($.Timestamp, param.int("bucketSeconds")),
 			totalCount: CH.count(),
-			...apdexExprs($.Duration.div(1000000), thresholdMs),
+			...apdexExprs($.Duration.div(1000000), thresholdMs, $.StatusCode.eq("Error")),
 		}))
-		.where(($) => [
-			$.SpanKind.in_("Server", "Consumer").or($.ParentSpanId.eq("")),
-			$.OrgId.eq(param.string("orgId")),
-			$.ServiceName.eq(opts.serviceName),
-			$.Timestamp.gte(param.dateTime("startTime")),
-			$.Timestamp.lte(param.dateTime("endTime")),
-		])
+		.where(($) => serviceOverviewWhereConditions($, { serviceName: opts.serviceName }))
 		.groupBy("bucket")
 		.orderBy(["bucket", "asc"])
 		.format("JSON")
@@ -185,8 +186,15 @@ export function serviceUsageQuery(opts: ServiceUsageOpts) {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			$.Hour.gte(param.dateTime("startTime")),
-			$.Hour.lte(param.dateTime("endTime")),
+			// `service_usage` is keyed on top-of-hour `Hour`. Comparing to the raw
+			// `startTime` / `endTime` literals misses every sub-hour window — e.g.
+			// "last 15 min" at 22:23–22:38 returns no rows because `Hour=22:00 <
+			// 22:23`. Snap both bounds to their hour floor so any hour overlapping
+			// the requested window contributes. The cards over-report toward the
+			// edges (they show the full enclosing hour, not just the partial
+			// window) which is the only sensible answer when the MV is hourly.
+			$.Hour.gte(CH.toStartOfHour(CH.toDateTime(param.dateTime("startTime")))),
+			$.Hour.lte(CH.toStartOfHour(CH.toDateTime(param.dateTime("endTime")))),
 			CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
 		])
 		.groupBy("serviceName")
@@ -235,5 +243,19 @@ export function servicesFacetsQuery(): CHUnionQuery<ServicesFacetsOutput> {
 		.orderBy(["count", "desc"])
 		.limit(50)
 
-	return unionAll(envQuery, commitQuery).format("JSON")
+	// Service-name facet — reused by `useDefaultPreset` on the dashboard route to
+	// detect the all-demo case without firing a separate `serviceOverview` query.
+	// Same MV scan as the env / commit branches; effectively free.
+	const serviceQuery = from(ServiceOverviewSpans)
+		.select(($) => ({
+			name: $.ServiceName,
+			count: CH.count(),
+			facetType: CH.lit("service"),
+		}))
+		.where(($) => [...baseWhere($), $.ServiceName.neq("")])
+		.groupBy("name")
+		.orderBy(["count", "desc"])
+		.limit(50)
+
+	return unionAll(envQuery, commitQuery, serviceQuery).format("JSON")
 }

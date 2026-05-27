@@ -1,4 +1,4 @@
-import * as React from "react"
+import { useState } from "react"
 
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Button } from "@maple/ui/components/ui/button"
@@ -60,6 +60,8 @@ interface QueryPanelProps {
 	onClone: () => void
 	onRemove: () => void
 	onDataSourceChange: (ds: QueryBuilderDataSource) => void
+	showHeaderActions?: boolean
+	showVisibilityToggle?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -101,18 +103,22 @@ export function QueryPanel({
 	onClone,
 	onRemove,
 	onDataSourceChange,
+	showHeaderActions = true,
+	showVisibilityToggle = true,
 }: QueryPanelProps) {
-	const [collapsed, setCollapsed] = React.useState(false)
+	const [collapsed, setCollapsed] = useState(false)
 	const badgeColor = queryBadgeColor(index)
 	const aggregateOptions =
 		query.dataSource === "metrics"
 			? getMetricsAggregations(query.metricType || "gauge", query.isMonotonic)
 			: AGGREGATIONS_BY_SOURCE[query.dataSource]
 
-	const metricValue =
-		query.metricName && query.metricType ? `${query.metricName}::${query.metricType}` : undefined
-
 	const isMetrics = query.dataSource === "metrics"
+
+	const metricValue =
+		isMetrics && query.metricName && query.metricType
+			? `${query.metricName}::${query.metricType}`
+			: undefined
 
 	return (
 		<div className="border rounded-md">
@@ -127,17 +133,19 @@ export function QueryPanel({
 					{collapsed ? "\u25B6" : "\u25BC"}
 				</button>
 
-				<Checkbox
-					id={`query-visible-${query.id}`}
-					checked={!query.hidden}
-					onCheckedChange={(checked) =>
-						onUpdate((current) => ({
-							...current,
-							hidden: checked !== true,
-						}))
-					}
-					className="shrink-0"
-				/>
+				{showVisibilityToggle && (
+					<Checkbox
+						id={`query-visible-${query.id}`}
+						checked={!query.hidden}
+						onCheckedChange={(checked) =>
+							onUpdate((current) => ({
+								...current,
+								hidden: checked !== true,
+							}))
+						}
+						className="shrink-0"
+					/>
+				)}
 
 				<Badge
 					variant="outline"
@@ -163,12 +171,16 @@ export function QueryPanel({
 
 				<div className="flex-1" />
 
-				<Button variant="ghost" size="xs" onClick={onClone}>
-					Clone
-				</Button>
-				<Button variant="ghost" size="xs" onClick={onRemove} disabled={!canRemove}>
-					Remove
-				</Button>
+				{showHeaderActions && (
+					<>
+						<Button variant="ghost" size="xs" onClick={onClone}>
+							Clone
+						</Button>
+						<Button variant="ghost" size="xs" onClick={onRemove} disabled={!canRemove}>
+							Remove
+						</Button>
+					</>
+				)}
 			</div>
 
 			{/* Body */}

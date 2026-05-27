@@ -8,6 +8,7 @@ import LiveLogStream from "../components/live/LiveLogStream.astro";
 import LiveLogsVolumeChart from "../components/live/LiveLogsVolumeChart.tsx";
 import LiveServiceMap from "../components/live/LiveServiceMap.astro";
 import LiveMcpTranscript from "../components/live/LiveMcpTranscript.astro";
+import LiveBrowserSessions from "../components/live/LiveBrowserSessions.astro";
 import Kubernetes from "../components/Kubernetes.astro";
 import BillComparison from "../components/BillComparison.astro";
 import Quickstart from "../components/Quickstart.astro";
@@ -95,7 +96,33 @@ const pageDescription = m.page_home_desc();
         </div>
     </section>
 
-    <!-- 06 — Kubernetes. Prose left, workload table right. -->
+    <!-- 06 — Browser sessions. Lede first, full-width replay artifact below. -->
+    <section class="relative bg-bg overflow-hidden">
+        <!-- Subtle dot-grid backdrop, faded toward the edges. -->
+        <div
+            class="absolute inset-0 pointer-events-none"
+            aria-hidden="true"
+            style="
+                background-image: radial-gradient(oklch(1 0 0 / 5%) 1px, transparent 1px);
+                background-size: 22px 22px;
+                mask-image: radial-gradient(ellipse 80% 60% at 50% 20%, black, transparent 78%);
+                -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 20%, black, transparent 78%);
+            "
+        ></div>
+
+        <div class="relative mx-auto max-w-6xl px-6 py-24 md:py-28">
+            <div class="max-w-2xl mb-12">
+                <div class="text-[10px] uppercase tracking-[0.18em] text-fg-muted mb-3">{m.sessions_eyebrow()}</div>
+                <h2 class="font-display text-3xl sm:text-4xl md:text-5xl font-semibold leading-[1.04] tracking-tight">
+                    {m.sessions_title()}
+                </h2>
+                <p class="mt-5 text-sm md:text-base text-fg-muted leading-relaxed">{m.sessions_lede()}</p>
+            </div>
+            <LiveBrowserSessions />
+        </div>
+    </section>
+
+    <!-- 07 — Kubernetes. Prose left, workload table right. -->
     <Kubernetes />
 
     <BillComparison />

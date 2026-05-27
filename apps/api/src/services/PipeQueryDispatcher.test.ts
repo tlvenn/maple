@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it } from "@effect/vitest"
 import { Schema } from "effect"
 import { OrgId } from "@maple/domain/http"
 import { compilePipeQuery } from "./PipeQueryDispatcher"
@@ -50,7 +50,7 @@ describe("compilePipeQuery", () => {
 					...baseParams(),
 					trace_id: "abc123",
 					service_name: "my-svc",
-					error_type: "TypeError",
+					fingerprint_hash: "12345",
 					attribute_key: "http.method",
 					bucket_seconds: 60,
 				})

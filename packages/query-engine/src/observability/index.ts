@@ -1,11 +1,11 @@
 export {
-	TinybirdExecutor,
+	WarehouseExecutor,
 	ObservabilityError,
-	type TinybirdExecutorShape,
+	type WarehouseExecutorShape,
 	type ExecutorQueryOptions,
 	type ExecutorQuerySettings,
 	type ExecutorQueryProfile,
-} from "./TinybirdExecutor"
+} from "./WarehouseExecutor"
 export type * from "./types"
 export { toSpanResult, toLogEntry, toErrorSummary } from "./row-mappers"
 export { aggregateServiceRows, weightedAvg } from "./aggregation"
@@ -21,3 +21,9 @@ export { exploreAttributeKeys, exploreAttributeValues } from "./explore-attribut
 export { serviceMap } from "./service-map"
 export { findSlowTraces } from "./find-slow-traces"
 export { topOperations, type TopOperation } from "./top-operations"
+export {
+	searchSessions,
+	getSessionTranscript,
+	type SearchSessionsInput,
+	type SessionTranscriptOutput,
+} from "./session-events"

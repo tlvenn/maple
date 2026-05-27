@@ -33,6 +33,7 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 
 	const featureLinks = [
 		{ href: l("/features/distributed-tracing"), label: () => m.nav_distributed_tracing() },
+			{ href: l("/features/browser-sessions"), label: () => m.nav_browser_sessions() },
 		{ href: l("/features/metrics-dashboards"), label: () => m.nav_metrics_dashboards() },
 		{ href: l("/features/log-management"), label: () => m.nav_log_management() },
 		{ href: l("/features/service-catalog"), label: () => m.nav_service_catalog() },
@@ -51,6 +52,7 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 		{ href: l("/compare/datadog"), label: () => m.nav_vs_datadog() },
 		{ href: l("/compare/grafana"), label: () => m.nav_vs_grafana() },
 		{ href: l("/compare/new-relic"), label: () => m.nav_vs_new_relic() },
+		{ href: l("/compare/dash0"), label: () => m.nav_vs_dash0() },
 	]
 
 	const integrationLinks = [

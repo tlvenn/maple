@@ -52,7 +52,11 @@ export default function TraceDetailScreen() {
 	const headerInfo = useMemo(() => {
 		if (state.status !== "success" || state.data.rootSpans.length === 0) return null
 		const root = state.data.rootSpans[0]
-		const http = getHttpInfo(root.spanName, root.spanAttributes)
+		const http = getHttpInfo({
+			spanName: root.spanName,
+			spanAttributes: root.spanAttributes,
+			spanKind: root.spanKind,
+		})
 		const httpStatusCode =
 			root.spanAttributes["http.status_code"] || root.spanAttributes["http.response.status_code"]
 		const statusCode = httpStatusCode ? parseInt(httpStatusCode, 10) : null

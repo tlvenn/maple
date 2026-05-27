@@ -12,9 +12,9 @@ import {
 } from "@maple/domain/http"
 import { API_KEY_PREFIX, apiKeys, generateApiKey, hashApiKey, parseIngestKeyLookupHmacKey } from "@maple/db"
 import { and, desc, eq } from "drizzle-orm"
-import { Effect, Layer, Option, Redacted, Schema, Context } from "effect"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Clock, Effect, Layer, Option, Redacted, Schema, Context } from "effect"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 
 export interface ResolvedApiKey {
 	readonly orgId: OrgId
@@ -48,7 +48,7 @@ const rowToResponse = (row: typeof apiKeys.$inferSelect): ApiKeyResponse =>
 		createdByEmail: row.createdByEmail ?? null,
 	})
 
-export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysService", {
+export class ApiKeysService extends Context.Service<ApiKeysService>()("@maple/api/services/ApiKeysService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
@@ -109,7 +109,7 @@ export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysSe
 			const rawKey = generateApiKey()
 			const keyHash = hashApiKey(rawKey, hmacKey)
 			const keyPrefix = rawKey.slice(0, 12) + "..."
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const expiresAt = params.expiresInSeconds ? now + params.expiresInSeconds * 1000 : undefined
 			const kind: ApiKeyKind = params.kind ?? "standard"
 			const createdByEmail = params.createdByEmail ?? null
@@ -150,7 +150,7 @@ export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysSe
 		})
 
 		const revoke = Effect.fn("ApiKeysService.revoke")(function* (orgId: OrgId, keyId: ApiKeyId) {
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const row = yield* requireById(orgId, keyId)
 
 			yield* database
@@ -173,7 +173,10 @@ export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysSe
 			const row = Option.fromNullishOr(rows[0])
 			if (Option.isNone(row)) return Option.none()
 			if (row.value.revoked) return Option.none()
-			if (row.value.expiresAt && row.value.expiresAt < Date.now()) return Option.none()
+			if (row.value.expiresAt) {
+				const now = yield* Clock.currentTimeMillis
+				if (row.value.expiresAt < now) return Option.none()
+			}
 
 			return Option.some({
 				orgId: decodeOrgIdSync(row.value.orgId),
@@ -184,9 +187,10 @@ export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysSe
 		})
 
 		const touchLastUsed = Effect.fn("ApiKeysService.touchLastUsed")(function* (keyId: ApiKeyId) {
+			const now = yield* Clock.currentTimeMillis
 			yield* database
 				.execute((db) =>
-					db.update(apiKeys).set({ lastUsedAt: Date.now() }).where(eq(apiKeys.id, keyId)),
+					db.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, keyId)),
 				)
 				.pipe(Effect.mapError(toPersistenceError))
 		})
@@ -216,6 +220,4 @@ export class ApiKeysService extends Context.Service<ApiKeysService>()("ApiKeysSe
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

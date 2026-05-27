@@ -88,17 +88,28 @@ describe("serviceApdexTimeseriesQuery", () => {
 	it("compiles apdex timeseries with default threshold", () => {
 		const q = serviceApdexTimeseriesQuery({ serviceName: "api" })
 		const { sql } = compileCH(q, baseParams)
-		expect(sql).toContain("FROM traces")
+		// Routes through the service_overview_spans MV (pre-filtered to
+		// entry-point spans at write time) — ~20-100x cheaper than raw traces.
+		expect(sql).toContain("FROM service_overview_spans")
+		expect(sql).not.toContain("FROM traces")
 		expect(sql).toContain("ServiceName = 'api'")
 		expect(sql).toContain("count() AS totalCount")
 		expect(sql).toContain("Duration / 1000000 < 500")
 		expect(sql).toContain("AS satisfiedCount")
 		expect(sql).toContain("AS toleratingCount")
 		expect(sql).toContain("AS apdexScore")
+		// Errored spans count as frustrated: the satisfied/tolerating buckets are
+		// gated on the non-error predicate, so a fast 5xx never inflates apdex.
+		expect(sql).toContain(
+			"countIf((NOT (StatusCode = 'Error') AND Duration / 1000000 < 500)) AS satisfiedCount",
+		)
+		// totalCount still counts every span (errors included), so they drag the score down.
+		expect(sql).toContain("count() AS totalCount")
 		expect(sql).toContain("GROUP BY bucket")
 		expect(sql).toContain("ORDER BY bucket ASC")
-		// Root-only filter
-		expect(sql).toContain("SpanKind IN ('Server', 'Consumer') OR ParentSpanId = ''")
+		// The MV pre-filters at write time — the runtime root-only predicate is
+		// no longer needed in the query body.
+		expect(sql).not.toContain("SpanKind IN ('Server', 'Consumer') OR ParentSpanId = ''")
 	})
 
 	it("compiles with custom threshold", () => {
@@ -156,6 +167,16 @@ describe("serviceUsageQuery", () => {
 		const { sql } = compileCH(q, baseParams)
 		expect(sql).toContain("ServiceName = 'api'")
 	})
+
+	it("snaps both Hour bounds to hour boundaries so sub-hour ranges still match", () => {
+		// `service_usage` is hourly-keyed; without snapping, a "last 15 min" query
+		// like 22:23–22:38 returns no rows. The fix wraps both bounds with
+		// `toStartOfHour(toDateTime(...))` so the enclosing hour contributes.
+		const q = serviceUsageQuery({})
+		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("Hour >= toStartOfHour(toDateTime('2024-01-01 00:00:00'))")
+		expect(sql).toContain("Hour <= toStartOfHour(toDateTime('2024-01-02 00:00:00'))")
+	})
 })
 
 // ---------------------------------------------------------------------------
@@ -163,15 +184,18 @@ describe("serviceUsageQuery", () => {
 // ---------------------------------------------------------------------------
 
 describe("servicesFacetsQuery", () => {
-	it("compiles UNION ALL with environment and commit_sha facets", () => {
+	it("compiles UNION ALL with environment, commit_sha, and service facets", () => {
 		const q = servicesFacetsQuery()
 		const { sql } = compileUnion(q, baseParams)
 		const unionCount = (sql.match(/UNION ALL/g) || []).length
-		expect(unionCount).toBe(1)
+		// 3 branches → 2 UNION ALL separators
+		expect(unionCount).toBe(2)
 		expect(sql).toContain("'environment' AS facetType")
 		expect(sql).toContain("'commit_sha' AS facetType")
+		expect(sql).toContain("'service' AS facetType")
 		expect(sql).toContain("DeploymentEnv != ''")
 		expect(sql).toContain("CommitSha != ''")
+		expect(sql).toContain("ServiceName != ''")
 		expect(sql).toContain("FROM service_overview_spans")
 	})
 })

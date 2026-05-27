@@ -1,9 +1,9 @@
-import { useEffect } from "react"
+import { Suspense, useCallback, useEffect, useState } from "react"
 import { useAuth } from "@clerk/clerk-react"
 import { AppSidebar } from "@/components/dashboard/app-sidebar"
-import { SidebarInset, SidebarProvider, SidebarTrigger } from "@maple/ui/components/ui/sidebar"
+import { SidebarInset, SidebarProvider } from "@maple/ui/components/ui/sidebar"
 import { useChatTabs } from "@/hooks/use-chat-tabs"
-import { ChatTabBar } from "./chat-tabs"
+import { ChatSidebar } from "./chat-sidebar"
 import { ChatConversation } from "./chat-conversation"
 import { alertTabId, alertTabTitle, type AlertContext } from "./alert-context"
 import {
@@ -13,19 +13,19 @@ import {
 } from "./widget-fix-context"
 
 interface ChatPageProps {
-	initialTabId?: string
+	urlTabId?: string
 	mode?: "alert" | "widget-fix"
 	alertContext?: AlertContext
 	widgetFixContext?: WidgetFixContext
 }
 
-export function ChatPage({ initialTabId, mode, alertContext, widgetFixContext }: ChatPageProps) {
+export function ChatPage({ urlTabId, mode, alertContext, widgetFixContext }: ChatPageProps) {
 	const { orgId } = useAuth()
 	if (!orgId) return null
 	return (
 		<ChatPageInner
 			orgId={orgId}
-			initialTabId={initialTabId}
+			urlTabId={urlTabId}
 			mode={mode}
 			alertContext={alertContext}
 			widgetFixContext={widgetFixContext}
@@ -39,13 +39,54 @@ interface ChatPageInnerProps extends ChatPageProps {
 
 function ChatPageInner({
 	orgId,
-	initialTabId,
+	urlTabId,
 	mode,
 	alertContext,
 	widgetFixContext,
 }: ChatPageInnerProps) {
 	const { tabs, activeTabId, createTab, closeTab, setActiveTab, renameTab, ensureTab } =
-		useChatTabs(orgId, initialTabId)
+		useChatTabs(orgId, urlTabId)
+
+	const [loadingTabIds, setLoadingTabIds] = useState<ReadonlySet<string>>(() => new Set())
+	const handleLoadingChange = useCallback((id: string, loading: boolean) => {
+		setLoadingTabIds((prev) => {
+			const has = prev.has(id)
+			if (has === loading) return prev
+			const next = new Set(prev)
+			if (loading) next.add(id)
+			else next.delete(id)
+			return next
+		})
+	}, [])
+
+	// state → URL: reflect the current tab in the URL via history.replaceState so
+	// refresh / bookmark works without re-rendering the route tree (using TanStack
+	// Router's navigate here caused React DOM cleanup crashes when switching tabs).
+	const writeTabToUrl = useCallback((id: string) => {
+		if (typeof window === "undefined") return
+		const url = new URL(window.location.href)
+		if (url.searchParams.get("tab") === id) return
+		url.searchParams.set("tab", id)
+		window.history.replaceState(window.history.state, "", url.toString())
+	}, [])
+
+	useEffect(() => {
+		if (!activeTabId) return
+		writeTabToUrl(activeTabId)
+	}, [activeTabId, writeTabToUrl])
+
+	// URL → state: pick up browser back/forward via popstate. Direct user clicks
+	// flow through setActiveTab/writeTabToUrl above; only history navigation needs
+	// this pull direction.
+	useEffect(() => {
+		const onPopState = () => {
+			const tab = new URL(window.location.href).searchParams.get("tab")
+			if (!tab) return
+			setActiveTab(tab)
+		}
+		window.addEventListener("popstate", onPopState)
+		return () => window.removeEventListener("popstate", onPopState)
+	}, [setActiveTab])
 
 	useEffect(() => {
 		if (mode !== "alert" || !alertContext) return
@@ -57,46 +98,87 @@ function ChatPageInner({
 		ensureTab(widgetFixTabId(widgetFixContext), widgetFixTabTitle(widgetFixContext))
 	}, [mode, widgetFixContext, ensureTab])
 
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			const mod = e.metaKey || e.ctrlKey
+			if (!mod || !e.shiftKey) return
+			if (e.key === "O" || e.key === "o") {
+				e.preventDefault()
+				createTab()
+			}
+		}
+		window.addEventListener("keydown", onKey)
+		return () => window.removeEventListener("keydown", onKey)
+	}, [createTab])
+
 	const alertTab = mode === "alert" && alertContext ? alertTabId(alertContext) : undefined
 	const widgetFixTab =
 		mode === "widget-fix" && widgetFixContext ? widgetFixTabId(widgetFixContext) : undefined
 
 	return (
-		<SidebarProvider>
+		<SidebarProvider open={false} onOpenChange={() => {}} className="h-svh overflow-hidden">
 			<AppSidebar />
 			<SidebarInset>
-				<header className="flex h-12 shrink-0 items-center border-b px-2">
-					<SidebarTrigger className="-ml-0.5" />
-					<ChatTabBar
+				<div className="flex h-full min-h-0 flex-1">
+					<ChatSidebar
 						tabs={tabs}
 						activeTabId={activeTabId}
+						loadingTabIds={loadingTabIds}
 						onSelect={setActiveTab}
 						onClose={closeTab}
 						onCreate={createTab}
+						onRename={renameTab}
 					/>
-				</header>
-				<div className="relative min-h-0 flex-1 bg-background">
-					{tabs.map((tab) => {
-						const isAlertTab = tab.id === alertTab
-						const isWidgetFixTab = tab.id === widgetFixTab
-						return (
-							<div
-								key={tab.id}
-								className={tab.id === activeTabId ? "flex h-full flex-col" : "hidden"}
-							>
-								<ChatConversation
-									tabId={tab.id}
-									isActive={tab.id === activeTabId}
-									onFirstMessage={(id, text) => renameTab(id, text)}
-									mode={isAlertTab ? "alert" : isWidgetFixTab ? "widget-fix" : undefined}
-									alertContext={isAlertTab ? alertContext : undefined}
-									widgetFixContext={isWidgetFixTab ? widgetFixContext : undefined}
-								/>
-							</div>
-						)
-					})}
+					<div className="flex min-w-0 flex-1 flex-col">
+						<div className="relative min-h-0 flex-1 bg-background">
+							{tabs.map((tab) => {
+								const isAlertTab = tab.id === alertTab
+								const isWidgetFixTab = tab.id === widgetFixTab
+								return (
+									<div
+										key={tab.id}
+										className={tab.id === activeTabId ? "flex h-full flex-col" : "hidden"}
+									>
+										<Suspense fallback={<ChatConversationFallback />}>
+											<ChatConversation
+												tabId={tab.id}
+												isActive={tab.id === activeTabId}
+												onFirstMessage={(id, text) => renameTab(id, text)}
+												onLoadingChange={handleLoadingChange}
+												mode={
+													isAlertTab ? "alert" : isWidgetFixTab ? "widget-fix" : undefined
+												}
+												alertContext={isAlertTab ? alertContext : undefined}
+												widgetFixContext={isWidgetFixTab ? widgetFixContext : undefined}
+											/>
+										</Suspense>
+									</div>
+								)
+							})}
+						</div>
+					</div>
 				</div>
 			</SidebarInset>
 		</SidebarProvider>
+	)
+}
+
+/**
+ * Shown while <ChatConversation> suspends — the agent token query and the
+ * initial-messages fetch both call React's `use()`. Without this boundary the
+ * suspension bubbles to the route and the page renders blank.
+ */
+function ChatConversationFallback() {
+	return (
+		<div className="flex h-full flex-col">
+			<div className="mx-auto w-full max-w-3xl flex-1 space-y-3 px-4 py-6" aria-hidden>
+				<div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
+				<div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+				<div className="h-3 w-1/3 animate-pulse rounded bg-muted" />
+			</div>
+			<div className="mx-auto w-full max-w-3xl px-4 pb-4" aria-hidden>
+				<div className="h-[88px] animate-pulse rounded-lg border bg-muted/40" />
+			</div>
+		</div>
 	)
 }

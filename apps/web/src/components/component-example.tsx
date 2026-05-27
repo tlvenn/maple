@@ -125,7 +125,7 @@ function CardExample() {
 							<PlusIcon strokeWidth={2} data-icon="inline-start" />
 							Show Dialog
 						</AlertDialogTrigger>
-						<AlertDialogContent size="sm">
+						<AlertDialogContent>
 							<AlertDialogHeader>
 								<AlertDialogMedia>
 									<BluetoothIcon strokeWidth={2} />
@@ -422,7 +422,7 @@ function FormExample() {
 								<Field>
 									<FieldLabel htmlFor="small-form-role">Role</FieldLabel>
 									<Select items={roleItems} defaultValue={null}>
-										<SelectTrigger id="small-form-role">
+										<SelectTrigger id="small-form-role" className="w-full">
 											<SelectValue />
 										</SelectTrigger>
 										<SelectContent>
@@ -464,7 +464,7 @@ function FormExample() {
 									placeholder="Add any additional comments"
 								/>
 							</Field>
-							<Field orientation="horizontal">
+							<Field>
 								<Button type="submit">Save changes</Button>
 								<Button variant="outline" type="button">
 									Cancel

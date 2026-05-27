@@ -10,8 +10,8 @@ import {
 	UnauthorizedError,
 	UserId,
 } from "@maple/domain/http"
-import { Effect, Layer, Option, Redacted, Schema, Context } from "effect"
-import { Env } from "./Env"
+import { Clock, Effect, Layer, Option, Redacted, Schema, Context } from "effect"
+import { Env } from "../lib/Env"
 
 export interface TenantContext {
 	readonly orgId: OrgId
@@ -27,6 +27,9 @@ export interface AuthServiceShape {
 		password: string,
 	) => Effect.Effect<SelfHostedLoginResponse, SelfHostedAuthDisabledError | SelfHostedInvalidPasswordError>
 	readonly getUserEmail: (userId: string) => Effect.Effect<string | null>
+	readonly getCustomerData: (
+		tenant: TenantContext,
+	) => Effect.Effect<{ email: string | null; orgName: string | null }>
 }
 
 type HeaderRecord = Record<string, string | undefined>
@@ -42,16 +45,16 @@ type JwtPayload = {
 }
 
 const JwtHeaderSchema = Schema.Struct({
-	alg: Schema.optional(Schema.String),
+	alg: Schema.optionalKey(Schema.String),
 })
 const JwtPayloadSchema = Schema.Struct({
-	sub: Schema.optional(Schema.String),
-	exp: Schema.optional(Schema.Number),
-	nbf: Schema.optional(Schema.Number),
-	iat: Schema.optional(Schema.Number),
-	org_id: Schema.optional(Schema.String),
-	authMode: Schema.optional(AuthMode),
-	roles: Schema.optional(Schema.Union([Schema.Array(Schema.String), Schema.String])),
+	sub: Schema.optionalKey(Schema.String),
+	exp: Schema.optionalKey(Schema.Number),
+	nbf: Schema.optionalKey(Schema.Number),
+	iat: Schema.optionalKey(Schema.Number),
+	org_id: Schema.optionalKey(Schema.String),
+	authMode: Schema.optionalKey(AuthMode),
+	roles: Schema.optionalKey(Schema.Union([Schema.Array(Schema.String), Schema.String])),
 })
 const decodeOrgIdSync = Schema.decodeUnknownSync(OrgId)
 const decodeUserIdSync = Schema.decodeUnknownSync(UserId)
@@ -62,6 +65,11 @@ const unauthorized = (message: string) =>
 		message,
 	})
 
+// NOTE: the decode helpers below deliberately discard the parse error and the
+// JWT helpers in `verifyHs256Jwt` do the same. Auth failures must NOT leak
+// validation hints (e.g. which schema field rejected the input) to unauthorized
+// callers — that's an oracle for credential stuffing. Do not refactor these to
+// preserve `cause`.
 const decodeOrgId = (value: string, message: string): Effect.Effect<OrgId, UnauthorizedError> =>
 	Schema.decodeUnknownEffect(OrgId)(value).pipe(Effect.mapError(() => unauthorized(message)))
 
@@ -144,7 +152,8 @@ const verifyHs256Jwt = Effect.fn("AuthService.verifyHs256Jwt")(function* (
 	const payload = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(JwtPayloadSchema))(
 		decodeBase64Url(encodedPayload),
 	).pipe(Effect.mapError(() => unauthorized("Invalid JWT payload")))
-	const now = Math.floor(Date.now() / 1000)
+	// JWT exp/nbf are in seconds since epoch (RFC 7519); divide Clock millis.
+	const now = Math.floor((yield* Clock.currentTimeMillis) / 1000)
 
 	if (payload.nbf && now < payload.nbf) {
 		return yield* unauthorized("JWT is not active yet")
@@ -293,7 +302,7 @@ export const makeLoginSelfHosted = (
 		}
 
 		const tenant = makeSelfHostedTenant(env.MAPLE_DEFAULT_ORG_ID)
-		const now = Math.floor(Date.now() / 1000)
+		const now = Math.floor((yield* Clock.currentTimeMillis) / 1000)
 		const token = signHs256Jwt(
 			{
 				sub: tenant.userId,
@@ -422,20 +431,35 @@ export const makeResolveMcpTenant = (
 	authenticateClerkRequest = makeClerkAuthenticateRequest(env),
 ) => makeResolveTenant(env, authenticateClerkRequest, "api_key")
 
-export const makeGetUserEmail = (
+type ClerkUser = Awaited<ReturnType<ReturnType<typeof createClerkClient>["users"]["getUser"]>>
+
+const extractPrimaryEmail = (u: ClerkUser): string | null => {
+	const primary = u.emailAddresses?.find((e) => e.id === u.primaryEmailAddressId)
+	return primary?.emailAddress ?? u.emailAddresses?.[0]?.emailAddress ?? null
+}
+
+const makeClerkClient = (
 	env: Pick<AuthEnv, "MAPLE_AUTH_MODE" | "CLERK_SECRET_KEY" | "CLERK_PUBLISHABLE_KEY" | "CLERK_JWT_KEY">,
 ) => {
 	if (getAuthMode(env.MAPLE_AUTH_MODE) !== "clerk" || Option.isNone(env.CLERK_SECRET_KEY)) {
-		return Effect.fn("AuthService.getUserEmail")(function* (_userId: string) {
-			return null as string | null
-		})
+		return null
 	}
-
-	const clerkClient = createClerkClient({
+	return createClerkClient({
 		secretKey: Redacted.value(env.CLERK_SECRET_KEY.value),
 		publishableKey: getOptionalString(env.CLERK_PUBLISHABLE_KEY),
 		jwtKey: getOptionalSecret(env.CLERK_JWT_KEY),
 	})
+}
+
+export const makeGetUserEmail = (
+	env: Pick<AuthEnv, "MAPLE_AUTH_MODE" | "CLERK_SECRET_KEY" | "CLERK_PUBLISHABLE_KEY" | "CLERK_JWT_KEY">,
+) => {
+	const clerkClient = makeClerkClient(env)
+	if (!clerkClient) {
+		return Effect.fn("AuthService.getUserEmail")(function* (_userId: string) {
+			return null as string | null
+		})
+	}
 
 	return Effect.fn("AuthService.getUserEmail")(function* (userId: string) {
 		const user = yield* Effect.tryPromise({
@@ -445,32 +469,63 @@ export const makeGetUserEmail = (
 
 		return Option.match(user, {
 			onNone: () => null as string | null,
-			onSome: (u) => {
-				const primaryId = u.primaryEmailAddressId
-				const primary = u.emailAddresses?.find((e) => e.id === primaryId)
-				return primary?.emailAddress ?? u.emailAddresses?.[0]?.emailAddress ?? null
-			},
+			onSome: extractPrimaryEmail,
 		})
 	})
 }
 
-export class AuthService extends Context.Service<AuthService, AuthServiceShape>()("AuthService", {
+export const makeGetCustomerData = (
+	env: Pick<AuthEnv, "MAPLE_AUTH_MODE" | "CLERK_SECRET_KEY" | "CLERK_PUBLISHABLE_KEY" | "CLERK_JWT_KEY">,
+) => {
+	const clerkClient = makeClerkClient(env)
+	if (!clerkClient) {
+		return Effect.fn("AuthService.getCustomerData")(function* (_tenant: TenantContext) {
+			return { email: null as string | null, orgName: null as string | null }
+		})
+	}
+
+	return Effect.fn("AuthService.getCustomerData")(function* (tenant: TenantContext) {
+		const [user, org] = yield* Effect.all(
+			[
+				Effect.tryPromise({
+					try: () => clerkClient.users.getUser(tenant.userId),
+					catch: (error) => error,
+				}).pipe(Effect.option),
+				Effect.tryPromise({
+					try: () => clerkClient.organizations.getOrganization({ organizationId: tenant.orgId }),
+					catch: (error) => error,
+				}).pipe(Effect.option),
+			],
+			{ concurrency: "unbounded" },
+		)
+
+		return {
+			email: Option.match(user, { onNone: () => null as string | null, onSome: extractPrimaryEmail }),
+			orgName: Option.match(org, {
+				onNone: () => null as string | null,
+				onSome: (o) => o.name ?? null,
+			}),
+		}
+	})
+}
+
+export class AuthService extends Context.Service<AuthService, AuthServiceShape>()("@maple/api/services/AuthService", {
 	make: Effect.gen(function* () {
 		const env = yield* Env
 		const resolveTenant = makeResolveTenant(env)
 		const resolveMcpTenant = makeResolveMcpTenant(env)
 		const loginSelfHosted = makeLoginSelfHosted(env)
 		const getUserEmail = makeGetUserEmail(env)
+		const getCustomerData = makeGetCustomerData(env)
 
 		return {
 			resolveTenant,
 			resolveMcpTenant,
 			loginSelfHosted,
 			getUserEmail,
-		}
+			getCustomerData,
+		} satisfies AuthServiceShape
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

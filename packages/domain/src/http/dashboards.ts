@@ -70,7 +70,16 @@ const WidgetDisplayColumnSchema = Schema.Struct({
 	header: Schema.String,
 	unit: Schema.optional(Schema.String),
 	width: Schema.optional(Schema.Number),
-	align: Schema.optional(Schema.String),
+	align: Schema.optional(Schema.Literals(["left", "center", "right"])),
+	hidden: Schema.optional(Schema.Boolean),
+	thresholds: Schema.optional(
+		Schema.Array(
+			Schema.Struct({
+				value: Schema.Number,
+				color: Schema.String,
+			}),
+		),
+	),
 })
 
 export const WidgetDisplayConfigSchema = Schema.Struct({
@@ -79,8 +88,12 @@ export const WidgetDisplayConfigSchema = Schema.Struct({
 	chartId: Schema.optional(Schema.String),
 	chartPresentation: Schema.optional(
 		Schema.Struct({
-			legend: Schema.optional(Schema.String),
-			tooltip: Schema.optional(Schema.String),
+			legend: Schema.optional(Schema.Literals(["visible", "hidden", "right"])),
+			seriesStats: Schema.optional(Schema.Boolean),
+			tooltip: Schema.optional(Schema.Literals(["visible", "hidden"])),
+			showPoints: Schema.optional(Schema.Boolean),
+			fillNulls: Schema.optional(Schema.Union([Schema.Number, Schema.Literal(false)])),
+			compareToPreviousPeriod: Schema.optional(Schema.Boolean),
 		}),
 	),
 	xAxis: Schema.optional(
@@ -96,13 +109,16 @@ export const WidgetDisplayConfigSchema = Schema.Struct({
 			unit: Schema.optional(Schema.String),
 			min: Schema.optional(Schema.Number),
 			max: Schema.optional(Schema.Number),
+			softMin: Schema.optional(Schema.Number),
+			softMax: Schema.optional(Schema.Number),
+			logScale: Schema.optional(Schema.Boolean),
 			visible: Schema.optional(Schema.Boolean),
 		}),
 	),
 	seriesMapping: Schema.optional(StringRecord),
 	colorOverrides: Schema.optional(StringRecord),
 	stacked: Schema.optional(Schema.Boolean),
-	curveType: Schema.optional(Schema.String),
+	curveType: Schema.optional(Schema.Literals(["linear", "monotone"])),
 	unit: Schema.optional(Schema.String),
 	thresholds: Schema.optional(
 		Schema.Array(
@@ -127,6 +143,57 @@ export const WidgetDisplayConfigSchema = Schema.Struct({
 	listDataSource: Schema.optional(Schema.String),
 	listWhereClause: Schema.optional(Schema.String),
 	listLimit: Schema.optional(Schema.Number),
+	listRootOnly: Schema.optional(Schema.Boolean),
+
+	// Pie-specific
+	pie: Schema.optional(
+		Schema.Struct({
+			donut: Schema.optional(Schema.Boolean),
+			innerRadius: Schema.optional(Schema.Number),
+			showLabels: Schema.optional(Schema.Boolean),
+			showPercent: Schema.optional(Schema.Boolean),
+		}),
+	),
+
+	// Funnel-specific
+	funnel: Schema.optional(
+		Schema.Struct({
+			showStepPercent: Schema.optional(Schema.Boolean),
+		}),
+	),
+
+	// Histogram-specific
+	histogram: Schema.optional(
+		Schema.Struct({
+			bucketCount: Schema.optional(Schema.Number),
+			bucketWidth: Schema.optional(Schema.Number),
+			logScaleY: Schema.optional(Schema.Boolean),
+		}),
+	),
+
+	// Heatmap-specific
+	heatmap: Schema.optional(
+		Schema.Struct({
+			colorScale: Schema.optional(Schema.Literals(["viridis", "magma", "cividis", "blues", "reds"])),
+			scaleType: Schema.optional(Schema.Literals(["linear", "log"])),
+		}),
+	),
+
+	// Gauge-specific
+	gauge: Schema.optional(
+		Schema.Struct({
+			min: Schema.optional(Schema.Number),
+			max: Schema.optional(Schema.Number),
+			style: Schema.optional(Schema.Literals(["radial", "bar"])),
+		}),
+	),
+
+	// Markdown-specific
+	markdown: Schema.optional(
+		Schema.Struct({
+			content: Schema.String,
+		}),
+	),
 })
 
 export const WidgetLayoutSchema = Schema.Struct({
@@ -152,8 +219,8 @@ export class PortableDashboardDocument extends Schema.Class<PortableDashboardDoc
 	"PortableDashboardDocument",
 )({
 	name: Schema.String,
-	description: Schema.optional(Schema.String),
-	tags: Schema.optional(Schema.Array(Schema.String)),
+	description: Schema.optionalKey(Schema.String),
+	tags: Schema.optionalKey(Schema.Array(Schema.String)),
 	timeRange: TimeRangeSchema,
 	widgets: Schema.Array(DashboardWidgetSchema),
 }) {}
@@ -161,10 +228,9 @@ export class PortableDashboardDocument extends Schema.Class<PortableDashboardDoc
 export class DashboardDocument extends Schema.Class<DashboardDocument>("DashboardDocument")({
 	id: DashboardId,
 	name: Schema.String,
-	description: Schema.optional(Schema.String),
-	tags: Schema.optional(Schema.Array(Schema.String)),
+	description: Schema.optionalKey(Schema.String),
+	tags: Schema.optionalKey(Schema.Array(Schema.String)),
 	timeRange: TimeRangeSchema,
-	variables: Schema.optional(Schema.Array(Schema.Unknown)),
 	widgets: Schema.Array(DashboardWidgetSchema),
 	createdAt: IsoDateTimeString,
 	updatedAt: IsoDateTimeString,
@@ -180,6 +246,19 @@ export class DashboardUpsertRequest extends Schema.Class<DashboardUpsertRequest>
 
 export class DashboardCreateRequest extends Schema.Class<DashboardCreateRequest>("DashboardCreateRequest")({
 	dashboard: PortableDashboardDocument,
+}) {}
+
+export class DashboardPersesImportRequest extends Schema.Class<DashboardPersesImportRequest>(
+	"DashboardPersesImportRequest",
+)({
+	dashboard: Schema.Record(Schema.String, Schema.Unknown),
+}) {}
+
+export class DashboardPersesImportResponse extends Schema.Class<DashboardPersesImportResponse>(
+	"DashboardPersesImportResponse",
+)({
+	dashboard: DashboardDocument,
+	warnings: Schema.Array(Schema.String),
 }) {}
 
 export class DashboardDeleteResponse extends Schema.Class<DashboardDeleteResponse>("DashboardDeleteResponse")(
@@ -305,7 +384,7 @@ export class DashboardTemplateParameter extends Schema.Class<DashboardTemplatePa
 	label: Schema.String,
 	description: Schema.String,
 	required: Schema.Boolean,
-	placeholder: Schema.optional(Schema.String),
+	placeholder: Schema.optionalKey(Schema.String),
 }) {}
 
 export class DashboardTemplateMetadata extends Schema.Class<DashboardTemplateMetadata>(
@@ -329,8 +408,8 @@ export class DashboardTemplatesListResponse extends Schema.Class<DashboardTempla
 export class DashboardTemplateInstantiateRequest extends Schema.Class<DashboardTemplateInstantiateRequest>(
 	"DashboardTemplateInstantiateRequest",
 )({
-	parameters: Schema.optional(Schema.Record(DashboardTemplateParameterKey, Schema.String)),
-	name: Schema.optional(Schema.String),
+	parameters: Schema.optionalKey(Schema.Record(DashboardTemplateParameterKey, Schema.String)),
+	name: Schema.optionalKey(Schema.String),
 }) {}
 
 export class DashboardTemplateNotFoundError extends Schema.TaggedErrorClass<DashboardTemplateNotFoundError>()(
@@ -353,6 +432,13 @@ export class DashboardsApiGroup extends HttpApiGroup.make("dashboards")
 		HttpApiEndpoint.post("create", "/", {
 			payload: DashboardCreateRequest,
 			success: DashboardDocument,
+			error: [DashboardValidationError, DashboardPersistenceError, DashboardConcurrencyError],
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("importPerses", "/import/perses", {
+			payload: DashboardPersesImportRequest,
+			success: DashboardPersesImportResponse,
 			error: [DashboardValidationError, DashboardPersistenceError, DashboardConcurrencyError],
 		}),
 	)

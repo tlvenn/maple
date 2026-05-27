@@ -1,12 +1,14 @@
 import { Result, useAtomValue } from "@/lib/effect-atom"
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
+import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@maple/ui/components/ui/empty"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { MetricTypeBadge } from "./metric-type-badge"
-import { type Metric, type ListMetricsInput } from "@/api/tinybird/metrics"
-import { listMetricsResultAtom } from "@/lib/services/atoms/tinybird-query-atoms"
+import { type Metric, type ListMetricsInput } from "@/api/warehouse/metrics"
+import { listMetricsResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 import { QueryErrorState } from "@/components/common/query-error-state"
+import { normalizeTimestampInput } from "@/lib/timezone-format"
 
 function formatNumber(num: number): string {
 	if (num >= 1_000_000) {
@@ -19,7 +21,7 @@ function formatNumber(num: number): string {
 }
 
 function formatTimeAgo(timestamp: string): string {
-	const date = new Date(timestamp)
+	const date = new Date(normalizeTimestampInput(timestamp))
 	const now = new Date()
 	const diffMs = now.getTime() - date.getTime()
 	const diffSec = Math.floor(diffMs / 1000)
@@ -38,15 +40,17 @@ interface MetricsTableProps {
 	metricType: ListMetricsInput["metricType"] | null
 	selectedMetric: Metric | null
 	onSelectMetric: (metric: Metric | null) => void
+	startTime?: string
+	endTime?: string
 }
 
 function LoadingState() {
 	return (
 		<div className="rounded-md border overflow-auto">
-			<Table>
+			<Table className="table-fixed">
 				<TableHeader>
 					<TableRow>
-						<TableHead>Metric Name</TableHead>
+						<TableHead className="w-[40%]">Metric Name</TableHead>
 						<TableHead className="hidden md:table-cell w-[100px]">Type</TableHead>
 						<TableHead className="hidden md:table-cell w-[120px]">Service</TableHead>
 						<TableHead className="hidden md:table-cell w-[100px]">Points</TableHead>
@@ -79,13 +83,22 @@ function LoadingState() {
 	)
 }
 
-export function MetricsTable({ search, metricType, selectedMetric, onSelectMetric }: MetricsTableProps) {
+export function MetricsTable({
+	search,
+	metricType,
+	selectedMetric,
+	onSelectMetric,
+	startTime,
+	endTime,
+}: MetricsTableProps) {
 	const metricsResult = useAtomValue(
 		listMetricsResultAtom({
 			data: {
 				search: search || undefined,
 				metricType: metricType || undefined,
 				limit: 100,
+				startTime,
+				endTime,
 			},
 		}),
 	)
@@ -93,28 +106,31 @@ export function MetricsTable({ search, metricType, selectedMetric, onSelectMetri
 	return Result.builder(metricsResult)
 		.onInitial(() => <LoadingState />)
 		.onError((error) => <QueryErrorState error={error} />)
-		.onSuccess((response, result) => (
-			<div className={`space-y-4 ${result.waiting ? "opacity-60" : ""}`}>
-				<div className="rounded-md border overflow-auto">
-					<Table>
-						<TableHeader>
-							<TableRow>
-								<TableHead>Metric Name</TableHead>
-								<TableHead className="w-[100px]">Type</TableHead>
-								<TableHead className="w-[120px]">Service</TableHead>
-								<TableHead className="w-[100px]">Points</TableHead>
-								<TableHead className="w-[100px]">Last Seen</TableHead>
-							</TableRow>
-						</TableHeader>
-						<TableBody>
-							{response.data.length === 0 ? (
+		.onSuccess((response, result) =>
+			response.data.length === 0 ? (
+				<Empty>
+					<EmptyHeader>
+						<EmptyTitle>No metrics found</EmptyTitle>
+						<EmptyDescription>
+							No metrics matched your filters in the selected time range.
+						</EmptyDescription>
+					</EmptyHeader>
+				</Empty>
+			) : (
+				<div className={`space-y-4 ${result.waiting ? "opacity-60" : ""}`}>
+					<div className="rounded-md border overflow-auto">
+						<Table className="table-fixed">
+							<TableHeader>
 								<TableRow>
-									<TableCell colSpan={5} className="h-24 text-center">
-										No metrics found
-									</TableCell>
+									<TableHead className="w-[40%]">Metric Name</TableHead>
+									<TableHead className="w-[100px]">Type</TableHead>
+									<TableHead className="w-[120px]">Service</TableHead>
+									<TableHead className="w-[100px]">Points</TableHead>
+									<TableHead className="w-[100px]">Last Seen</TableHead>
 								</TableRow>
-							) : (
-								response.data.map((metric) => {
+							</TableHeader>
+							<TableBody>
+								{response.data.map((metric) => {
 									const isSelected =
 										selectedMetric?.metricName === metric.metricName &&
 										selectedMetric?.metricType === metric.metricType &&
@@ -127,8 +143,11 @@ export function MetricsTable({ search, metricType, selectedMetric, onSelectMetri
 											onClick={() => onSelectMetric(isSelected ? null : metric)}
 										>
 											<TableCell>
-												<div className="flex flex-col gap-0.5">
-													<span className="font-mono text-xs">
+												<div className="flex min-w-0 flex-col gap-0.5">
+													<span
+														className="truncate font-mono text-xs"
+														title={metric.metricName}
+													>
 														{metric.metricName}
 													</span>
 													{metric.metricDescription && (
@@ -142,9 +161,16 @@ export function MetricsTable({ search, metricType, selectedMetric, onSelectMetri
 												<MetricTypeBadge type={metric.metricType} />
 											</TableCell>
 											<TableCell className="hidden md:table-cell">
-												<Badge variant="outline" className="font-mono text-[10px]">
-													{metric.serviceName}
-												</Badge>
+												{metric.serviceName ? (
+													<Badge
+														variant="outline"
+														className="font-mono text-[10px]"
+													>
+														{metric.serviceName}
+													</Badge>
+												) : (
+													<span className="text-xs text-muted-foreground">-</span>
+												)}
 											</TableCell>
 											<TableCell className="hidden md:table-cell font-mono text-xs">
 												{formatNumber(metric.dataPointCount)}
@@ -154,14 +180,16 @@ export function MetricsTable({ search, metricType, selectedMetric, onSelectMetri
 											</TableCell>
 										</TableRow>
 									)
-								})
-							)}
-						</TableBody>
-					</Table>
-				</div>
+								})}
+							</TableBody>
+						</Table>
+					</div>
 
-				<div className="text-sm text-muted-foreground">Showing {response.data.length} metrics</div>
-			</div>
-		))
+					<div className="text-sm text-muted-foreground">
+						Showing {response.data.length} metrics
+					</div>
+				</div>
+			),
+		)
 		.render()
 }

@@ -1,5 +1,4 @@
 import { memo, useCallback, useMemo, useRef } from "react"
-import { useNavigate } from "@tanstack/react-router"
 import { GridLayout, useContainerWidth, verticalCompactor } from "react-grid-layout"
 import type { Layout } from "react-grid-layout"
 import "react-grid-layout/css/styles.css"
@@ -11,18 +10,17 @@ import type {
 	WidgetMode,
 } from "@/components/dashboard-builder/types"
 import { useDashboardActions } from "@/components/dashboard-builder/dashboard-actions-context"
+import { WidgetActionsProvider } from "@/components/dashboard-builder/widgets/widget-actions-context"
 import { useWidgetData } from "@/hooks/use-widget-data"
-import {
-	encodeWidgetFixContextToSearchParam,
-	type WidgetFixContext,
-} from "@/components/chat/widget-fix-context"
 import { ChartWidget } from "@/components/dashboard-builder/widgets/chart-widget"
 import { StatWidget } from "@/components/dashboard-builder/widgets/stat-widget"
+import { GaugeWidget } from "@/components/dashboard-builder/widgets/gauge-widget"
 import { TableWidget } from "@/components/dashboard-builder/widgets/table-widget"
 import { ListWidget } from "@/components/dashboard-builder/widgets/list-widget"
 import { PieWidget } from "@/components/dashboard-builder/widgets/pie-widget"
 import { HistogramWidget } from "@/components/dashboard-builder/widgets/histogram-widget"
 import { HeatmapWidget } from "@/components/dashboard-builder/widgets/heatmap-widget"
+import { FunnelWidget } from "@/components/dashboard-builder/widgets/funnel-widget"
 import { MarkdownWidget } from "@/components/dashboard-builder/widgets/markdown-widget"
 
 interface DashboardCanvasProps {
@@ -41,76 +39,29 @@ const visualizationRegistry: Record<
 		dataState: WidgetDataState
 		display: WidgetDisplayConfig
 		mode: WidgetMode
-		onRemove: () => void
-		onClone?: () => void
-		onConfigure?: () => void
-		onFix?: () => void
 	}>
 > = {
 	chart: ChartWidget,
 	stat: StatWidget,
+	gauge: GaugeWidget,
 	table: TableWidget,
 	list: ListWidget,
 	pie: PieWidget,
 	histogram: HistogramWidget,
 	heatmap: HeatmapWidget,
+	funnel: FunnelWidget,
 	markdown: MarkdownWidget,
 }
 
 const WidgetRenderer = memo(function WidgetRenderer({ widget }: { widget: DashboardWidget }) {
-	const { mode, readOnly, removeWidget, cloneWidget, configureWidget, dashboardId } =
-		useDashboardActions()
+	const { mode } = useDashboardActions()
 	const { dataState } = useWidgetData(widget)
 	const Visualization = visualizationRegistry[widget.visualization] ?? visualizationRegistry.chart
-	const navigate = useNavigate()
-
-	const onRemove = useCallback(() => removeWidget(widget.id), [removeWidget, widget.id])
-
-	const onClone = useMemo(
-		() => (readOnly ? undefined : () => cloneWidget(widget.id)),
-		[readOnly, cloneWidget, widget.id],
-	)
-
-	const onConfigure = useMemo(
-		() => (readOnly ? undefined : () => configureWidget(widget.id)),
-		[readOnly, configureWidget, widget.id],
-	)
-
-	const errorTitle = dataState.status === "error" ? (dataState.title ?? null) : null
-	const errorMessage = dataState.status === "error" ? (dataState.message ?? null) : null
-	const errorKind = dataState.status === "error" ? dataState.kind : undefined
-	const onFix = useMemo(() => {
-		if (!dashboardId) return undefined
-		if (errorKind !== "decode") return undefined
-		return () => {
-			const ctx: WidgetFixContext = {
-				dashboardId,
-				widgetId: widget.id,
-				widgetTitle: widget.display.title ?? "Untitled",
-				widgetJson: JSON.stringify(widget),
-				errorTitle,
-				errorMessage,
-			}
-			navigate({
-				to: "/chat",
-				search: {
-					mode: "widget-fix",
-					widget: encodeWidgetFixContextToSearchParam(ctx),
-				},
-			})
-		}
-	}, [dashboardId, errorKind, errorTitle, errorMessage, widget, navigate])
 
 	return (
-		<Visualization
-			dataState={dataState}
-			display={widget.display}
-			mode={mode}
-			onRemove={onRemove}
-			onClone={onClone}
-			onConfigure={onConfigure}
-			onFix={onFix}
-		/>
+		<WidgetActionsProvider widget={widget} dataState={dataState}>
+			<Visualization dataState={dataState} display={widget.display} mode={mode} />
+		</WidgetActionsProvider>
 	)
 })
 

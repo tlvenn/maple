@@ -244,7 +244,7 @@ export function MembersSection() {
 										<TableRow key={member.id}>
 											<TableCell>
 												<div className="flex items-center gap-3">
-													<Avatar size="sm">
+													<Avatar className="size-6">
 														<AvatarImage src={userData?.imageUrl} />
 														<AvatarFallback>
 															{getInitials(
@@ -352,7 +352,7 @@ export function MembersSection() {
 									<TableRow key={invitation.id}>
 										<TableCell>
 											<div className="flex items-center gap-3">
-												<Avatar size="sm">
+												<Avatar className="size-6">
 													<AvatarFallback>
 														<EnvelopeIcon size={12} />
 													</AvatarFallback>
@@ -395,7 +395,7 @@ export function MembersSection() {
 						<DialogTitle>Invite member</DialogTitle>
 						<DialogDescription>Send an invitation to join {organization.name}.</DialogDescription>
 					</DialogHeader>
-					<div className="space-y-4 py-2">
+					<div className="space-y-4 px-6 py-2">
 						<div className="space-y-2">
 							<Label htmlFor="invite-email" className="text-xs font-medium">
 								Email address
@@ -414,7 +414,7 @@ export function MembersSection() {
 								Role
 							</Label>
 							<Select value={inviteRole} onValueChange={(val) => val && setInviteRole(val)}>
-								<SelectTrigger id="invite-role">
+								<SelectTrigger id="invite-role" className="w-full">
 									<SelectValue placeholder="Select role">
 										{inviteRole === "org:admin" ? "Admin" : "Member"}
 									</SelectValue>

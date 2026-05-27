@@ -1,6 +1,7 @@
 import type { AlertDestinationRow } from "@maple/db"
 import { alertDestinations } from "@maple/db"
 import {
+	AlertDeliveryError,
 	type AlertComparator,
 	type AlertDestinationId,
 	type AlertEventType,
@@ -9,7 +10,7 @@ import {
 	type OrgId,
 } from "@maple/domain/http"
 import { and, eq, inArray } from "drizzle-orm"
-import { Context, Effect, Layer, Redacted } from "effect"
+import { Clock, Context, Data, Effect, Layer, Redacted } from "effect"
 import {
 	buildAlertChatUrl,
 	dispatchDelivery as dispatchDeliveryImpl,
@@ -20,9 +21,9 @@ import {
 	type DestinationSecretConfig,
 	type EnrichedDestinationSecretConfig,
 } from "./AlertDestinationHydration"
-import { parseBase64Aes256GcmKey } from "./Crypto"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { parseBase64Aes256GcmKey } from "../lib/Crypto"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 
 /*
  * Shared notification dispatch for alert-adjacent features (error issues /
@@ -30,6 +31,13 @@ import { Env } from "./Env"
  */
 
 const DELIVERY_TIMEOUT_MS = 15_000
+
+export class NotificationDispatchError extends Data.TaggedError(
+	"@maple/api/services/NotificationDispatchError",
+)<{
+	readonly message: string
+	readonly cause?: unknown
+}> {}
 
 export interface NotificationRequest {
 	readonly deliveryKey: string
@@ -62,7 +70,7 @@ export interface NotificationDispatcherShape {
 export class NotificationDispatcher extends Context.Service<
 	NotificationDispatcher,
 	NotificationDispatcherShape
->()("NotificationDispatcher", {
+>()("@maple/api/services/NotificationDispatcher", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
@@ -75,7 +83,7 @@ export class NotificationDispatcher extends Context.Service<
 		const enrichSecretConfig = (
 			_row: AlertDestinationRow,
 			secretConfig: DestinationSecretConfig,
-		): Effect.Effect<EnrichedDestinationSecretConfig, Error> =>
+		): Effect.Effect<EnrichedDestinationSecretConfig, NotificationDispatchError> =>
 			// Hazel-OAuth webhooks now embed their delivery token in the URL path,
 			// so no enrichment is required at dispatch time.
 			Effect.succeed(secretConfig)
@@ -83,9 +91,12 @@ export class NotificationDispatcher extends Context.Service<
 		const dispatchOne = (row: AlertDestinationRow, request: NotificationRequest) =>
 			Effect.gen(function* () {
 				const hydrated = yield* hydrateDestinationRow(row, encryptionKey, {
-					onPublicConfigInvalid: () => new Error("Stored destination config is invalid"),
-					onDecryptFailure: () => new Error("Failed to decrypt destination secret"),
-					onSecretConfigInvalid: () => new Error("Stored destination secret is invalid"),
+					onPublicConfigInvalid: () =>
+						new NotificationDispatchError({ message: "Stored destination config is invalid" }),
+					onDecryptFailure: () =>
+						new NotificationDispatchError({ message: "Failed to decrypt destination secret" }),
+					onSecretConfigInvalid: () =>
+						new NotificationDispatchError({ message: "Stored destination secret is invalid" }),
 				})
 				const enrichedSecret = yield* enrichSecretConfig(row, hydrated.secretConfig)
 				const context: DispatchContext = {
@@ -135,7 +146,7 @@ export class NotificationDispatcher extends Context.Service<
 					},
 					linkUrl: request.linkUrl,
 					chatUrl,
-					sentAt: new Date().toISOString(),
+					sentAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
 				})
 				return yield* dispatchDeliveryImpl(
 					context,
@@ -169,7 +180,9 @@ export class NotificationDispatcher extends Context.Service<
 								Effect.annotateLogs({ orgId, message: error.message }),
 							),
 						),
-						Effect.catch(() => Effect.succeed([] as Array<AlertDestinationRow>)),
+						Effect.catchTag("@maple/api/lib/DatabaseError", () =>
+							Effect.succeed([] as Array<AlertDestinationRow>),
+						),
 					)
 
 				const enabled = rows.filter((row) => row.enabled === 1)
@@ -189,7 +202,12 @@ export class NotificationDispatcher extends Context.Service<
 									}),
 								),
 							),
-							Effect.catch(() => Effect.succeed("failed" as const)),
+							Effect.catchTags({
+								"@maple/api/services/NotificationDispatchError": () =>
+									Effect.succeed("failed" as const),
+								"@maple/http/errors/AlertDeliveryError": () =>
+									Effect.succeed("failed" as const),
+							}),
 						),
 					{ concurrency: "unbounded" },
 				)
@@ -204,6 +222,4 @@ export class NotificationDispatcher extends Context.Service<
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

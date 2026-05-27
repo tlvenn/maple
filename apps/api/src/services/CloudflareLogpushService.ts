@@ -22,10 +22,10 @@ import {
 	parseCloudflareLogpushSecretHmacKey,
 } from "@maple/db"
 import { and, eq } from "drizzle-orm"
-import { Effect, Layer, Option, Redacted, Schema, Context } from "effect"
-import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "./Crypto"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Clock, Effect, Layer, Option, Redacted, Schema, Context } from "effect"
+import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "../lib/Crypto"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 
 const DATASET = "http_requests"
 const OUTPUT_TYPE = "ndjson"
@@ -199,7 +199,7 @@ const cleanOptionalServiceName = (
 export class CloudflareLogpushService extends Context.Service<
 	CloudflareLogpushService,
 	CloudflareLogpushServiceShape
->()("CloudflareLogpushService", {
+>()("@maple/api/services/CloudflareLogpushService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
@@ -327,7 +327,7 @@ export class CloudflareLogpushService extends Context.Service<
 			const zoneName = yield* cleanRequiredString("Zone name", request.zoneName)
 			const serviceName = yield* cleanOptionalServiceName(request.serviceName, zoneName)
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const id = decodeConnectorIdSync(randomUUID())
 			const secret = generateSecret()
 			const secretHash = hashCloudflareLogpushSecret(secret, lookupHmacKey)
@@ -374,7 +374,7 @@ export class CloudflareLogpushService extends Context.Service<
 		) {
 			const existing = yield* requireConnector(orgId, connectorId)
 			const updates: Record<string, unknown> = {
-				updatedAt: Date.now(),
+				updatedAt: (yield* Clock.currentTimeMillis),
 				updatedBy: userId,
 			}
 
@@ -460,7 +460,7 @@ export class CloudflareLogpushService extends Context.Service<
 		) {
 			yield* requireConnector(orgId, connectorId)
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const secret = generateSecret()
 			const secretHash = hashCloudflareLogpushSecret(secret, lookupHmacKey)
 			const encryptedSecret = yield* encryptSecret(secret, encryptionKey)
@@ -501,33 +501,4 @@ export class CloudflareLogpushService extends Context.Service<
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
-
-	static readonly list = (orgId: OrgId) => this.use((service) => service.list(orgId))
-
-	static readonly create = (
-		orgId: OrgId,
-		userId: UserId,
-		request: CreateCloudflareLogpushConnectorRequest,
-	) => this.use((service) => service.create(orgId, userId, request))
-
-	static readonly update = (
-		orgId: OrgId,
-		connectorId: CloudflareLogpushConnectorId,
-		userId: UserId,
-		request: UpdateCloudflareLogpushConnectorRequest,
-	) => this.use((service) => service.update(orgId, connectorId, userId, request))
-
-	static readonly delete = (orgId: OrgId, connectorId: CloudflareLogpushConnectorId) =>
-		this.use((service) => service.delete(orgId, connectorId))
-
-	static readonly getSetup = (orgId: OrgId, connectorId: CloudflareLogpushConnectorId) =>
-		this.use((service) => service.getSetup(orgId, connectorId))
-
-	static readonly rotateSecret = (
-		orgId: OrgId,
-		connectorId: CloudflareLogpushConnectorId,
-		userId: UserId,
-	) => this.use((service) => service.rotateSecret(orgId, connectorId, userId))
 }

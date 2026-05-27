@@ -123,7 +123,7 @@ export function getSpanColorStyle(
 }
 
 /**
- * Get a hue for a service index, using hand-picked hues for ≤8 services
+ * Get a hue for a service index, using hand-picked hues for ≤16 services
  * and golden-angle distribution for larger counts to avoid collisions.
  */
 function getServiceHue(serviceIndex: number, totalServices: number): number {
@@ -150,6 +150,31 @@ export function getServiceBorderColor(serviceName: string, services: string[]): 
 	const serviceIndex = services.indexOf(serviceName)
 	const hue = getServiceHue(serviceIndex, services.length)
 	return `oklch(0.45 0.18 ${hue})`
+}
+
+/**
+ * Resolve a hue for a string value, used to color trace timeline bars by
+ * an arbitrary attribute. Returns null for empty/missing values so callers
+ * can render a neutral fallback.
+ *
+ * When indexHint is supplied (position of a service in the trace's services
+ * array), routes through getServiceHue so the timeline shares hues with
+ * getServiceLegendColor (legend swatches, span hierarchy, service map, etc.).
+ */
+export function getValueHue(
+	value: string | undefined | null,
+	indexHint?: number,
+	totalCount?: number,
+): number | null {
+	if (value == null || value === "") return null
+	if (indexHint != null && indexHint >= 0) {
+		return getServiceHue(indexHint, totalCount ?? SERVICE_HUES.length)
+	}
+	let hash = 0
+	for (let i = 0; i < value.length; i++) {
+		hash = value.charCodeAt(i) + ((hash << 5) - hash)
+	}
+	return SERVICE_HUES[Math.abs(hash) % SERVICE_HUES.length]
 }
 
 /**
