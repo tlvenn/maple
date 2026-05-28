@@ -61,7 +61,7 @@ function normalizeWidgetLayouts(widgets: DashboardWidget[]): DashboardWidget[] {
 					: widget.visualization === "table" || widget.visualization === "list"
 						? 6
 						: 4,
-			h: 4,
+			h: widget.visualization === "stat" ? 4 : 5,
 			minW: widget.visualization === "stat" ? 2 : 3,
 			minH: widget.visualization === "table" || widget.visualization === "list" ? 3 : 2,
 		}
@@ -95,7 +95,7 @@ export function toPortableDashboard(dashboard: Dashboard): PortableDashboard {
 function stripWidgetTimeParams(widget: DashboardWidget): DashboardWidget {
 	const params = widget.dataSource.params
 	if (!params || !("startTime" in params || "endTime" in params)) return widget
-	const { startTime, endTime, ...rest } = params
+	const { startTime: _startTime, endTime: _endTime, ...rest } = params
 	return { ...widget, dataSource: { ...widget.dataSource, params: rest } }
 }
 
@@ -124,6 +124,17 @@ export function parsePortableDashboardJson(json: string): PortableDashboard {
 			),
 		),
 	}
+}
+
+export function isPersesDashboardJson(value: unknown): value is Record<string, unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		(value as { kind?: unknown }).kind === "Dashboard" &&
+		typeof (value as { spec?: unknown }).spec === "object" &&
+		(value as { spec?: unknown }).spec !== null
+	)
 }
 
 export function downloadPortableDashboard(dashboard: Dashboard) {

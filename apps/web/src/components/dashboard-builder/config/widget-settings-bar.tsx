@@ -33,9 +33,72 @@ function isDurationUnit(value: string): boolean {
 const VISUALIZATION_OPTIONS: Array<{ value: VisualizationType; label: string }> = [
 	{ value: "chart", label: "Chart" },
 	{ value: "stat", label: "Stat" },
+	{ value: "gauge", label: "Gauge" },
 	{ value: "table", label: "Table" },
 	{ value: "list", label: "List" },
 ]
+
+type Threshold = { value: number; color: string }
+
+function ThresholdsEditor({
+	thresholds,
+	onChange,
+}: {
+	thresholds: Threshold[]
+	onChange: (next: Threshold[]) => void
+}) {
+	return (
+		<div className="space-y-1.5">
+			<p className="text-[11px] uppercase tracking-wide text-muted-foreground">Thresholds</p>
+			<div className="flex flex-col gap-1.5">
+				{thresholds.map((threshold, index) => (
+					<div key={index} className="flex items-center gap-1.5">
+						<input
+							type="color"
+							value={threshold.color.startsWith("#") ? threshold.color : "#ef4444"}
+							onChange={(event) => {
+								const next = thresholds.slice()
+								next[index] = { ...threshold, color: event.target.value }
+								onChange(next)
+							}}
+							className="h-8 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+							aria-label="Threshold color"
+						/>
+						<Input
+							type="number"
+							value={String(threshold.value)}
+							onChange={(event) => {
+								const parsed = Number(event.target.value)
+								const next = thresholds.slice()
+								next[index] = {
+									...threshold,
+									value: Number.isFinite(parsed) ? parsed : 0,
+								}
+								onChange(next)
+							}}
+							className="h-8"
+						/>
+						<button
+							type="button"
+							onClick={() => onChange(thresholds.filter((_, i) => i !== index))}
+							className="flex h-8 w-8 shrink-0 items-center justify-center rounded border text-muted-foreground transition-colors hover:text-foreground"
+							aria-label="Remove threshold"
+						>
+							×
+						</button>
+					</div>
+				))}
+				<button
+					type="button"
+					onClick={() => onChange([...thresholds, { value: 0, color: "#ef4444" }])}
+					className="h-8 rounded-md border border-dashed text-xs text-muted-foreground transition-colors hover:text-foreground"
+				>
+					+ Add threshold
+				</button>
+			</div>
+		</div>
+	)
+}
 
 export function WidgetSettingsBar() {
 	const {
@@ -59,14 +122,23 @@ export function WidgetSettingsBar() {
 		unit,
 		tableLimit,
 		legendPosition,
+		seriesStatsEnabled,
+		heatmapColorScale,
+		heatmapScaleType,
+		thresholds,
+		gaugeMin,
+		gaugeMax,
+		sparklineEnabled,
 	} = state
 
 	const onChange = (updates: Record<string, unknown>) => setState((current) => ({ ...current, ...updates }))
 
 	const isChart = visualization === "chart"
 	const isStat = visualization === "stat"
+	const isGauge = visualization === "gauge"
 	const isTable = visualization === "table"
 	const isList = visualization === "list"
+	const isHeatmap = visualization === "heatmap"
 
 	const chartStyleOptions = isChart
 		? chartRegistry
@@ -233,10 +305,62 @@ export function WidgetSettingsBar() {
 				</div>
 			)}
 
-			{(isChart || isStat) && <div className="h-px bg-border" />}
+			{isHeatmap && (
+				<>
+					<div className="h-px bg-border" />
+					<div className="space-y-1.5">
+						<p className="text-[11px] uppercase tracking-wide text-muted-foreground">Color scale</p>
+						<Select
+							items={Object.fromEntries(
+								(["blues", "reds", "viridis", "magma", "cividis"] as const).map((c) => [
+									c,
+									c[0].toUpperCase() + c.slice(1),
+								]),
+							)}
+							value={heatmapColorScale}
+							onValueChange={(value) =>
+								onChange({ heatmapColorScale: value as typeof heatmapColorScale })
+							}
+						>
+							<SelectTrigger className="w-full">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{(["blues", "reds", "viridis", "magma", "cividis"] as const).map((c) => (
+									<SelectItem key={c} value={c}>
+										{c[0].toUpperCase() + c.slice(1)}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</div>
+					<div className="space-y-1.5">
+						<p className="text-[11px] uppercase tracking-wide text-muted-foreground">Color scaling</p>
+						<div className="flex h-9 rounded-md border bg-muted/40 p-0.5">
+							{(["linear", "log"] as const).map((mode) => (
+								<button
+									key={mode}
+									type="button"
+									onClick={() => onChange({ heatmapScaleType: mode })}
+									className={cn(
+										"flex-1 text-xs rounded-sm transition-colors capitalize",
+										heatmapScaleType === mode
+											? "bg-background text-foreground shadow-sm"
+											: "text-muted-foreground hover:text-foreground",
+									)}
+								>
+									{mode}
+								</button>
+							))}
+						</div>
+					</div>
+				</>
+			)}
 
-			{/* Y-Axis Unit (for chart) / Unit (for stat) */}
-			{(isChart || isStat) && (
+			{(isChart || isStat || isGauge) && <div className="h-px bg-border" />}
+
+			{/* Y-Axis Unit (for chart) / Unit (for stat & gauge) */}
+			{(isChart || isStat || isGauge) && (
 				<div className="space-y-1.5">
 					<p className="text-[11px] uppercase tracking-wide text-muted-foreground">
 						{isChart ? "Y-Axis Unit" : "Unit"}
@@ -302,10 +426,29 @@ export function WidgetSettingsBar() {
 							</button>
 						))}
 					</div>
+					<div className="flex items-center gap-2 pt-0.5">
+						<Checkbox
+							id="qb-series-stats"
+							checked={seriesStatsEnabled}
+							onCheckedChange={(checked) =>
+								onChange(
+									// Stats live inside the legend, so enabling them with the
+									// legend hidden would have no visible effect — turn the
+									// legend on (bottom) in the same change.
+									checked === true && legendPosition === "hidden"
+										? { seriesStatsEnabled: true, legendPosition: "bottom" }
+										: { seriesStatsEnabled: checked === true },
+								)
+							}
+						/>
+						<label htmlFor="qb-series-stats" className="text-xs text-muted-foreground">
+							Show Min/Max/Mean/Last stats
+						</label>
+					</div>
 				</div>
 			)}
 
-			{isStat && (
+			{(isStat || isGauge) && (
 				<>
 					<div className="space-y-1.5">
 						<p className="text-[11px] uppercase tracking-wide text-muted-foreground">Aggregate</p>
@@ -356,6 +499,49 @@ export function WidgetSettingsBar() {
 						</Select>
 					</div>
 				</>
+			)}
+
+			{isGauge && (
+				<div className="grid grid-cols-2 gap-2">
+					<div className="space-y-1.5">
+						<p className="text-[11px] uppercase tracking-wide text-muted-foreground">Min</p>
+						<Input
+							type="number"
+							value={gaugeMin}
+							onChange={(event) => onChange({ gaugeMin: event.target.value })}
+							placeholder="0"
+						/>
+					</div>
+					<div className="space-y-1.5">
+						<p className="text-[11px] uppercase tracking-wide text-muted-foreground">Max</p>
+						<Input
+							type="number"
+							value={gaugeMax}
+							onChange={(event) => onChange({ gaugeMax: event.target.value })}
+							placeholder="100"
+						/>
+					</div>
+				</div>
+			)}
+
+			{isStat && (
+				<div className="flex items-center gap-2">
+					<Checkbox
+						id="qb-sparkline"
+						checked={sparklineEnabled}
+						onCheckedChange={(checked) => onChange({ sparklineEnabled: checked === true })}
+					/>
+					<label htmlFor="qb-sparkline" className="text-xs text-muted-foreground">
+						Show sparkline
+					</label>
+				</div>
+			)}
+
+			{(isChart || isStat || isGauge) && (
+				<ThresholdsEditor
+					thresholds={thresholds}
+					onChange={(next) => onChange({ thresholds: next })}
+				/>
 			)}
 
 			{isTable && (

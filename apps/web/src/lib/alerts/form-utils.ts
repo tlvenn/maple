@@ -1,10 +1,10 @@
 import {
 	AlertDestinationDocument,
-	buildAlertQueryFilterSet,
 	AlertIncidentDocument,
 	AlertRuleDocument,
 	AlertRuleTestRequest,
 	AlertRuleUpsertRequest,
+	DiscordAlertDestinationConfig,
 	HazelAlertDestinationConfig,
 	HazelOAuthAlertDestinationConfig,
 	PagerDutyAlertDestinationConfig,
@@ -17,16 +17,20 @@ import {
 	type AlertDestinationUpdateRequest,
 	type AlertMetricAggregation,
 	type AlertMetricType,
-	type AlertQueryAggregation,
 	type AlertRuleTestRequest as AlertRuleTestRequestType,
 	type AlertSeverity,
 	type AlertSignalType,
+	type QueryBuilderQueryDraftPayload,
 } from "@maple/domain/http"
+import type { QueryEngineAlertReducer } from "@maple/query-engine"
 import { Cause, Exit, Option } from "effect"
+import { buildTimeseriesQuerySpec, createQueryDraft } from "@/lib/query-builder/model"
 import { formatErrorRate, formatLatency, formatNumber } from "@/lib/format"
 
 export type RuleFormState = {
 	name: string
+	/** Optional free-text note — runbook links, ownership, why the rule exists. */
+	notes: string
 	enabled: boolean
 	severity: AlertSeverity
 	serviceNames: string[]
@@ -50,9 +54,18 @@ export type RuleFormState = {
 	metricType: AlertMetricType
 	metricAggregation: AlertMetricAggregation
 	apdexThresholdMs: string
+	/**
+	 * Editing fields for the `builder_query` signal. They map 1:1 to a
+	 * `QueryBuilderQueryDraftPayload` — the same draft dashboard query-builder
+	 * charts use — which `buildRuleRequest` assembles at submit time.
+	 */
 	queryDataSource: "traces" | "logs" | "metrics"
 	queryAggregation: string
 	queryWhereClause: string
+	queryBuilderDraft: QueryBuilderQueryDraftPayload
+	/** Editing fields for the `raw_query` signal. */
+	rawQuerySql: string
+	rawQueryReducer: QueryEngineAlertReducer
 	destinationIds: AlertDestinationId[]
 }
 
@@ -63,8 +76,26 @@ export const signalLabels: Record<AlertSignalType, string> = {
 	apdex: "Apdex",
 	throughput: "Throughput",
 	metric: "Metric",
-	query: "Custom Query",
+	builder_query: "Query builder",
+	raw_query: "Raw SQL",
 }
+
+export const RAW_QUERY_REDUCER_LABELS: Record<QueryEngineAlertReducer, string> = {
+	identity: "Last bucket",
+	sum: "Sum",
+	avg: "Average",
+	min: "Minimum",
+	max: "Maximum",
+}
+
+/** Default ClickHouse SQL shown when a fresh raw_query alert is created. */
+export const DEFAULT_RAW_QUERY_SQL = `SELECT
+  toStartOfInterval(Timestamp, INTERVAL $__interval_s SECOND) AS bucket,
+  count() AS value
+FROM traces
+WHERE $__orgFilter AND $__timeFilter(Timestamp)
+GROUP BY bucket
+ORDER BY bucket`
 
 export const comparatorLabels: Record<AlertComparator, string> = {
 	gt: ">",
@@ -129,9 +160,27 @@ export function formatSignalValue(signalType: AlertSignalType, value: number | n
 			return value.toFixed(3)
 		case "throughput":
 		case "metric":
-		case "query":
+		case "builder_query":
+		case "raw_query":
 			return formatNumber(value)
 	}
+}
+
+/**
+ * Threshold unit conversion at the form↔domain boundary.
+ *
+ * The domain stores `error_rate` thresholds as a 0–1 ratio (matching the query
+ * engine's `countIf(Error)/count()` and the evaluation comparison). The form
+ * lets users enter a percent (e.g. `5` = 5%), so we divide by 100 on submit and
+ * multiply by 100 on load. All other signals pass through unchanged.
+ */
+export function formThresholdToDomain(signalType: AlertSignalType, value: string): number {
+	const n = Number(value)
+	return signalType === "error_rate" ? n / 100 : n
+}
+
+export function domainThresholdToForm(signalType: AlertSignalType, value: number): string {
+	return signalType === "error_rate" ? String(value * 100) : String(value)
 }
 
 export function parsePositiveNumber(value: string, fallback: number): number {
@@ -147,8 +196,10 @@ export function parseNonNegativeNumber(value: string, fallback: number): number 
 }
 
 export function defaultRuleForm(serviceName?: string): RuleFormState {
+	const queryBuilderDraft = createQueryDraft(0)
 	return {
 		name: "",
+		notes: "",
 		enabled: true,
 		severity: "warning",
 		serviceNames: serviceName ? [serviceName] : [],
@@ -170,22 +221,49 @@ export function defaultRuleForm(serviceName?: string): RuleFormState {
 		queryDataSource: "traces",
 		queryAggregation: "count",
 		queryWhereClause: "",
+		queryBuilderDraft,
+		rawQuerySql: DEFAULT_RAW_QUERY_SQL,
+		rawQueryReducer: "identity",
 		destinationIds: [],
 	}
 }
 
+function metricRuleToQueryBuilderDraft(rule: AlertRuleDocument): QueryBuilderQueryDraftPayload {
+	return {
+		...createQueryDraft(0),
+		dataSource: "metrics",
+		aggregation: rule.metricAggregation ?? "avg",
+		metricName: rule.metricName ?? "",
+		metricType: rule.metricType ?? "gauge",
+		isMonotonic: rule.metricType === "sum",
+		groupBy: rule.groupBy ? [...rule.groupBy] : [],
+		addOns: {
+			groupBy: (rule.groupBy?.length ?? 0) > 0,
+			having: false,
+			orderBy: false,
+			limit: false,
+			legend: false,
+		},
+	}
+}
+
 export function ruleToFormState(rule: AlertRuleDocument): RuleFormState {
+	const queryBuilderDraft =
+		rule.queryBuilderDraft ??
+		(rule.signalType === "metric" ? metricRuleToQueryBuilderDraft(rule) : createQueryDraft(0))
 	return {
 		name: rule.name,
+		notes: rule.notes ?? "",
 		enabled: rule.enabled,
 		severity: rule.severity,
 		serviceNames: rule.serviceNames?.length > 0 ? [...rule.serviceNames] : [],
 		excludeServiceNames: rule.excludeServiceNames?.length > 0 ? [...rule.excludeServiceNames] : [],
 		groupBy: rule.groupBy ? [...rule.groupBy] : [],
-		signalType: rule.signalType,
+		signalType: rule.signalType === "metric" ? "builder_query" : rule.signalType,
 		comparator: rule.comparator,
-		threshold: String(rule.threshold),
-		thresholdUpper: rule.thresholdUpper == null ? "" : String(rule.thresholdUpper),
+		threshold: domainThresholdToForm(rule.signalType, rule.threshold),
+		thresholdUpper:
+			rule.thresholdUpper == null ? "" : domainThresholdToForm(rule.signalType, rule.thresholdUpper),
 		windowMinutes: String(rule.windowMinutes),
 		minimumSampleCount: String(rule.minimumSampleCount),
 		consecutiveBreachesRequired: String(rule.consecutiveBreachesRequired),
@@ -195,28 +273,128 @@ export function ruleToFormState(rule: AlertRuleDocument): RuleFormState {
 		metricType: rule.metricType ?? "gauge",
 		metricAggregation: rule.metricAggregation ?? "avg",
 		apdexThresholdMs: rule.apdexThresholdMs == null ? "500" : String(rule.apdexThresholdMs),
-		queryDataSource: rule.queryDataSource ?? "traces",
-		queryAggregation: rule.queryAggregation ?? "count",
-		queryWhereClause: rule.queryWhereClause ?? "",
+		queryDataSource: rule.queryBuilderDraft?.dataSource ?? "traces",
+		queryAggregation: rule.queryBuilderDraft?.aggregation ?? "count",
+		queryWhereClause: rule.queryBuilderDraft?.whereClause ?? "",
+		queryBuilderDraft,
+		rawQuerySql: rule.rawQuerySql ?? DEFAULT_RAW_QUERY_SQL,
+		rawQueryReducer: rule.rawQueryReducer ?? "identity",
 		destinationIds: [...rule.destinationIds],
 	}
 }
 
+/**
+ * Assemble a `QueryBuilderQueryDraftPayload` from the simple builder_query form
+ * fields. This is the same draft shape dashboard query-builder charts use, so
+ * the alert evaluates through the identical compiler.
+ */
+export function buildQueryDraftFromForm(form: RuleFormState): QueryBuilderQueryDraftPayload {
+	if (form.signalType === "builder_query") return form.queryBuilderDraft
+
+	// Fold a single selected service into the where clause — builder_query draws
+	// all filtering from the draft, not the rule-level service scope.
+	const userWhere = form.queryWhereClause.trim()
+	const whereClause =
+		form.serviceNames.length === 1
+			? [`service.name = "${form.serviceNames[0]}"`, userWhere].filter((s) => s.length > 0).join(" AND ")
+			: userWhere
+	const base = {
+		id: "alert-query",
+		name: "A",
+		aggregation: form.queryAggregation,
+		whereClause,
+		groupBy: [...form.groupBy],
+		addOns: {
+			groupBy: form.groupBy.length > 0,
+			having: false,
+			orderBy: false,
+			limit: false,
+			legend: false,
+		},
+	}
+	if (form.queryDataSource === "metrics") {
+		return {
+			...base,
+			dataSource: "metrics",
+			metricName: form.metricName.trim(),
+			metricType: form.metricType,
+		}
+	}
+	return { ...base, dataSource: form.queryDataSource }
+}
+
+export type AlertPreviewGroupBy =
+	| "service"
+	| "span_name"
+	| "status_code"
+	| "http_method"
+	| "severity"
+	| "attribute"
+	| "none"
+
+function firstPreviewGroupBy(value: readonly string[] | undefined): AlertPreviewGroupBy | undefined {
+	const first = value?.[0]
+	if (
+		first === "service" ||
+		first === "span_name" ||
+		first === "status_code" ||
+		first === "http_method" ||
+		first === "severity" ||
+		first === "attribute" ||
+		first === "none"
+	) {
+		return first
+	}
+	return undefined
+}
+
+export function rawSqlHasValueColumn(sql: string): boolean {
+	const trimmed = sql.trim()
+	if (trimmed.length === 0) return false
+
+	if (/\bas\s+["`]?value["`]?\b/i.test(trimmed)) return true
+
+	const firstFrom = trimmed.search(/\bfrom\b/i)
+	const selectHead = firstFrom >= 0 ? trimmed.slice(0, firstFrom) : trimmed.slice(0, 500)
+	return /(?:\bselect\b|,)\s*["`]?value["`]?\s*(?:,|$)/i.test(selectHead)
+}
+
+export function deriveRuleQueryIssues(form: RuleFormState): string[] {
+	const issues: string[] = []
+	if (form.signalType === "builder_query") {
+		const built = buildTimeseriesQuerySpec(buildQueryDraftFromForm(form))
+		if (built.error != null || built.query == null) {
+			issues.push(`Query: ${built.error ?? "failed to build query"}`)
+		}
+	}
+	if (form.signalType === "raw_query") {
+		const sql = form.rawQuerySql.trim()
+		if (sql.length > 0 && !rawSqlHasValueColumn(sql)) {
+			issues.push("SQL value column")
+		}
+	}
+	return issues
+}
+
 export function buildRuleRequest(form: RuleFormState): AlertRuleUpsertRequest {
 	const signalType = form.signalType
+	const queryOwnsScope = signalType === "builder_query" || signalType === "raw_query"
 	return new AlertRuleUpsertRequest({
 		name: form.name.trim(),
+		notes: form.notes.trim() || null,
 		enabled: form.enabled,
 		severity: form.severity,
-		serviceNames: form.serviceNames.filter((s) => s.trim().length > 0),
-		excludeServiceNames: form.excludeServiceNames.filter((s) => s.trim().length > 0),
-		groupBy: form.groupBy.length > 0 ? form.groupBy : null,
+		serviceNames: queryOwnsScope ? [] : form.serviceNames.filter((s) => s.trim().length > 0),
+		excludeServiceNames: queryOwnsScope
+			? []
+			: form.excludeServiceNames.filter((s) => s.trim().length > 0),
+		groupBy: queryOwnsScope ? null : form.groupBy.length > 0 ? form.groupBy : null,
 		signalType,
 		comparator: form.comparator,
-		threshold: Number(form.threshold),
+		threshold: formThresholdToDomain(signalType, form.threshold),
 		thresholdUpper: isRangeComparator(form.comparator)
 			? Number.isFinite(Number(form.thresholdUpper))
-				? Number(form.thresholdUpper)
+				? formThresholdToDomain(signalType, form.thresholdUpper)
 				: null
 			: null,
 		windowMinutes: parsePositiveNumber(form.windowMinutes, 5),
@@ -224,23 +402,13 @@ export function buildRuleRequest(form: RuleFormState): AlertRuleUpsertRequest {
 		consecutiveBreachesRequired: parsePositiveNumber(form.consecutiveBreachesRequired, 2),
 		consecutiveHealthyRequired: parsePositiveNumber(form.consecutiveHealthyRequired, 2),
 		renotifyIntervalMinutes: parsePositiveNumber(form.renotifyIntervalMinutes, 30),
-		metricName:
-			signalType === "metric"
-				? form.metricName.trim() || null
-				: signalType === "query" && form.queryDataSource === "metrics"
-					? form.metricName.trim() || null
-					: null,
-		metricType:
-			signalType === "metric"
-				? form.metricType
-				: signalType === "query" && form.queryDataSource === "metrics"
-					? form.metricType
-					: null,
+		metricName: signalType === "metric" ? form.metricName.trim() || null : null,
+		metricType: signalType === "metric" ? form.metricType : null,
 		metricAggregation: signalType === "metric" ? form.metricAggregation : null,
 		apdexThresholdMs: signalType === "apdex" ? parsePositiveNumber(form.apdexThresholdMs, 500) : null,
-		queryDataSource: signalType === "query" ? form.queryDataSource : null,
-		queryAggregation: signalType === "query" ? (form.queryAggregation as AlertQueryAggregation) : null,
-		queryWhereClause: signalType === "query" ? form.queryWhereClause.trim() || null : null,
+		queryBuilderDraft: signalType === "builder_query" ? buildQueryDraftFromForm(form) : null,
+		rawQuerySql: signalType === "raw_query" ? form.rawQuerySql.trim() || null : null,
+		rawQueryReducer: signalType === "raw_query" ? form.rawQueryReducer : null,
 		destinationIds: [...form.destinationIds],
 	})
 }
@@ -261,10 +429,15 @@ export function isRulePreviewReady(form: RuleFormState): boolean {
 	if (isRangeComparator(form.comparator) && !Number.isFinite(Number(form.thresholdUpper))) {
 		return false
 	}
-	if (form.signalType === "query" && form.queryDataSource === "metrics") {
-		return form.metricName.trim().length > 0
+	if (form.signalType === "builder_query") return deriveRuleQueryIssues(form).length === 0
+	if (form.signalType === "raw_query") {
+		return (
+			form.rawQuerySql.trim().length > 0 &&
+			form.rawQuerySql.includes("$__orgFilter") &&
+			deriveRuleQueryIssues(form).length === 0
+		)
 	}
-	return true
+	return deriveRuleQueryIssues(form).length === 0
 }
 
 /** Map signal type to the query engine source and metric fields */
@@ -273,6 +446,7 @@ export function signalToQueryParams(form: RuleFormState): {
 	metric: string
 	filters: Record<string, unknown>
 	apdexThresholdMs?: number
+	groupBy?: AlertPreviewGroupBy
 } | null {
 	const baseFilters = form.serviceNames.length === 1 ? { serviceName: form.serviceNames[0] } : {}
 
@@ -316,24 +490,24 @@ export function signalToQueryParams(form: RuleFormState): {
 				},
 			}
 		}
-		case "query": {
-			const filterSet = buildAlertQueryFilterSet({
-				queryDataSource: form.queryDataSource,
-				serviceName: form.serviceNames.length === 1 ? form.serviceNames[0]! : null,
-				metricName: form.metricName.trim() || null,
-				metricType: form.metricType,
-				queryWhereClause: form.queryWhereClause,
-			})
-
-			if (filterSet == null) return null
-
-			const ds = filterSet.source
+		case "builder_query": {
+			// Compile the draft with the shared query-builder compiler and read
+			// back the resolved source/metric/filters for the preview chart.
+			const built = buildTimeseriesQuerySpec(buildQueryDraftFromForm(form))
+			if (built.error != null || built.query == null || built.query.kind !== "timeseries") {
+				return null
+			}
+			const spec = built.query
 			return {
-				source: ds,
-				metric: ds === "logs" ? "count" : form.queryAggregation,
-				filters: filterSet.filters ?? {},
+				source: spec.source,
+				metric: "metric" in spec ? spec.metric : "count",
+				filters: (spec.filters as Record<string, unknown> | undefined) ?? {},
+				groupBy: firstPreviewGroupBy(spec.groupBy),
 			}
 		}
+		case "raw_query":
+			// Raw SQL alerts have no structured spec; the preview chart is skipped.
+			return null
 	}
 }
 
@@ -366,6 +540,7 @@ export type DestinationFormState = {
 	name: string
 	enabled: boolean
 	channelLabel: string
+	/** Slack and Discord both use this incoming-webhook URL field. */
 	webhookUrl: string
 	integrationKey: string
 	url: string
@@ -470,6 +645,13 @@ export function buildDestinationCreatePayload(form: DestinationFormState): Alert
 				hazelChannelName: form.hazelChannelName.trim(),
 			})
 		}
+		case "discord":
+			return new DiscordAlertDestinationConfig({
+				type: "discord",
+				name: form.name.trim(),
+				enabled: form.enabled,
+				webhookUrl: form.webhookUrl.trim(),
+			})
 	}
 }
 
@@ -519,6 +701,13 @@ export function buildDestinationUpdatePayload(form: DestinationFormState): Alert
 						: form.hazelOrganizationLogoUrl.trim() || undefined,
 				hazelChannelId: form.hazelChannelId.trim() || undefined,
 				hazelChannelName: form.hazelChannelName.trim() || undefined,
+			}
+		case "discord":
+			return {
+				type: "discord",
+				name: form.name.trim() || undefined,
+				enabled: form.enabled,
+				webhookUrl: form.webhookUrl.trim() || undefined,
 			}
 	}
 }

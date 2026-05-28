@@ -40,6 +40,7 @@ import {
 	MagnifierIcon,
 	PaperPlaneIcon,
 	PlusIcon,
+	TruckIcon,
 } from "@/components/icons"
 import { cn } from "@maple/ui/utils"
 import { Badge } from "@maple/ui/components/ui/badge"
@@ -49,25 +50,28 @@ import { Input } from "@maple/ui/components/ui/input"
 import { Separator } from "@maple/ui/components/ui/separator"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Switch } from "@maple/ui/components/ui/switch"
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@maple/ui/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@maple/ui/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@maple/ui/components/ui/tooltip"
 
 const tabValues = ["monitor", "rules", "settings"] as const
 type AlertsTab = (typeof tabValues)[number]
 
-const legacyTabMap: Record<string, AlertsTab> = {
-	overview: "monitor",
-	monitor: "monitor",
-	incidents: "monitor",
-	rules: "rules",
-	destinations: "settings",
-	settings: "settings",
-}
-
 const AlertsSearch = Schema.Struct({
 	tab: Schema.optional(Schema.String),
 	serviceName: Schema.optional(Schema.String),
+	createdBy: Schema.optional(Schema.String),
 })
+
+/** Sentinel value for the "Created by" filter meaning no creator restriction. */
+const ANY_CREATOR = "__anyone__"
 
 export const Route = effectRoute(createFileRoute("/alerts/"))({
 	component: AlertsPage,
@@ -390,7 +394,9 @@ function AlertsPage() {
 		mode: "promiseExit",
 	})
 
-	const activeTab: AlertsTab = legacyTabMap[search.tab ?? ""] ?? "monitor"
+	const activeTab: AlertsTab = tabValues.includes(search.tab as AlertsTab)
+		? (search.tab as AlertsTab)
+		: "monitor"
 
 	const destinations = Result.builder(destinationsResult)
 		.onSuccess((response) => [...response.destinations] as AlertDestination[])
@@ -408,6 +414,26 @@ function AlertsPage() {
 	const isAdmin = Result.builder(sessionResult)
 		.onSuccess((session) => session.roles.some((role) => role === "root" || role === "org:admin"))
 		.orElse(() => false)
+
+	const currentUserId = Result.builder(sessionResult)
+		.onSuccess((session) => session.userId as string)
+		.orElse(() => null)
+
+	// "Created by" filter options — one entry per distinct rule creator, with the
+	// current user surfaced as "You". Maple has no org-members endpoint, so other
+	// creators are shown by their raw identifier.
+	const creatorOptions = useMemo(() => {
+		const options: Record<string, string> = { [ANY_CREATOR]: "Anyone" }
+		for (const rule of rules) {
+			if (!(rule.createdBy in options)) {
+				options[rule.createdBy] = rule.createdBy === currentUserId ? "You" : rule.createdBy
+			}
+		}
+		return options
+	}, [rules, currentUserId])
+
+	const creatorFilter = search.createdBy ?? ANY_CREATOR
+	const showCreatorFilter = Object.keys(creatorOptions).length > 2
 
 	// Rules tab: build firing status from open incidents
 	const firingRuleIds = useMemo(() => {
@@ -528,23 +554,50 @@ function AlertsPage() {
 	}
 
 	const filteredRules = useMemo(() => {
-		if (!searchQuery.trim()) return rules
-		const q = searchQuery.toLowerCase()
-		return rules.filter(
-			(r) =>
-				r.name.toLowerCase().includes(q) || r.serviceNames?.some((s) => s.toLowerCase().includes(q)),
-		)
-	}, [rules, searchQuery])
+		let result = rules
+		if (creatorFilter !== ANY_CREATOR) {
+			result = result.filter((r) => r.createdBy === creatorFilter)
+		}
+		const q = searchQuery.trim().toLowerCase()
+		if (q) {
+			result = result.filter(
+				(r) =>
+					r.name.toLowerCase().includes(q) ||
+					r.serviceNames?.some((s) => s.toLowerCase().includes(q)),
+			)
+		}
+		return result
+	}, [rules, searchQuery, creatorFilter])
 
 	const tabBar = (
 		<Tabs value={activeTab} onValueChange={(v) => handleTabSelect(v as AlertsTab)}>
-			<TabsList variant="line">
+			<TabsList variant="underline">
 				<TabsTrigger value="monitor">Monitor</TabsTrigger>
 				<TabsTrigger value="rules">Rules</TabsTrigger>
 				<TabsTrigger value="settings">Settings</TabsTrigger>
 			</TabsList>
 		</Tabs>
 	)
+
+	const headerActions =
+		activeTab === "settings" ? (
+			// Settings: the header owns the add action only once destinations exist.
+			// While empty, the empty-state CTA is the single add affordance (avoids a duplicate).
+			isAdmin && Result.isSuccess(destinationsResult) && destinations.length > 0 ? (
+				<Button size="sm" onClick={() => openDestinationDialog()}>
+					<PlusIcon size={14} />
+					Add destination
+				</Button>
+			) : undefined
+		) : (
+			<Button
+				size="sm"
+				render={<Link to="/alerts/create" search={{ serviceName: search.serviceName }} />}
+			>
+				<PlusIcon size={14} />
+				New rule
+			</Button>
+		)
 
 	return (
 		<>
@@ -563,16 +616,7 @@ function AlertsPage() {
 						</p>
 					</div>
 				}
-				headerActions={
-					<Button
-						size="sm"
-						nativeButton={false}
-						render={<Link to="/alerts/create" search={{ serviceName: search.serviceName }} />}
-					>
-						<PlusIcon size={14} />
-						New rule
-					</Button>
-				}
+				headerActions={headerActions}
 				stickyContent={tabBar}
 			>
 				<div className="space-y-6">
@@ -602,6 +646,36 @@ function AlertsPage() {
 										className="pl-9"
 									/>
 								</div>
+								{showCreatorFilter && (
+									<Select
+										items={creatorOptions}
+										value={creatorFilter}
+										onValueChange={(value) =>
+											navigate({
+												search: (prev) => ({
+													...prev,
+													createdBy:
+														value === ANY_CREATOR
+															? undefined
+															: (value as string),
+												}),
+											})
+										}
+									>
+										<SelectTrigger className="w-[170px]">
+											<SelectValue />
+										</SelectTrigger>
+										<SelectContent>
+											{Object.entries(creatorOptions).map(([value, label]) => (
+												<SelectItem key={value} value={value}>
+													<span className="block max-w-[160px] truncate">
+														{label}
+													</span>
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								)}
 							</div>
 
 							{Result.isInitial(rulesResult) ? (
@@ -637,7 +711,6 @@ function AlertsPage() {
 									{isAdmin && (
 										<Button
 											size="sm"
-											nativeButton={false}
 											render={
 												<Link
 													to="/alerts/create"
@@ -649,6 +722,18 @@ function AlertsPage() {
 											Add rule
 										</Button>
 									)}
+								</Empty>
+							) : filteredRules.length === 0 ? (
+								<Empty className="py-12">
+									<EmptyHeader>
+										<EmptyMedia variant="icon">
+											<MagnifierIcon size={18} />
+										</EmptyMedia>
+										<EmptyTitle>No rules match your filters</EmptyTitle>
+										<EmptyDescription>
+											Try a different search term or creator.
+										</EmptyDescription>
+									</EmptyHeader>
 								</Empty>
 							) : (
 								<Table>
@@ -755,7 +840,22 @@ function AlertsPage() {
 														</span>
 													</TableCell>
 													<TableCell>
-														<AlertStatusBadge state={status} />
+														<div className="flex items-center gap-1.5">
+															<AlertStatusBadge state={status} />
+															{rule.lastEvaluationError && (
+																<Tooltip>
+																	<TooltipTrigger
+																		render={<span className="inline-flex cursor-default" />}
+																		onClick={(e) => e.stopPropagation()}
+																	>
+																		<CircleWarningIcon size={14} className="text-destructive" />
+																	</TooltipTrigger>
+																	<TooltipContent className="max-w-[280px]">
+																		Last evaluation failed: {rule.lastEvaluationError}
+																	</TooltipContent>
+																</Tooltip>
+															)}
+														</div>
 													</TableCell>
 												</TableRow>
 											)
@@ -771,20 +871,12 @@ function AlertsPage() {
 						<div className="space-y-10">
 							{/* Destinations section */}
 							<section className="space-y-4">
-								<div className="flex items-start justify-between gap-4">
-									<div>
-										<h2 className="text-lg font-semibold">Destinations</h2>
-										<p className="text-muted-foreground text-sm">
-											Destinations are reusable across rules and keep provider retries
-											and failures auditable.
-										</p>
-									</div>
-									{isAdmin && (
-										<Button size="sm" onClick={() => openDestinationDialog()}>
-											<PlusIcon size={14} />
-											Add destination
-										</Button>
-									)}
+								<div>
+									<h2 className="text-lg font-semibold">Destinations</h2>
+									<p className="text-muted-foreground text-sm">
+										Destinations are reusable across rules and keep provider retries and
+										failures auditable.
+									</p>
 								</div>
 
 								{Result.isInitial(destinationsResult) ? (
@@ -876,7 +968,7 @@ function AlertsPage() {
 									<Empty className="py-12">
 										<EmptyHeader>
 											<EmptyMedia variant="icon">
-												<PaperPlaneIcon size={18} />
+												<TruckIcon size={18} />
 											</EmptyMedia>
 											<EmptyTitle>No notifications sent yet</EmptyTitle>
 											<EmptyDescription>

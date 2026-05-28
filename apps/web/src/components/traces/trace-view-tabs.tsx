@@ -1,3 +1,4 @@
+import * as React from "react"
 import { MenuIcon, FireIcon, NetworkNodesIcon } from "@/components/icons"
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@maple/ui/components/ui/tabs"
@@ -5,7 +6,8 @@ import { SpanHierarchy } from "./span-hierarchy"
 import { TraceTimeline } from "./trace-timeline"
 import { TraceFlowView } from "./flow-view"
 import { TraceViewProvider } from "./trace-view-context"
-import type { SpanNode, Span } from "@/api/tinybird/traces"
+import { DEFAULT_COLOR_BY, type ColorByField } from "./color-by"
+import type { SpanNode, Span } from "@/api/warehouse/traces"
 
 interface TraceViewTabsProps {
 	rootSpans: SpanNode[]
@@ -13,7 +15,6 @@ interface TraceViewTabsProps {
 	totalDurationMs: number
 	traceStartTime: string
 	services: string[]
-	defaultExpandDepth?: number
 	selectedSpanId?: string
 	onSelectSpan?: (span: SpanNode) => void
 }
@@ -24,11 +25,12 @@ export function TraceViewTabs({
 	totalDurationMs,
 	traceStartTime,
 	services,
-	defaultExpandDepth = Infinity,
 	selectedSpanId,
 	onSelectSpan,
 }: TraceViewTabsProps) {
 	// _spans is reserved for future Flow view implementation
+	const [colorBy, setColorBy] = React.useState<ColorByField>(DEFAULT_COLOR_BY)
+
 	return (
 		<TraceViewProvider
 			rootSpans={rootSpans}
@@ -37,9 +39,11 @@ export function TraceViewTabs({
 			services={services}
 			selectedSpanId={selectedSpanId}
 			onSelectSpan={onSelectSpan}
+			colorBy={colorBy}
+			setColorBy={setColorBy}
 		>
 			<Tabs defaultValue="waterfall" className="flex flex-col h-full">
-				<TabsList variant="line" className="shrink-0">
+				<TabsList variant="underline" className="shrink-0">
 					<TabsTrigger value="waterfall">
 						<MenuIcon size={14} />
 						Waterfall
@@ -55,7 +59,7 @@ export function TraceViewTabs({
 				</TabsList>
 
 				<TabsContent value="waterfall" className="flex-1 min-h-0 overflow-auto">
-					<SpanHierarchy defaultExpandDepth={defaultExpandDepth} />
+					<SpanHierarchy />
 				</TabsContent>
 
 				<TabsContent value="timeline" className="flex-1 min-h-0">

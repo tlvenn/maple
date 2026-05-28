@@ -134,6 +134,7 @@ export const ErrorEvents = table("error_events", {
 	FingerprintHash: T.uint64,
 	StatusMessage: T.string,
 	Duration: T.uint64,
+	ErrorLabel: T.string,
 })
 
 export const MetricsSum = table("metrics_sum", {
@@ -186,6 +187,20 @@ export const MetricsHistogram = table("metrics_histogram", {
 	AggregationTemporality: T.int32,
 })
 
+export const MetricCatalog = table("metric_catalog", {
+	OrgId: T.string,
+	Hour: T.dateTime,
+	MetricType: T.string,
+	ServiceName: T.string,
+	MetricName: T.string,
+	MetricDescription: T.string,
+	MetricUnit: T.string,
+	IsMonotonic: T.uint8,
+	DataPointCount: T.uint64,
+	FirstSeen: T.dateTime,
+	LastSeen: T.dateTime,
+})
+
 export const AttributeKeysHourly = table("attribute_keys_hourly", {
 	OrgId: T.string,
 	Hour: T.dateTime,
@@ -232,7 +247,6 @@ export const ServiceMapSpans = table("service_map_spans", {
 	Duration: T.uint64,
 	StatusCode: T.string,
 	TraceState: T.string,
-	PeerService: T.string,
 	DeploymentEnv: T.string,
 })
 
@@ -343,6 +357,76 @@ export const AlertChecks = table("alert_checks", {
 	IncidentId: T.nullable(T.string),
 	IncidentTransition: T.string,
 	EvaluationDurationMs: T.uint32,
+})
+
+export const SessionReplays = table("session_replays", {
+	OrgId: T.string,
+	SessionId: T.string,
+	StartTime: T.dateTime64,
+	EndTime: T.nullable(T.dateTime64),
+	DurationMs: T.nullable(T.uint32),
+	Status: T.string,
+	UserId: T.string,
+	UrlInitial: T.string,
+	UserAgent: T.string,
+	BrowserName: T.string,
+	OsName: T.string,
+	DeviceType: T.string,
+	Country: T.string,
+	ServiceName: T.string,
+	PageViews: T.uint32,
+	ClickCount: T.uint32,
+	ErrorCount: T.uint32,
+	TraceIds: T.array(T.string),
+	ResourceAttributes: T.map(T.string, T.string),
+	Version: T.uint32,
+})
+
+export const SessionReplayEvents = table("session_replay_events", {
+	OrgId: T.string,
+	SessionId: T.string,
+	ChunkSeq: T.uint32,
+	Timestamp: T.dateTime64,
+	DurationMs: T.uint32,
+	EventCount: T.uint32,
+	ByteSize: T.uint32,
+	// The rrweb event array for this chunk, stored as a JSON string. ClickHouse
+	// ZSTD-compresses this column; playback reads it back directly (no R2).
+	Events: T.string,
+	IsCheckpoint: T.uint8,
+})
+
+// Distilled, structured semantic events for a session (navigation, clicks,
+// console logs, network requests, errors), captured client-side by the SDK.
+// Small and queryable — powers in-session search, the console/network/error
+// panels, and the agent transcript. Sparse: only the fields relevant to a row's
+// Type are populated; the rest default empty.
+export const SessionEvents = table("session_events", {
+	OrgId: T.string,
+	SessionId: T.string,
+	Timestamp: T.dateTime64,
+	// Monotonic per-session ordering tiebreaker (events can share a ms timestamp).
+	Seq: T.uint32,
+	// "navigation" | "click" | "input" | "console" | "network" | "error"
+	Type: T.string,
+	Url: T.string,
+	// OTel trace id active when the event fired (links network/error → traces).
+	TraceId: T.string,
+	// console / error: level + message.
+	Level: T.string,
+	Message: T.string,
+	// click / input: the interaction target.
+	TargetSelector: T.string,
+	TargetText: T.string,
+	// network: request summary.
+	NetMethod: T.string,
+	NetUrl: T.string,
+	NetStatus: T.uint16,
+	NetDurationMs: T.uint32,
+	// error: stack trace.
+	ErrorStack: T.string,
+	// Overflow / extensibility.
+	Attributes: T.map(T.string, T.string),
 })
 
 export const MetricsExpHistogram = table("metrics_exponential_histogram", {

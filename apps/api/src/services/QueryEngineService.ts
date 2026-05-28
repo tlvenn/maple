@@ -12,16 +12,17 @@ import {
 	QueryEngineExecutionError,
 	QueryEngineTimeoutError,
 	QueryEngineValidationError,
-	TinybirdQueryError,
-	TinybirdQuotaExceededError,
+	WarehouseQueryError,
+	WarehouseQuotaExceededError,
 } from "@maple/domain/http"
-import { Array as Arr, Duration, Effect, Layer, Match, Metric, Option, Result, Context } from "effect"
+import { Clock, Array as Arr, Duration, Effect, Layer, Match, Metric, Option, Result, Context } from "effect"
 import type { TenantContext } from "./AuthService"
-import { BucketCacheService } from "./BucketCacheService"
-import { EdgeCacheService } from "./EdgeCacheService"
-import { WarehouseQueryService, type WarehouseQueryServiceShape } from "./WarehouseQueryService"
-import type { QueryProfileName } from "./TinybirdQueryProfile"
-import * as QueryEngineMetrics from "./QueryEngineMetrics"
+import { BucketCacheService } from "../lib/BucketCacheService"
+import { EdgeCacheService } from "../lib/EdgeCacheService"
+import { makeExpandMacros } from "./RawSqlChartService"
+import { WarehouseQueryService, type WarehouseQueryServiceShape } from "../lib/WarehouseQueryService"
+import type { QueryProfileName } from "../lib/WarehouseQueryProfile"
+import * as QueryEngineMetrics from "../lib/QueryEngineMetrics"
 
 interface TimeRangeBounds {
 	readonly startMs: number
@@ -55,11 +56,24 @@ export interface GroupedAlertObservation {
 	readonly hasData: boolean
 }
 
+export interface QueryEngineRawSqlEvaluateRequest {
+	/** Tinybird-format datetime (`YYYY-MM-DD HH:mm:ss`) — window start. */
+	readonly startTime: string
+	/** Tinybird-format datetime — window end. */
+	readonly endTime: string
+	/** User-authored ClickHouse SQL with `$__` macros. */
+	readonly sql: string
+	/** Collapses each group's bucket rows into a single scalar. */
+	readonly reducer: QueryEngineAlertReducer
+	/** Drives the `$__interval_s` macro value. */
+	readonly windowMinutes: number
+}
+
 export type QueryEngineDirectError =
 	| QueryEngineExecutionError
 	| QueryEngineTimeoutError
-	| TinybirdQueryError
-	| TinybirdQuotaExceededError
+	| WarehouseQueryError
+	| WarehouseQuotaExceededError
 
 export type QueryEngineRouteError = QueryEngineValidationError | QueryEngineDirectError
 
@@ -77,6 +91,15 @@ export interface QueryEngineServiceShape {
 	readonly evaluate: (
 		tenant: TenantContext,
 		request: QueryEngineEvaluateRequest,
+	) => Effect.Effect<ReadonlyArray<GroupedAlertObservation>, QueryEngineRouteError>
+	/**
+	 * Evaluate a raw-SQL alert query. The user SQL is macro-expanded (`$__orgFilter`,
+	 * `$__timeFilter`, …) and executed; rows are grouped by an optional `group`
+	 * column and the `value` column is collapsed per group with the reducer.
+	 */
+	readonly evaluateRawSql: (
+		tenant: TenantContext,
+		request: QueryEngineRawSqlEvaluateRequest,
 	) => Effect.Effect<ReadonlyArray<GroupedAlertObservation>, QueryEngineRouteError>
 	readonly cachedDirect: <A>(
 		tenant: TenantContext,
@@ -147,7 +170,13 @@ export function snapWindowForQueryKind(kind: string): number {
 		case "attributeValues":
 			return 60 // 1 min
 		case "facets":
-			return 60 // 1 min
+			// 5 min — environments / commit SHAs / service names rarely change,
+			// and the dashboard route now reuses this cache for demo-detection
+			// (was a heavy `serviceOverview` probe). Wider snap also collapses
+			// near-simultaneous calls whose `startTime` ISO strings drift by
+			// milliseconds between renders (useEffectiveTimeRange recomputes
+			// `new Date()` per render).
+			return 300
 		default:
 			return CACHE_SNAP_S
 	}
@@ -165,7 +194,7 @@ export function cacheTtlForQueryKind(kind: string): number {
 		case "attributeValues":
 			return 60
 		case "facets":
-			return 60
+			return 300 // matches snapWindowForQueryKind — see comment above
 		default:
 			return 15
 	}
@@ -575,16 +604,22 @@ const validateEvaluate = Effect.fn("QueryEngineService.validateEvaluate")(functi
 	return range
 })
 
-const mapTinybirdError = <A, R>(
-	effect: Effect.Effect<A, TinybirdQueryError | TinybirdQuotaExceededError, R>,
+/**
+ * Annotate the current span with warehouse-error context on failure, without
+ * touching the error itself. The error type in equals the error type out — this
+ * is `Effect.tapError`, not a transformation. Named explicitly so call sites
+ * don't read like they're remapping errors.
+ */
+const annotateWarehouseError = <A, R>(
+	effect: Effect.Effect<A, WarehouseQueryError | WarehouseQuotaExceededError, R>,
 	context: string,
-): Effect.Effect<A, TinybirdQueryError | TinybirdQuotaExceededError, R> =>
+): Effect.Effect<A, WarehouseQueryError | WarehouseQuotaExceededError, R> =>
 	effect.pipe(
 		Effect.tapError((error) =>
 			Effect.annotateCurrentSpan({
 				"error.context": context,
 				"error.tag": error._tag,
-				"error.pipe": error.pipe,
+				"error.message": error.message,
 			}),
 		),
 	)
@@ -595,36 +630,44 @@ const mapTinybirdError = <A, R>(
  * length, duration, and tenant data — `query.context` is propagated through
  * SqlQueryOptions so it lands on the same span instead of an extra wrapper.
  */
-const executeCHQuery = <Output extends Record<string, any>, Params extends Record<string, any>>(
+const executeCHQuery = Effect.fnUntraced(function* <
+	Output extends Record<string, any>,
+	Params extends Record<string, any>,
+>(
 	warehouse: Pick<WarehouseQueryServiceShape, "sqlQuery">,
 	tenant: TenantContext,
 	query: CH.CHQuery<any, Output>,
 	params: Params,
 	context: string,
 	profile: QueryProfileName = "aggregation",
-): Effect.Effect<ReadonlyArray<Output>, TinybirdQueryError | TinybirdQuotaExceededError> => {
+) {
 	const compiled = CH.compile(query, params)
-	return mapTinybirdError(
+	const rows = yield* annotateWarehouseError(
 		warehouse.sqlQuery(tenant, compiled.sql, { profile, context }),
 		context,
-	).pipe(Effect.map((rows) => compiled.castRows(rows)))
-}
+	)
+	return compiled.castRows(rows)
+})
 
 /** Same as executeCHQuery but for union queries. */
-const executeCHUnionQuery = <Output extends Record<string, any>, Params extends Record<string, any>>(
+const executeCHUnionQuery = Effect.fnUntraced(function* <
+	Output extends Record<string, any>,
+	Params extends Record<string, any>,
+>(
 	warehouse: Pick<WarehouseQueryServiceShape, "sqlQuery">,
 	tenant: TenantContext,
 	query: CH.CHUnionQuery<Output>,
 	params: Params,
 	context: string,
 	profile: QueryProfileName = "aggregation",
-): Effect.Effect<ReadonlyArray<Output>, TinybirdQueryError | TinybirdQuotaExceededError> => {
+) {
 	const compiled = CH.compileUnion(query, params)
-	return mapTinybirdError(
+	const rows = yield* annotateWarehouseError(
 		warehouse.sqlQuery(tenant, compiled.sql, { profile, context }),
 		context,
-	).pipe(Effect.map((rows) => compiled.castRows(rows)))
-}
+	)
+	return compiled.castRows(rows)
+})
 
 type QueryEngineWarehouse = Pick<WarehouseQueryServiceShape, "sqlQuery">
 
@@ -835,8 +878,8 @@ export const makeQueryEngineExecute = (warehouse: QueryEngineWarehouse) =>
 		QueryEngineExecuteResponse,
 		| QueryEngineValidationError
 		| QueryEngineExecutionError
-		| TinybirdQueryError
-		| TinybirdQuotaExceededError
+		| WarehouseQueryError
+		| WarehouseQuotaExceededError
 	> {
 		yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
 		yield* Effect.annotateCurrentSpan("query.source", request.query.source)
@@ -945,6 +988,7 @@ export const makeQueryEngineExecute = (warehouse: QueryEngineWarehouse) =>
 						? { deploymentEnv: request.query.filters.deploymentEnvMatchMode }
 						: undefined,
 					groupBy: request.query.groupBy as string[] | undefined,
+					bucketSeconds: bucketSeconds!,
 				}),
 				{
 					orgId: tenant.orgId,
@@ -989,7 +1033,7 @@ export const makeQueryEngineExecute = (warehouse: QueryEngineWarehouse) =>
 						bucketSeconds: bucketSeconds!,
 					},
 				)
-				const rawRows = yield* mapTinybirdError(
+				const rawRows = yield* annotateWarehouseError(
 					warehouse.sqlQuery(tenant, compiled.sql, {
 						profile: "aggregation",
 						context: "metrics rate/increase query",
@@ -1319,11 +1363,14 @@ export const makeQueryEngineExecute = (warehouse: QueryEngineWarehouse) =>
 						rootOnly: filters?.rootOnly as boolean | undefined,
 						services: filters?.services as string[] | undefined,
 						deploymentEnvs: filters?.deploymentEnvs as string[] | undefined,
-						errorTypes: filters?.errorTypes as string[] | undefined,
+						fingerprintHashes: filters?.fingerprintHashes as string[] | undefined,
 					}),
 					baseParams,
 					"Failed to execute errors facets query",
-					"discovery",
+					// "list" (1.5 GB), not "discovery" (512 MB): the error-type facet groups
+					// error_events by a variable-length ErrorLabel key, which tips just over
+					// the discovery cap (~490 MiB observed in production).
+					"list",
 				)
 				return new QueryEngineExecuteResponse({
 					result: {
@@ -1392,10 +1439,18 @@ export const makeQueryEngineExecute = (warehouse: QueryEngineWarehouse) =>
 
 		// ---- Attribute Values ----
 		if (request.query.kind === "attributeValues") {
-			const queryFn =
-				request.query.scope === "resource"
-					? CH.resourceAttributeValuesQuery
-					: CH.spanAttributeValuesQuery
+			const queryFn = (() => {
+				switch (request.query.scope) {
+					case "resource":
+						return CH.resourceAttributeValuesQuery
+					case "log":
+						return CH.logAttributeValuesQuery
+					case "metric":
+						return CH.metricAttributeValuesQuery
+					default:
+						return CH.spanAttributeValuesQuery
+				}
+			})()
 			const rows = yield* executeCHQuery(
 				warehouse,
 				tenant,
@@ -1407,7 +1462,7 @@ export const makeQueryEngineExecute = (warehouse: QueryEngineWarehouse) =>
 			return new QueryEngineExecuteResponse({
 				result: {
 					kind: "attributeValues",
-					source: "traces",
+					source: request.query.source,
 					data: rows.map((row) => ({ value: row.attributeValue, count: Number(row.usageCount) })),
 				},
 			})
@@ -1497,8 +1552,8 @@ export const makeQueryEngineEvaluate = (warehouse: QueryEngineWarehouse) =>
 		ReadonlyArray<GroupedAlertObservation>,
 		| QueryEngineValidationError
 		| QueryEngineExecutionError
-		| TinybirdQueryError
-		| TinybirdQuotaExceededError
+		| WarehouseQueryError
+		| WarehouseQuotaExceededError
 	> {
 		yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
 		yield* Effect.annotateCurrentSpan("query.source", request.query.source)
@@ -1592,6 +1647,7 @@ export const makeQueryEngineEvaluate = (warehouse: QueryEngineWarehouse) =>
 						? { deploymentEnv: request.query.filters.deploymentEnvMatchMode }
 						: undefined,
 					groupBy: logsQuery.groupBy as readonly string[] | undefined,
+					bucketSeconds,
 				}),
 				{
 					orgId: tenant.orgId,
@@ -1664,8 +1720,89 @@ export const makeQueryEngineEvaluate = (warehouse: QueryEngineWarehouse) =>
 		return result
 	})
 
+/**
+ * Evaluate a raw-SQL alert query. Mirrors `makeQueryEngineEvaluate` but the
+ * data comes from user-authored ClickHouse SQL instead of a structured spec.
+ *
+ * Column convention: the query returns a numeric `value` column; an optional
+ * `group` column splits results into per-group observations (default `"all"`),
+ * and an optional `samples` column carries the sample count (else each row
+ * counts as 1). Per group, `value` rows are collapsed with the reducer.
+ */
+export const makeQueryEngineEvaluateRawSql = (warehouse: QueryEngineWarehouse) =>
+	Effect.fn("QueryEngineService.evaluateRawSql")(function* (
+		tenant: TenantContext,
+		request: QueryEngineRawSqlEvaluateRequest,
+	): Effect.fn.Return<
+		ReadonlyArray<GroupedAlertObservation>,
+		QueryEngineValidationError | WarehouseQueryError | WarehouseQuotaExceededError
+	> {
+		yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
+		yield* Effect.annotateCurrentSpan("query.reducer", request.reducer)
+
+		const granularitySeconds = Math.max(request.windowMinutes * 60, 60)
+		const expanded = yield* makeExpandMacros({
+			sql: request.sql,
+			orgId: tenant.orgId,
+			startTime: request.startTime,
+			endTime: request.endTime,
+			granularitySeconds,
+		}).pipe(
+			Effect.mapError(
+				(error) =>
+					new QueryEngineValidationError({
+						message: "Invalid raw SQL alert query",
+						details: [error.message],
+					}),
+			),
+		)
+
+		const rows = yield* annotateWarehouseError(
+			warehouse.sqlQuery(tenant, expanded.sql, { profile: "list", context: "alertRawQuery" }),
+			"alertRawQuery",
+		)
+
+		const missingValue = rows.find((row) => !Object.prototype.hasOwnProperty.call(row, "value"))
+		if (missingValue != null) {
+			return yield* Effect.fail(
+				new QueryEngineValidationError({
+					message: "Invalid raw SQL alert query",
+					details: ["Raw SQL alert queries must return a column named value."],
+				}),
+			)
+		}
+
+		const byGroup = new Map<
+			string,
+			Array<{ value: number | null; sampleCount: number; hasData: boolean }>
+		>()
+		for (const row of rows) {
+			const rawGroup = row.group
+			const groupKey =
+				typeof rawGroup === "string" && rawGroup.length > 0 ? rawGroup : "all"
+			const numValue = row.value == null ? null : Number(row.value)
+			const value = numValue != null && Number.isFinite(numValue) ? numValue : null
+			const rawSamples = row.samples == null ? 1 : Number(row.samples)
+			const sampleCount = Number.isFinite(rawSamples) ? rawSamples : 1
+			const list = byGroup.get(groupKey)
+			const obs = { value, sampleCount, hasData: value != null }
+			if (list) list.push(obs)
+			else byGroup.set(groupKey, [obs])
+		}
+
+		// No rows → emit a single no-data observation so the alert engine can
+		// apply its configured no-data behavior.
+		if (byGroup.size === 0) {
+			byGroup.set("all", [{ value: null, sampleCount: 0, hasData: false }])
+		}
+
+		const result = reducePerGroupObservations(byGroup, request.reducer)
+		yield* Effect.annotateCurrentSpan("result.groupCount", result.length)
+		return result
+	})
+
 export class QueryEngineService extends Context.Service<QueryEngineService, QueryEngineServiceShape>()(
-	"QueryEngineService",
+	"@maple/api/services/QueryEngineService",
 	{
 		make: Effect.gen(function* () {
 			const warehouse = yield* WarehouseQueryService
@@ -1673,6 +1810,7 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 			const bucketCache = yield* BucketCacheService
 			const executeImpl = makeQueryEngineExecute(warehouse)
 			const evaluateImpl = makeQueryEngineEvaluate(warehouse)
+			const evaluateRawSqlImpl = makeQueryEngineEvaluateRawSql(warehouse)
 
 			const recordCacheOutcome = (hit: boolean) =>
 				Metric.update(
@@ -1680,9 +1818,9 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 					1,
 				)
 
-			const legacyBlobCachedExecute = (tenant: TenantContext, request: QueryEngineExecuteRequest) =>
-				Effect.gen(function* () {
-					const startMs = Date.now()
+			const legacyBlobCachedExecute = Effect.fn("QueryEngineService.legacyBlobCachedExecute")(
+				function* (tenant: TenantContext, request: QueryEngineExecuteRequest) {
+					const startMs = yield* Clock.currentTimeMillis
 					const key = buildCacheKey(tenant.orgId, request)
 					const ttlSeconds = cacheTtlForQueryKind(request.query.kind)
 					const { value, hit } = yield* edgeCache.getOrCompute(
@@ -1697,22 +1835,26 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 					yield* recordCacheOutcome(hit)
 					yield* Effect.annotateCurrentSpan("cache.hit", hit)
 					yield* Effect.annotateCurrentSpan("cache.ttlSeconds", ttlSeconds)
-					yield* Metric.update(QueryEngineMetrics.executeDurationMs, Date.now() - startMs)
+					yield* Metric.update(
+						QueryEngineMetrics.executeDurationMs,
+						(yield* Clock.currentTimeMillis) - startMs,
+					)
 					return value
-				})
+				},
+			)
 
-			const bucketCachedExecute = (
-				tenant: TenantContext,
-				request: QueryEngineExecuteRequest,
-				bucketSeconds: number,
-				range: TimeRangeBounds,
-			) =>
-				Effect.gen(function* () {
+			const bucketCachedExecute = Effect.fn("QueryEngineService.bucketCachedExecute")(
+				function* (
+					tenant: TenantContext,
+					request: QueryEngineExecuteRequest,
+					bucketSeconds: number,
+					range: TimeRangeBounds,
+				) {
 					if (request.query.kind !== "timeseries") {
 						return yield* legacyBlobCachedExecute(tenant, request)
 					}
 					const source = request.query.source
-					const perfStartMs = Date.now()
+					const perfStartMs = yield* Clock.currentTimeMillis
 					// Pin bucketSeconds onto the query so the fan-out's narrowed ranges
 					// don't let validateExecute recompute a smaller step — buckets must
 					// match the outer cache's step exactly.
@@ -1749,7 +1891,10 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 					yield* Effect.annotateCurrentSpan("cache.bucketsHit", outcome.bucketsHit)
 					yield* Effect.annotateCurrentSpan("cache.bucketsMissed", outcome.bucketsMissed)
 					yield* Effect.annotateCurrentSpan("cache.missingRangeCount", outcome.missingRangeCount)
-					yield* Metric.update(QueryEngineMetrics.executeDurationMs, Date.now() - perfStartMs)
+					yield* Metric.update(
+						QueryEngineMetrics.executeDurationMs,
+						(yield* Clock.currentTimeMillis) - perfStartMs,
+					)
 
 					return new QueryEngineExecuteResponse({
 						result: {
@@ -1758,12 +1903,14 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 							data: outcome.points,
 						},
 					})
-				})
+				},
+			)
 
-			const execute = (tenant: TenantContext, request: QueryEngineExecuteRequest) =>
-				withTimeout(
-					Effect.gen(function* () {
-						if (!bucketCache.enabled || request.query.kind !== "timeseries") {
+			const execute = Effect.fn("QueryEngineService.execute")(
+				function* (tenant: TenantContext, request: QueryEngineExecuteRequest) {
+					return yield* withTimeout(
+						Effect.gen(function* () {
+							if (!bucketCache.enabled || request.query.kind !== "timeseries") {
 							return yield* legacyBlobCachedExecute(tenant, request)
 						}
 
@@ -1796,47 +1943,64 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 							attributes: { orgId: tenant.orgId },
 						}),
 					),
-				)
+					)
+				},
+			)
 
-			const cachedEvaluate = (tenant: TenantContext, request: QueryEngineEvaluateRequest) =>
+			const cachedEvaluate = Effect.fn("QueryEngineService.cachedEvaluate")(
+				function* (tenant: TenantContext, request: QueryEngineEvaluateRequest) {
+					return yield* withTimeout(
+						Effect.gen(function* () {
+							const key = buildEvaluateCacheKey(tenant.orgId, request)
+							const { value, hit } = yield* edgeCache.getOrCompute(
+								{ bucket: "qe-evaluate", key, ttlSeconds: 30 },
+								evaluateImpl(tenant, request),
+							)
+							yield* recordCacheOutcome(hit)
+							yield* Effect.annotateCurrentSpan("cache.hit", hit)
+							return value
+						}).pipe(
+							Effect.withSpan("QueryEngineService.cachedEvaluate", {
+								attributes: { orgId: tenant.orgId },
+							}),
+						),
+					)
+				},
+			)
+
+			const cachedDirect = Effect.fn("QueryEngineService.cachedDirect")(
+				function* <A>(
+					tenant: TenantContext,
+					routeName: string,
+					payload: unknown,
+					effect: Effect.Effect<A, QueryEngineDirectError>,
+				) {
+					return yield* withTimeout(
+						Effect.gen(function* () {
+							const startMs = yield* Clock.currentTimeMillis
+							const key = buildDirectRouteCacheKey(tenant.orgId, routeName, payload)
+							const { value, hit } = yield* edgeCache.getOrCompute(
+								{ bucket: "qe-direct", key, ttlSeconds: 15 },
+								effect,
+							)
+							yield* recordCacheOutcome(hit)
+							yield* Effect.annotateCurrentSpan("cache.hit", hit)
+							yield* Metric.update(QueryEngineMetrics.executeDurationMs, (yield* Clock.currentTimeMillis) - startMs)
+							return value
+						}).pipe(
+							Effect.withSpan("QueryEngineService.cachedDirect", {
+								attributes: { orgId: tenant.orgId, routeName },
+							}),
+						),
+					)
+				},
+			)
+
+			const evaluateRawSql = (tenant: TenantContext, request: QueryEngineRawSqlEvaluateRequest) =>
 				withTimeout(
-					Effect.gen(function* () {
-						const key = buildEvaluateCacheKey(tenant.orgId, request)
-						const { value, hit } = yield* edgeCache.getOrCompute(
-							{ bucket: "qe-evaluate", key, ttlSeconds: 30 },
-							evaluateImpl(tenant, request),
-						)
-						yield* recordCacheOutcome(hit)
-						yield* Effect.annotateCurrentSpan("cache.hit", hit)
-						return value
-					}).pipe(
-						Effect.withSpan("QueryEngineService.cachedEvaluate", {
+					evaluateRawSqlImpl(tenant, request).pipe(
+						Effect.withSpan("QueryEngineService.evaluateRawSql", {
 							attributes: { orgId: tenant.orgId },
-						}),
-					),
-				)
-
-			const cachedDirect = <A>(
-				tenant: TenantContext,
-				routeName: string,
-				payload: unknown,
-				effect: Effect.Effect<A, QueryEngineDirectError>,
-			): Effect.Effect<A, QueryEngineDirectError> =>
-				withTimeout(
-					Effect.gen(function* () {
-						const startMs = Date.now()
-						const key = buildDirectRouteCacheKey(tenant.orgId, routeName, payload)
-						const { value, hit } = yield* edgeCache.getOrCompute(
-							{ bucket: "qe-direct", key, ttlSeconds: 15 },
-							effect,
-						)
-						yield* recordCacheOutcome(hit)
-						yield* Effect.annotateCurrentSpan("cache.hit", hit)
-						yield* Metric.update(QueryEngineMetrics.executeDurationMs, Date.now() - startMs)
-						return value
-					}).pipe(
-						Effect.withSpan("QueryEngineService.cachedDirect", {
-							attributes: { orgId: tenant.orgId, routeName },
 						}),
 					),
 				)
@@ -1844,12 +2008,11 @@ export class QueryEngineService extends Context.Service<QueryEngineService, Quer
 			return {
 				execute,
 				evaluate: cachedEvaluate,
+				evaluateRawSql,
 				cachedDirect,
-			}
+			} satisfies QueryEngineServiceShape
 		}),
 	},
 ) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

@@ -11,7 +11,29 @@ export interface HttpInfo {
 	kind: "client" | "server"
 }
 
+export interface HttpSpanInput {
+	spanName: string
+	spanAttributes?: Record<string, string>
+	/** OTel SPAN_KIND_* — authoritative client/server signal when present. */
+	spanKind?: string
+}
+
 const isHttpMethod = (s: string): s is HttpMethod => HTTP_METHODS.includes(s.toUpperCase() as HttpMethod)
+
+/**
+ * Reads the first of `keys` whose value is present and non-blank. Some emitters send
+ * `http.request.method: ""` or `http.route: ""`; treating those as absent stops
+ * `getHttpInfo` from rendering an empty method badge or a blank route.
+ */
+const attr = (attrs: Record<string, string>, ...keys: string[]): Option.Option<string> => {
+	for (const key of keys) {
+		const value = attrs[key]
+		if (value != null && value.trim() !== "") return Option.some(value)
+	}
+	return Option.none()
+}
+
+const nonEmpty = (s: string): Option.Option<string> => (s.trim() !== "" ? Option.some(s) : Option.none())
 
 const tryParseUrl = Option.liftThrowable((s: string) => new URL(s))
 
@@ -61,26 +83,30 @@ const parseSpanName = (name: string): Option.Option<NameInfo> => {
 const clientRouteFromAttrs = (attrs: Record<string, string>): Option.Option<string> => {
 	// Prefer parsing url.full / http.url first — new URL() reliably strips the scheme.
 	// Some emitters put a scheme into server.address, which would otherwise leak through.
-	const fromFullUrl = pipe(Option.fromNullishOr(attrs["url.full"] ?? attrs["http.url"]), Option.flatMap(parseUrlHostPath))
+	const fromFullUrl = pipe(attr(attrs, "url.full", "http.url"), Option.flatMap(parseUrlHostPath))
 	if (Option.isSome(fromFullUrl)) return fromFullUrl
 
-	const host = (attrs["server.address"] ?? attrs["net.peer.name"])?.replace(/^https?:\/\//, "")
-	const path = attrs["url.path"] ?? attrs["http.target"]
-	if (host && path) return Option.some(`${host}${path}`)
-	return Option.fromNullishOr(path)
+	const host = pipe(
+		attr(attrs, "server.address", "net.peer.name"),
+		Option.map((h) => h.replace(/^https?:\/\//, "")),
+		Option.flatMap(nonEmpty),
+	)
+	const path = attr(attrs, "url.path", "http.target")
+	if (Option.isSome(host) && Option.isSome(path)) return Option.some(`${host.value}${path.value}`)
+	return path
 }
 
 const serverRouteFromAttrs = (attrs: Record<string, string>): Option.Option<string> =>
-	Option.fromNullishOr(attrs["http.target"] ?? attrs["url.path"])
+	attr(attrs, "http.target", "url.path")
 
 const routeFromAttrs = (attrs: Record<string, string>, isClient: boolean): Option.Option<string> =>
 	pipe(
-		Option.fromNullishOr(attrs["http.route"]),
+		attr(attrs, "http.route"),
 		Option.orElse(() => (isClient ? clientRouteFromAttrs(attrs) : serverRouteFromAttrs(attrs))),
 	)
 
 /**
- * Extract HTTP span info from span name and attributes.
+ * Extract HTTP span info from a span's name, attributes, and (when known) OTel kind.
  * Handles multiple OTel conventions:
  * - Standard: `http.method`, `http.route`, `http.status_code`
  * - New semconv: `http.request.method`, `url.path`, `url.full`, `server.address`, `http.response.status_code`
@@ -88,19 +114,29 @@ const routeFromAttrs = (attrs: Record<string, string>, isClient: boolean): Optio
  *
  * Server spans render path-only (e.g. `/v1/spans`). Client spans render host+path
  * (e.g. `api.tinybird.co/v1/spans`) so the destination service is visible.
+ *
+ * Takes the span object so `spanKind` always rides along — the hierarchy query rewrites
+ * span names (`http.client GET` → `GET /path`), which would otherwise hide the client
+ * kind and collapse the route to path-only.
  */
-export function getHttpInfo(spanName: string, attrs: Record<string, string>): HttpInfo | null {
-	// Permissive: drives route extraction strategy. server spans can legitimately emit
-	// url.full too, but if they do we still want to fall back to host+path composition.
-	const useClientRoute = spanName.startsWith("http.client ") || !!attrs["url.full"] || !!attrs["http.url"]
-	// Strict: only mark as client when the span name explicitly says so. Callers with
-	// a real OTel span.kind value should pass it down and override this.
-	const kind: "client" | "server" = spanName.startsWith("http.client ") ? "client" : "server"
+export function getHttpInfo({ spanName, spanAttributes, spanKind }: HttpSpanInput): HttpInfo | null {
+	const attrs = spanAttributes ?? {}
+
+	// A real OTel span.kind is authoritative. Fall back to the name/url.full heuristic
+	// only when the kind is absent or non-HTTP (INTERNAL/PRODUCER/CONSUMER).
+	const kind: "client" | "server" = Match.value(spanKind).pipe(
+		Match.when("SPAN_KIND_CLIENT", () => "client" as const),
+		Match.when("SPAN_KIND_SERVER", () => "server" as const),
+		Match.orElse(() => (spanName.startsWith("http.client ") ? "client" : "server")),
+	)
+	// server spans can legitimately emit url.full too, but if they do we still want to
+	// fall back to host+path composition.
+	const useClientRoute = kind === "client" || Option.isSome(attr(attrs, "url.full", "http.url"))
 	const nameInfo = parseSpanName(spanName)
 
 	const method = pipe(
-		Option.fromNullishOr(attrs["http.method"] ?? attrs["http.request.method"]),
-		Option.orElse(() => Option.map(nameInfo, (n) => n.method)),
+		attr(attrs, "http.method", "http.request.method"),
+		Option.orElse(() => pipe(nameInfo, Option.flatMap((n) => nonEmpty(n.method)))),
 	)
 	if (Option.isNone(method)) return null
 

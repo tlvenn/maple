@@ -73,7 +73,7 @@ export const FlowSpanNode = memo(function FlowSpanNode({ data }: FlowSpanNodePro
 	const { span, services, isSelected, count, aggregatedDuration } = data
 	const isCombined = count > 1
 	const kindLabel = SPAN_KIND_LABELS[span.spanKind] || span.spanKind.replace("SPAN_KIND_", "")
-	const httpInfo = getHttpInfo(span.spanName, span.spanAttributes)
+	const httpInfo = getHttpInfo(span)
 	const isHttpRequest = !!httpInfo
 	const isError = span.statusCode === "Error" || (span.statusCode !== "Ok" && (httpInfo?.isError ?? false))
 

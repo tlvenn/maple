@@ -3,8 +3,8 @@ import { PlusIcon, ChartLineIcon, ChartBarIcon, ChartBarTrendUpIcon } from "@/co
 
 import { Card, CardContent, CardHeader, CardTitle } from "@maple/ui/components/ui/card"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
-import { type ListMetricsInput } from "@/api/tinybird/metrics"
-import { getMetricsSummaryResultAtom } from "@/lib/services/atoms/tinybird-query-atoms"
+import { type ListMetricsInput } from "@/api/warehouse/metrics"
+import { getMetricsSummaryResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 
 export type MetricType = ListMetricsInput["metricType"]
 
@@ -44,10 +44,17 @@ const cardConfig = [
 interface MetricsSummaryCardsProps {
 	selectedType: MetricType | null
 	onSelectType: (type: MetricType | null) => void
+	startTime?: string
+	endTime?: string
 }
 
-export function MetricsSummaryCards({ selectedType, onSelectType }: MetricsSummaryCardsProps) {
-	const summaryResult = useAtomValue(getMetricsSummaryResultAtom({ data: {} }))
+export function MetricsSummaryCards({
+	selectedType,
+	onSelectType,
+	startTime,
+	endTime,
+}: MetricsSummaryCardsProps) {
+	const summaryResult = useAtomValue(getMetricsSummaryResultAtom({ data: { startTime, endTime } }))
 
 	return Result.builder(summaryResult)
 		.onInitial(() => (

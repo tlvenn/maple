@@ -12,16 +12,7 @@ function MinusIcon({ size = 24, className, ...props }: IconProps) {
 			aria-hidden="true"
 			{...props}
 		>
-			<line
-				x1="21"
-				y1="12"
-				x2="3"
-				y2="12"
-				stroke="currentColor"
-				strokeLinecap="square"
-				strokeMiterlimit="10"
-				strokeWidth="2"
-			/>
+			<path d="M3 12L21 12" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
 		</svg>
 	)
 }

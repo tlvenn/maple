@@ -18,6 +18,9 @@ export type TraceId = Schema.Schema.Type<typeof TraceId>
 export const SpanId = MapleId("@maple/SpanId", "Span ID")
 export type SpanId = Schema.Schema.Type<typeof SpanId>
 
+export const SessionId = MapleId("@maple/SessionId", "Session ID")
+export type SessionId = Schema.Schema.Type<typeof SessionId>
+
 export const OrgId = MapleId("@maple/OrgId", "Org ID")
 export type OrgId = Schema.Schema.Type<typeof OrgId>
 
@@ -111,12 +114,11 @@ export const AuthMode = Schema.Literals(["clerk", "self_hosted"]).annotate({
 })
 export type AuthMode = Schema.Schema.Type<typeof AuthMode>
 
-export const IsoDateTimeString = Schema.String.pipe(
-	Schema.check(
-		Schema.makeFilter((value: string) => Number.isFinite(Date.parse(value)), {
-			description: "Expected an ISO date-time string",
-		}),
-	),
+export const IsoDateTimeString = Schema.String.check(
+	Schema.makeFilter((value: string) => Number.isFinite(Date.parse(value)), {
+		description: "Expected an ISO date-time string",
+	}),
+).pipe(
 	Schema.brand("@maple/IsoDateTimeString"),
 	Schema.annotate({
 		identifier: "@maple/IsoDateTimeString",
@@ -125,8 +127,11 @@ export const IsoDateTimeString = Schema.String.pipe(
 )
 export type IsoDateTimeString = Schema.Schema.Type<typeof IsoDateTimeString>
 
-export const ScrapeIntervalSeconds = Schema.Number.pipe(
-	Schema.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(5), Schema.isLessThanOrEqualTo(300)),
+export const ScrapeIntervalSeconds = Schema.Number.check(
+	Schema.isInt(),
+	Schema.isGreaterThanOrEqualTo(5),
+	Schema.isLessThanOrEqualTo(300),
+).pipe(
 	Schema.brand("@maple/ScrapeIntervalSeconds"),
 	Schema.annotate({
 		identifier: "@maple/ScrapeIntervalSeconds",
@@ -140,6 +145,24 @@ export const ScrapeAuthType = Schema.Literals(["none", "bearer", "basic"]).annot
 	title: "Scrape Auth Type",
 })
 export type ScrapeAuthType = Schema.Schema.Type<typeof ScrapeAuthType>
+
+export const IngestAttributeMappingId = MapleUuidId(
+	"@maple/IngestAttributeMappingId",
+	"Ingest Attribute Mapping ID",
+)
+export type IngestAttributeMappingId = Schema.Schema.Type<typeof IngestAttributeMappingId>
+
+export const IngestMappingSourceContext = Schema.Literals(["span", "resource"]).annotate({
+	identifier: "@maple/IngestMappingSourceContext",
+	title: "Ingest Mapping Source Context",
+})
+export type IngestMappingSourceContext = Schema.Schema.Type<typeof IngestMappingSourceContext>
+
+export const IngestMappingOperation = Schema.Literals(["move", "copy"]).annotate({
+	identifier: "@maple/IngestMappingOperation",
+	title: "Ingest Mapping Operation",
+})
+export type IngestMappingOperation = Schema.Schema.Type<typeof IngestMappingOperation>
 
 export const TinybirdDeploymentId = MapleId("@maple/TinybirdDeploymentId", "Tinybird Deployment ID")
 export type TinybirdDeploymentId = Schema.Schema.Type<typeof TinybirdDeploymentId>

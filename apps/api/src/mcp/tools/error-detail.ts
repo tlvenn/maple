@@ -5,7 +5,7 @@ import {
 	requiredStringParam,
 	type McpToolRegistrar,
 } from "./types"
-import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange } from "../lib/time"
 import { formatDurationFromMs, truncate } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
@@ -13,14 +13,14 @@ import { toMcpQueryError } from "../lib/map-warehouse-error"
 import { Array as Arr, Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { errorDetail } from "@maple/query-engine/observability"
-import { makeTinybirdExecutorFromTenant } from "@/services/TinybirdExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
 
 export function registerErrorDetailTool(server: McpToolRegistrar) {
 	server.tool(
 		"error_detail",
-		"Get sample traces and correlated logs for a specific error type. Optionally include a timeseries to see if the error is getting worse. Use inspect_trace on a trace_id for the full span tree.",
+		"Get sample traces and correlated logs for a specific error, identified by its `fingerprint` (from find_errors or list_error_issues). Optionally include a timeseries to see if the error is getting worse. Use inspect_trace on a trace_id for the full span tree.",
 		Schema.Struct({
-			error_type: requiredStringParam("The error type / StatusMessage to investigate"),
+			fingerprint: requiredStringParam("The error FingerprintHash (from find_errors / list_error_issues)"),
 			start_time: optionalStringParam("Start of time range (YYYY-MM-DD HH:mm:ss)"),
 			end_time: optionalStringParam("End of time range (YYYY-MM-DD HH:mm:ss)"),
 			service: optionalStringParam("Filter by service name"),
@@ -30,7 +30,7 @@ export function registerErrorDetailTool(server: McpToolRegistrar) {
 			limit: optionalNumberParam("Max sample traces (default 5)"),
 		}),
 		Effect.fn("McpTool.errorDetail")(function* ({
-			error_type,
+			fingerprint,
 			start_time,
 			end_time,
 			service,
@@ -41,13 +41,13 @@ export function registerErrorDetailTool(server: McpToolRegistrar) {
 			const tenant = yield* resolveTenant
 
 			const result = yield* errorDetail({
-				errorType: error_type,
+				fingerprintHash: fingerprint,
 				timeRange: { startTime: st, endTime: et },
 				service: service ?? undefined,
 				includeTimeseries: include_timeseries ?? false,
 				limit: limit ?? 5,
 			}).pipe(
-				Effect.provide(makeTinybirdExecutorFromTenant(tenant)),
+				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 				Effect.mapError(toMcpQueryError("error_detail_traces")),
 			)
 
@@ -56,14 +56,14 @@ export function registerErrorDetailTool(server: McpToolRegistrar) {
 					content: [
 						{
 							type: "text",
-							text: `No traces found for error type "${error_type}" in ${st} — ${et}`,
+							text: `No traces found for error fingerprint "${fingerprint}" in ${st} — ${et}`,
 						},
 					],
 				}
 			}
 
 			const lines: string[] = [
-				`## Error Detail: "${truncate(error_type, 80)}"`,
+				`## Error Detail: fingerprint ${fingerprint}`,
 				`Time range: ${st} — ${et}`,
 				`Sample traces: ${result.traces.length}`,
 				``,
@@ -118,7 +118,7 @@ export function registerErrorDetailTool(server: McpToolRegistrar) {
 					tool: "error_detail",
 					data: {
 						timeRange: { start: st, end: et },
-						errorType: error_type,
+						fingerprintHash: fingerprint,
 						traces: Arr.map(result.traces, (t) => ({
 							traceId: t.traceId,
 							rootSpanName: t.rootSpanName,

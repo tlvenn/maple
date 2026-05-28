@@ -10,7 +10,7 @@ import * as Effect from "effect/Effect"
 import * as Stream from "effect/Stream"
 import { WorkerEnvironment } from "./worker-environment.ts"
 
-export class R2Error extends Data.TaggedError("R2Error")<{
+export class R2Error extends Data.TaggedError("@maple/effect-cloudflare/R2Error")<{
 	message: string
 	cause: unknown
 }> {}
@@ -92,7 +92,7 @@ export interface R2BucketClient {
 }
 
 const makeClient = (token: R2BucketToken): R2BucketClient => {
-	const env = WorkerEnvironment.asEffect()
+	const env = WorkerEnvironment
 	const raw = env.pipe(Effect.map((e) => (e as Record<string, runtime.R2Bucket>)[token.LogicalId]))
 
 	const tryPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, R2Error> =>

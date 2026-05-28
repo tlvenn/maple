@@ -15,12 +15,12 @@ import type { OrgId as OrgIdType, RoleName as RoleNameType } from "@maple/domain
 import { createClerkClient } from "@clerk/backend"
 import { render } from "@react-email/components"
 import { and, eq, inArray, isNull, lt, or } from "drizzle-orm"
-import { Array as Arr, Cause, Effect, Layer, Option, Redacted, Context } from "effect"
+import { Clock, Array as Arr, Cause, Effect, Layer, Option, Redacted, Ref, Context } from "effect"
 import { WeeklyDigest, type WeeklyDigestProps } from "@maple/email/weekly-digest"
-import { Database } from "./DatabaseLive"
-import { EmailService } from "./EmailService"
-import { Env } from "./Env"
-import { WarehouseQueryService } from "./WarehouseQueryService"
+import { Database } from "../lib/DatabaseLive"
+import { EmailService } from "../lib/EmailService"
+import { Env } from "../lib/Env"
+import { WarehouseQueryService } from "../lib/WarehouseQueryService"
 
 const SYSTEM_DIGEST_USER = UserId.make("system-digest")
 const ROOT_ROLE = RoleName.make("root")
@@ -70,7 +70,7 @@ interface ErrorsByTypeRow {
 	count: number
 }
 
-export class DigestService extends Context.Service<DigestService>()("DigestService", {
+export class DigestService extends Context.Service<DigestService>()("@maple/api/services/DigestService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const email = yield* EmailService
@@ -119,7 +119,7 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 			yield* Effect.annotateCurrentSpan("orgId", orgId)
 			yield* Effect.annotateCurrentSpan("userId", userId)
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const id = crypto.randomUUID()
 
 			yield* database
@@ -174,7 +174,7 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 		const generateDigestData = Effect.fn("DigestService.generateDigestData")(function* (orgId: OrgId) {
 			yield* Effect.annotateCurrentSpan("orgId", orgId)
 
-			const now = new Date()
+			const now = new Date(yield* Clock.currentTimeMillis)
 			const toClickHouseDateTime = (d: Date) =>
 				d
 					.toISOString()
@@ -194,7 +194,7 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 			// Query all data in parallel. service_overview and get_service_usage
 			// use the *_compare pipes which UNION ALL current + previous windows
 			// into a single Tinybird query, tagging rows with a `period` column.
-			const [overviewResponse, currentErrors, usageResponse, topErrors] = yield* Effect.all(
+			const [overviewResponse, usageResponse, topErrors] = yield* Effect.all(
 				[
 					warehouse.query(systemTenant, {
 						pipe: "service_overview_compare",
@@ -204,10 +204,6 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 							previous_start_time: previousStart,
 							previous_end_time: currentStart,
 						},
-					}),
-					warehouse.query(systemTenant, {
-						pipe: "errors_summary",
-						params: { start_time: currentStart, end_time: currentEnd },
 					}),
 					warehouse.query(systemTenant, {
 						pipe: "get_service_usage_compare",
@@ -236,8 +232,6 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 						}),
 				),
 			)
-
-			void currentErrors
 
 			// Split UNION ALL'd rows by period discriminator
 			const overviewRows = overviewResponse.data as Array<ServiceOverviewCompareRow>
@@ -402,7 +396,7 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 		})
 
 		const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000 // 24 hours
-		let lastSyncAt: number | null = null
+		const lastSyncAt = yield* Ref.make<number | null>(null)
 
 		const paginateClerk = <T>(
 			fetchPage: (params: {
@@ -416,6 +410,11 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 				let offset = 0
 				const all: T[] = []
 
+				// Genuine cursor pagination: each page advances `offset` by the
+				// number of rows it returned, and the terminating condition depends
+				// on the just-fetched page (totalCount / empty page). Effect v4
+				// (beta) ships neither `iterate` nor `loop`, so an imperative
+				// while-loop driving sequential `yield*`s is the clearest form here.
 				while (true) {
 					const page = yield* Effect.tryPromise({
 						try: () => fetchPage({ limit: PAGE_SIZE, offset }),
@@ -437,62 +436,65 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 				"Failed to list Clerk organizations",
 			)
 
-			const memberships: Array<{ orgId: string; userId: string; email: string }> = []
+			const perOrgMemberships = yield* Effect.forEach(orgs, (org) =>
+				Effect.gen(function* () {
+					const members = yield* paginateClerk(
+						(params) =>
+							clerk.organizations.getOrganizationMembershipList({
+								organizationId: org.id,
+								...params,
+							}),
+						`Failed to list Clerk members for org ${org.id}`,
+					)
 
-			for (const org of orgs) {
-				const members = yield* paginateClerk(
-					(params) =>
-						clerk.organizations.getOrganizationMembershipList({
-							organizationId: org.id,
-							...params,
-						}),
-					`Failed to list Clerk members for org ${org.id}`,
-				)
+					return members.flatMap((member) => {
+						const memberEmail = member.publicUserData?.identifier
+						const memberUserId = member.publicUserData?.userId
+						if (!memberEmail || !memberUserId) return []
+						return [{ orgId: org.id, userId: memberUserId, email: memberEmail }]
+					})
+				}),
+			)
 
-				for (const member of members) {
-					const memberEmail = member.publicUserData?.identifier
-					const memberUserId = member.publicUserData?.userId
-					if (!memberEmail || !memberUserId) continue
-					memberships.push({ orgId: org.id, userId: memberUserId, email: memberEmail })
-				}
-			}
-
-			return memberships
+			return perOrgMemberships.flat()
 		})
 
 		const reconcileSubscriptions = Effect.fn("DigestService.reconcileSubscriptions")(function* (
 			clerkMemberships: Array<{ orgId: string; userId: string; email: string }>,
 		) {
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 
 			// Upsert all current Clerk members (re-enables returning members, updates email)
-			for (const m of clerkMemberships) {
-				yield* database
-					.execute((db) =>
-						db
-							.insert(digestSubscriptions)
-							.values({
-								id: crypto.randomUUID(),
-								orgId: m.orgId,
-								userId: m.userId,
-								email: m.email,
-								enabled: 1,
-								dayOfWeek: 1,
-								timezone: "UTC",
-								createdAt: now,
-								updatedAt: now,
-							})
-							.onConflictDoUpdate({
-								target: [digestSubscriptions.orgId, digestSubscriptions.userId],
-								set: {
+			yield* Effect.forEach(
+				clerkMemberships,
+				(m) =>
+					database
+						.execute((db) =>
+							db
+								.insert(digestSubscriptions)
+								.values({
+									id: crypto.randomUUID(),
+									orgId: m.orgId,
+									userId: m.userId,
 									email: m.email,
 									enabled: 1,
+									dayOfWeek: 1,
+									timezone: "UTC",
+									createdAt: now,
 									updatedAt: now,
-								},
-							}),
-					)
-					.pipe(Effect.mapError(toPersistenceError))
-			}
+								})
+								.onConflictDoUpdate({
+									target: [digestSubscriptions.orgId, digestSubscriptions.userId],
+									set: {
+										email: m.email,
+										enabled: 1,
+										updatedAt: now,
+									},
+								}),
+						)
+						.pipe(Effect.mapError(toPersistenceError)),
+				{ discard: true },
+			)
 
 			// Disable subscriptions for members no longer in any Clerk org
 			const activeOrgIds = [...new Set(clerkMemberships.map((m) => m.orgId))]
@@ -547,8 +549,9 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 			if (Option.isNone(env.CLERK_SECRET_KEY)) return
 
 			// Rate-limit: only sync from Clerk once per 24 hours
-			const now = Date.now()
-			if (lastSyncAt != null && now - lastSyncAt < SYNC_INTERVAL_MS) return
+			const now = yield* Clock.currentTimeMillis
+			const lastSync = yield* Ref.get(lastSyncAt)
+			if (lastSync != null && now - lastSync < SYNC_INTERVAL_MS) return
 
 			const clerk = createClerkClient({
 				secretKey: Redacted.value(env.CLERK_SECRET_KEY.value),
@@ -557,7 +560,7 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 			const memberships = yield* fetchAllClerkMemberships(clerk)
 			yield* reconcileSubscriptions(memberships)
 
-			lastSyncAt = now
+			yield* Ref.set(lastSyncAt, now)
 
 			yield* Effect.logInfo("Digest subscriptions synced from Clerk").pipe(
 				Effect.annotateLogs({ memberCount: memberships.length }),
@@ -577,10 +580,10 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 				),
 			)
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000
 			const todayStartMs = now - (now % 86_400_000)
-			const currentDayOfWeek = new Date().getUTCDay()
+			const currentDayOfWeek = new Date(now).getUTCDay()
 
 			// Find subscriptions due for sending
 			const subs = yield* database
@@ -659,12 +662,15 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 									)
 									.pipe(
 										Effect.tap(() =>
-											database.execute((db) =>
-												db
-													.update(digestSubscriptions)
-													.set({ lastSentAt: Date.now() })
-													.where(eq(digestSubscriptions.id, sub.id)),
-											),
+											Effect.gen(function* () {
+												const lastSentAt = yield* Clock.currentTimeMillis
+												yield* database.execute((db) =>
+													db
+														.update(digestSubscriptions)
+														.set({ lastSentAt })
+														.where(eq(digestSubscriptions.id, sub.id)),
+												)
+											}),
 										),
 										Effect.match({
 											onSuccess: () => ({ sent: true }),
@@ -709,7 +715,7 @@ export class DigestService extends Context.Service<DigestService>()("DigestServi
 		}
 	}),
 }) {
-	static readonly Default = Layer.effect(this, this.make)
+	static readonly layer = Layer.effect(this, this.make)
 }
 
 function rowToResponse(row: typeof digestSubscriptions.$inferSelect): DigestSubscriptionResponse {

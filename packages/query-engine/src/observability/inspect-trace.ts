@@ -1,7 +1,7 @@
-import { Array as Arr, Effect, HashMap, HashSet, Option, Schema, pipe } from "effect"
+import { Array as Arr, Clock, Effect, HashMap, HashSet, Option, Schema, pipe } from "effect"
 import { TraceId, SpanId } from "@maple/domain"
 import type { SpanHierarchyOutput, ListLogsOutput } from "@maple/domain/tinybird"
-import { TinybirdExecutor } from "./TinybirdExecutor"
+import { WarehouseExecutor } from "./WarehouseExecutor"
 import type { InspectTraceOutput, SpanNode } from "./types"
 import { toLogEntry } from "./row-mappers"
 
@@ -80,8 +80,10 @@ export const inspectTrace = Effect.fn("Observability.inspectTrace")(function* (
 	traceId: string,
 	options?: InspectTraceOptions,
 ) {
-	const executor = yield* TinybirdExecutor
+	const executor = yield* WarehouseExecutor
 	yield* Effect.annotateCurrentSpan("traceId", traceId)
+
+	const nowMs = yield* Clock.currentTimeMillis
 
 	const range = options?.timestampHint
 		? (() => {
@@ -93,10 +95,9 @@ export const inspectTrace = Effect.fn("Observability.inspectTrace")(function* (
 			})()
 		: (() => {
 				const lookbackMs = (options?.defaultLookbackHours ?? DEFAULT_LOOKBACK_HOURS) * 60 * 60 * 1000
-				const end = new Date()
 				return {
-					start_time: tinybirdDateTime(new Date(end.getTime() - lookbackMs)),
-					end_time: tinybirdDateTime(end),
+					start_time: tinybirdDateTime(new Date(nowMs - lookbackMs)),
+					end_time: tinybirdDateTime(new Date(nowMs)),
 				}
 			})()
 
@@ -121,25 +122,25 @@ export const inspectTrace = Effect.fn("Observability.inspectTrace")(function* (
 
 	const spans = spansResult.data
 
-	const nodes: MutableSpanNode[] = yield* Effect.forEach(spans, (span) =>
-		Effect.gen(function* () {
-			const attributes = yield* extractKeyAttributes(span.spanAttributes ?? "{}")
-			const resourceAttributes = yield* parseJsonAttributes(span.resourceAttributes ?? "{}")
-			const node: MutableSpanNode = {
-				spanId: Schema.decodeSync(SpanId)(span.spanId),
-				parentSpanId: span.parentSpanId,
-				spanName: span.spanName,
-				serviceName: span.serviceName,
-				durationMs: span.durationMs,
-				statusCode: span.statusCode,
-				statusMessage: span.statusMessage,
-				attributes,
-				resourceAttributes,
-				children: [],
-			}
-			return node
-		}),
-	)
+	const toSpanNode = Effect.fnUntraced(function* (span: (typeof spans)[number]) {
+		const attributes = yield* extractKeyAttributes(span.spanAttributes ?? "{}")
+		const resourceAttributes = yield* parseJsonAttributes(span.resourceAttributes ?? "{}")
+		const node: MutableSpanNode = {
+			spanId: Schema.decodeSync(SpanId)(span.spanId),
+			parentSpanId: span.parentSpanId,
+			spanName: span.spanName,
+			serviceName: span.serviceName,
+			durationMs: span.durationMs,
+			statusCode: span.statusCode,
+			statusMessage: span.statusMessage,
+			attributes,
+			resourceAttributes,
+			children: [],
+		}
+		return node
+	})
+
+	const nodes: MutableSpanNode[] = yield* Effect.forEach(spans, toSpanNode)
 
 	// Index by spanId (use string keys for parentSpanId lookup compatibility)
 	const nodeMap = HashMap.fromIterable(

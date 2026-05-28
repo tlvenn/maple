@@ -8,7 +8,8 @@ import { getServiceLegendColor } from "@maple/ui/lib/colors"
 import { getCacheInfo, cacheResultStyles } from "@/lib/cache"
 import { getHttpInfo, HTTP_METHOD_COLORS } from "@maple/ui/lib/http"
 import { PixelDurationBar } from "./pixel-duration-bar"
-import type { SpanNode } from "@/api/tinybird/traces"
+import { countDescendants } from "./auto-collapse"
+import type { SpanNode } from "@/api/warehouse/traces"
 
 interface SpanRowProps {
 	span: SpanNode
@@ -19,7 +20,6 @@ interface SpanRowProps {
 	onToggle: () => void
 	isSelected?: boolean
 	onSelect?: (span: SpanNode) => void
-	defaultExpandDepth?: number
 }
 
 const statusStyles: Record<string, string> = {
@@ -114,7 +114,7 @@ export function SpanRow({
 	const widthPercent = totalDurationMs > 0 ? (span.durationMs / totalDurationMs) * 100 : 0
 
 	const cacheInfo = getCacheInfo(span.spanAttributes)
-	const httpInfo = getHttpInfo(span.spanName, span.spanAttributes)
+	const httpInfo = getHttpInfo(span)
 	const statusStyle = statusStyles[span.statusCode] ?? statusStyles.Unset
 	const kindLabel = kindLabels[span.spanKind] ?? span.spanKind?.replace("SPAN_KIND_", "") ?? "Unknown"
 
@@ -182,7 +182,7 @@ export function SpanRow({
 						<span
 							className={cn(
 								"px-1 py-0.5 rounded text-[10px] font-bold text-white shrink-0 leading-none hidden @min-[500px]:inline-flex",
-								HTTP_METHOD_COLORS[httpInfo.method] || "bg-[#5A5248]",
+								HTTP_METHOD_COLORS[httpInfo.method] || "bg-muted-foreground",
 							)}
 						>
 							{httpInfo.method}
@@ -192,6 +192,12 @@ export function SpanRow({
 				) : (
 					<span className="flex-1 truncate font-mono text-xs" title={span.spanName}>
 						{span.spanName}
+					</span>
+				)}
+
+				{hasChildren && !expanded && (
+					<span className="shrink-0 text-[10px] text-muted-foreground">
+						+{countDescendants(span)}
 					</span>
 				)}
 			</div>

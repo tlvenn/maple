@@ -1,5 +1,5 @@
 import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
-import { queryTinybird } from "../lib/query-tinybird"
+import { queryWarehouse, resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { clampLimit, clampOffset } from "../lib/limits"
 import { formatNumber, formatTable } from "../lib/format"
@@ -35,10 +35,18 @@ export function registerListMetricsTool(server: McpToolRegistrar) {
 			const { st, et } = range
 			const lim = clampLimit(limit, { defaultValue: 50, max: 500 })
 			const off = clampOffset(offset, { max: 10_000 })
+			const tenant = yield* resolveTenant
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				service: service ?? "all",
+				metricType: metric_type ?? "all",
+				limit: lim,
+				offset: off,
+			})
 
 			const [metricsResult, summaryResult] = yield* Effect.all(
 				[
-					queryTinybird("list_metrics", {
+					queryWarehouse("list_metrics", {
 						start_time: st,
 						end_time: et,
 						service,
@@ -47,7 +55,7 @@ export function registerListMetricsTool(server: McpToolRegistrar) {
 						offset: off,
 						limit: lim,
 					}),
-					queryTinybird("metrics_summary", {
+					queryWarehouse("metrics_summary", {
 						start_time: st,
 						end_time: et,
 						service,
@@ -58,6 +66,8 @@ export function registerListMetricsTool(server: McpToolRegistrar) {
 
 			const metrics = metricsResult.data
 			const summary = summaryResult.data
+
+			yield* Effect.annotateCurrentSpan("resultCount", metrics.length)
 
 			const lines: string[] = [
 				`## Available Metrics`,

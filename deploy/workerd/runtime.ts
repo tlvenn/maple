@@ -167,9 +167,12 @@ const triggerCron = async (cron: string): Promise<void> => {
 		console.error(`[cron] ${cron} failed:`, err)
 	}
 }
-new CronJob("* * * * *", () => triggerCron("* * * * *"), null, true)
-new CronJob("*/15 * * * *", () => triggerCron("*/15 * * * *"), null, true)
-console.log("[runtime] alerting crons registered")
+// Keep this list in sync with apps/alerting/wrangler.jsonc `triggers.crons`.
+const alertingCrons = ["* * * * *", "*/15 * * * *", "0 * * * *", "0 9 * * *"] as const
+for (const cron of alertingCrons) {
+	new CronJob(cron, () => triggerCron(cron), null, true)
+}
+console.log(`[runtime] alerting crons registered: ${alertingCrons.join(", ")}`)
 
 // Cleanup
 const shutdown = async (signal: string): Promise<void> => {

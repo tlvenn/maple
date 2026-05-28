@@ -4,10 +4,16 @@ import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { getSemanticSeriesColor } from "../../../lib/semantic-series-colors"
 import type { BaseChartProps } from "../_shared/chart-types"
 import {
+	type LegendSeries,
+	QueryBuilderLegend,
+	computeSeriesStats,
+	legendBlockHeight,
+} from "../_shared/query-builder-legend"
+import { thresholdReferenceLines } from "../_shared/threshold-lines"
+import {
 	type ChartConfig,
 	ChartContainer,
 	ChartLegend,
-	ChartLegendContent,
 	ChartTooltip,
 	ChartTooltipContent,
 } from "../../ui/chart"
@@ -34,6 +40,7 @@ export function QueryBuilderBarChart({
 	data,
 	className,
 	legend,
+	seriesStats: showStats,
 	tooltip,
 	stacked,
 	unit,
@@ -41,6 +48,7 @@ export function QueryBuilderBarChart({
 	softMin,
 	softMax,
 	syncId,
+	thresholds,
 }: BaseChartProps) {
 	const { chartData, seriesDefinitions } = React.useMemo(() => {
 		const source = Array.isArray(data) && data.length > 0 ? data : fallbackData
@@ -116,6 +124,37 @@ export function QueryBuilderBarChart({
 		return new Map(seriesDefinitions.map((definition) => [definition.chartKey, definition.rawKey]))
 	}, [seriesDefinitions])
 
+	const [hiddenSeries, setHiddenSeries] = React.useState<ReadonlySet<string>>(() => new Set())
+
+	const toggleSeries = React.useCallback((key: string) => {
+		setHiddenSeries((prev) => {
+			const next = new Set(prev)
+			if (next.has(key)) next.delete(key)
+			else next.add(key)
+			return next
+		})
+	}, [])
+
+	const seriesStats = React.useMemo(
+		() => computeSeriesStats(displayData, seriesDefinitions.map((d) => d.chartKey)),
+		[displayData, seriesDefinitions],
+	)
+
+	const legendSeries = React.useMemo<LegendSeries[]>(
+		() =>
+			seriesDefinitions.map((definition) => ({
+				key: definition.chartKey,
+				label: definition.rawKey,
+				color: chartConfig[definition.chartKey]?.color ?? "var(--chart-1)",
+			})),
+		[seriesDefinitions, chartConfig],
+	)
+
+	const variant = showStats ? "stats" : "compact"
+	const showLegendBlock = legend === "visible" || legend === "right"
+	const legendPosition = legend === "right" ? "right" : "bottom"
+	const legendHeight = legendBlockHeight(variant, seriesDefinitions.length)
+
 	return (
 		<ChartContainer config={chartConfig} className={className}>
 			<BarChart data={displayData} accessibilityLayer syncId={syncId} syncMethod="value">
@@ -170,15 +209,44 @@ export function QueryBuilderBarChart({
 					/>
 				)}
 
-				{legend === "visible" && <ChartLegend content={<ChartLegendContent />} />}
-				{legend === "right" && (
+				{showLegendBlock && legendPosition === "bottom" && (
+					<ChartLegend
+						verticalAlign="bottom"
+						height={legendHeight}
+						content={
+							<QueryBuilderLegend
+								series={legendSeries}
+								stats={seriesStats}
+								hidden={hiddenSeries}
+								onToggle={toggleSeries}
+								unit={unit}
+								layout="bottom"
+								variant={variant}
+							/>
+						}
+					/>
+				)}
+				{showLegendBlock && legendPosition === "right" && (
 					<ChartLegend
 						layout="vertical"
 						verticalAlign="middle"
 						align="right"
-						content={<ChartLegendContent />}
+						width={showStats ? 224 : 160}
+						content={
+							<QueryBuilderLegend
+								series={legendSeries}
+								stats={seriesStats}
+								hidden={hiddenSeries}
+								onToggle={toggleSeries}
+								unit={unit}
+								layout="right"
+								variant={variant}
+							/>
+						}
 					/>
 				)}
+
+				{thresholdReferenceLines(thresholds)}
 
 				{seriesDefinitions.map((definition, index) => (
 					<Bar
@@ -186,6 +254,7 @@ export function QueryBuilderBarChart({
 						dataKey={definition.chartKey}
 						fill={`var(--color-${definition.chartKey})`}
 						radius={stacked && index < seriesDefinitions.length - 1 ? [0, 0, 0, 0] : [4, 4, 0, 0]}
+						hide={hiddenSeries.has(definition.chartKey)}
 						isAnimationActive={false}
 						{...(stacked ? { stackId: "a" } : {})}
 					/>

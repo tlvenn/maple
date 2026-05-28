@@ -1,5 +1,16 @@
 import type { IconProps } from "./icon"
 
+const paths: ReadonlyArray<string> = [
+	"M19 21L9 21",
+	"M5 15H5.0001",
+	"M21 11L21 19",
+	"M7 11L7 19",
+	"M19 9L9 9",
+	"M17 5L17 7",
+	"M3 5L3 13",
+	"M15 3L5 3",
+]
+
 function CopyIcon({ size = 24, className, ...props }: IconProps) {
 	return (
 		<svg
@@ -12,20 +23,9 @@ function CopyIcon({ size = 24, className, ...props }: IconProps) {
 			aria-hidden="true"
 			{...props}
 		>
-			<path
-				d="M5 1H19"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeMiterlimit="10"
-				strokeLinecap="square"
-			/>
-			<path
-				d="M21 5H3V22H21V5Z"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeMiterlimit="10"
-				strokeLinecap="square"
-			/>
+			{paths.map((d, i) => (
+				<path key={i} d={d} stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+			))}
 		</svg>
 	)
 }

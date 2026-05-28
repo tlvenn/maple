@@ -158,7 +158,7 @@ export const FlowSpanNode = memo(function FlowSpanNode({ data }: FlowSpanNodePro
 	const kindLabel = SPAN_KIND_LABELS[span.spanKind] || span.spanKind.replace("SPAN_KIND_", "")
 
 	// Detect HTTP span info
-	const httpInfo = getHttpInfo(span.spanName, span.spanAttributes)
+	const httpInfo = getHttpInfo(span)
 	const isHttpRequest = !!httpInfo
 
 	// Detect cache span
@@ -231,7 +231,7 @@ export const FlowSpanNode = memo(function FlowSpanNode({ data }: FlowSpanNodePro
 											className={cn(
 												"px-2 py-0.5 rounded font-mono text-[11px] font-bold text-white shrink-0",
 												CACHE_OPERATION_COLORS[cacheInfo.operation.toUpperCase()] ||
-													"bg-[#5A5248]",
+													"bg-muted-foreground",
 											)}
 										>
 											{cacheInfo.operation.toUpperCase()}
@@ -271,7 +271,7 @@ export const FlowSpanNode = memo(function FlowSpanNode({ data }: FlowSpanNodePro
 									<span
 										className={cn(
 											"px-2 py-0.5 rounded font-mono text-[11px] font-bold text-white shrink-0",
-											HTTP_METHOD_COLORS[httpInfo.method] || "bg-[#5A5248]",
+											HTTP_METHOD_COLORS[httpInfo.method] || "bg-muted-foreground",
 										)}
 									>
 										{httpInfo.method}

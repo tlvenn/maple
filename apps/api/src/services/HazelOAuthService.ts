@@ -12,10 +12,10 @@ import {
 } from "@maple/domain/http"
 import { oauthAuthStates, oauthConnections, type OAuthAuthStateRow, type OAuthConnectionRow } from "@maple/db"
 import { and, eq, lt } from "drizzle-orm"
-import { Context, Effect, Layer, Option, Redacted, Schema } from "effect"
-import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey } from "./Crypto"
-import { Database, type DatabaseClient } from "./DatabaseLive"
-import { Env, type EnvShape } from "./Env"
+import { Clock, Context, Effect, Layer, Option, Redacted, Ref, Schema } from "effect"
+import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey } from "../lib/Crypto"
+import { Database, type DatabaseClient } from "../lib/DatabaseLive"
+import { Env, type EnvShape } from "../lib/Env"
 
 const HAZEL_PROVIDER = "hazel"
 const STATE_TTL_MS = 10 * 60_000 // 10 minutes
@@ -23,18 +23,18 @@ const REFRESH_LEEWAY_MS = 60_000 // 1 minute
 
 const TokenResponseSchema = Schema.Struct({
 	access_token: Schema.String,
-	token_type: Schema.optional(Schema.String),
-	expires_in: Schema.optional(Schema.Number),
-	refresh_token: Schema.optional(Schema.String),
-	scope: Schema.optional(Schema.String),
-	id_token: Schema.optional(Schema.String),
+	token_type: Schema.optionalKey(Schema.String),
+	expires_in: Schema.optionalKey(Schema.Number),
+	refresh_token: Schema.optionalKey(Schema.String),
+	scope: Schema.optionalKey(Schema.String),
+	id_token: Schema.optionalKey(Schema.String),
 })
 
 const UserInfoSchema = Schema.Struct({
 	sub: Schema.String,
-	email: Schema.optional(Schema.String),
-	email_verified: Schema.optional(Schema.Boolean),
-	name: Schema.optional(Schema.String),
+	email: Schema.optionalKey(Schema.String),
+	email_verified: Schema.optionalKey(Schema.Boolean),
+	name: Schema.optionalKey(Schema.String),
 })
 
 const HazelOrganizationsResponseSchema = Schema.Struct({
@@ -71,7 +71,7 @@ const HazelChannelWebhookResponseSchema = Schema.Struct({
 const DiscoveryDocumentSchema = Schema.Struct({
 	authorization_endpoint: Schema.String,
 	token_endpoint: Schema.String,
-	userinfo_endpoint: Schema.optional(Schema.String),
+	userinfo_endpoint: Schema.optionalKey(Schema.String),
 })
 
 const decodeTokenResponse = Schema.decodeUnknownEffect(TokenResponseSchema)
@@ -129,8 +129,12 @@ const toPersistenceError = (cause: unknown) =>
 		message: cause instanceof Error ? cause.message : "Hazel integration database error",
 	})
 
-const toUpstreamError = (message: string, status?: number) =>
-	new IntegrationsUpstreamError({ message, ...(status === undefined ? {} : { status }) })
+const toUpstreamError = (message: string, status?: number, cause?: unknown) =>
+	new IntegrationsUpstreamError({
+		message,
+		...(status === undefined ? {} : { status }),
+		...(cause === undefined ? {} : { cause }),
+	})
 
 export interface HazelOAuthAccessToken {
 	readonly accessToken: string
@@ -228,7 +232,7 @@ export interface HazelOAuthServiceShape {
 }
 
 export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelOAuthServiceShape>()(
-	"HazelOAuthService",
+	"@maple/api/services/HazelOAuthService",
 	{
 		make: Effect.gen(function* () {
 			const database = yield* Database
@@ -294,40 +298,46 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 					}
 					const json = yield* Effect.tryPromise({
 						try: () => response.json(),
-						catch: () => toUpstreamError("OIDC discovery returned a non-JSON response"),
+						catch: (cause) =>
+							toUpstreamError("OIDC discovery returned a non-JSON response", undefined, cause),
 					})
 					return yield* decodeDiscoveryDocument(json).pipe(
-						Effect.mapError(() =>
-							toUpstreamError("OIDC discovery returned an unexpected payload"),
+						Effect.mapError((cause) =>
+							toUpstreamError(
+								"OIDC discovery returned an unexpected payload",
+								undefined,
+								cause,
+							),
 						),
 					)
 				})
 
-			let cachedDiscovery: {
+			const cachedDiscovery = yield* Ref.make<{
 				url: string
 				doc: Schema.Schema.Type<typeof DiscoveryDocumentSchema>
-			} | null = null
+			} | null>(null)
 
 			const resolveConfig: Effect.Effect<
 				ResolvedHazelOAuthConfig,
 				IntegrationsValidationError | IntegrationsUpstreamError
 			> = Effect.gen(function* () {
 				const base = yield* resolveEnv(env)
-				if (cachedDiscovery && cachedDiscovery.url === base.discoveryUrl) {
+				const cached = yield* Ref.get(cachedDiscovery)
+				if (cached && cached.url === base.discoveryUrl) {
 					return {
 						...base,
-						authorizeUrl: cachedDiscovery.doc.authorization_endpoint,
-						tokenUrl: cachedDiscovery.doc.token_endpoint,
+						authorizeUrl: cached.doc.authorization_endpoint,
+						tokenUrl: cached.doc.token_endpoint,
 						userInfoUrl:
-							cachedDiscovery.doc.userinfo_endpoint ??
-							cachedDiscovery.doc.authorization_endpoint.replace(
+							cached.doc.userinfo_endpoint ??
+							cached.doc.authorization_endpoint.replace(
 								/\/oauth\/authorize$/,
 								"/oauth/userinfo",
 							),
 					}
 				}
 				const doc = yield* fetchDiscoveryDocument(base.discoveryUrl)
-				cachedDiscovery = { url: base.discoveryUrl, doc }
+				yield* Ref.set(cachedDiscovery, { url: base.discoveryUrl, doc })
 				return {
 					...base,
 					authorizeUrl: doc.authorization_endpoint,
@@ -345,7 +355,7 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 			) {
 				const config = yield* resolveConfig
 				const state = randomBytes(24).toString("base64url")
-				const currentTime = Date.now()
+				const currentTime = yield* Clock.currentTimeMillis
 				const callbackUrl = options.callbackUrl
 
 				yield* purgeExpiredStates(currentTime)
@@ -388,7 +398,7 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 							}),
 						)
 					}
-					if (row.expiresAt < Date.now()) {
+					if (row.expiresAt < (yield* Clock.currentTimeMillis)) {
 						yield* dbExecute((db) =>
 							db.delete(oauthAuthStates).where(eq(oauthAuthStates.state, state)),
 						)
@@ -434,7 +444,7 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 					if (!response.ok) {
 						const text = yield* Effect.tryPromise({
 							try: () => response.text(),
-							catch: () => toUpstreamError("Token exchange failed", response.status),
+							catch: (cause) => toUpstreamError("Token exchange failed", response.status, cause),
 						})
 						return yield* Effect.fail(
 							toUpstreamError(
@@ -445,11 +455,16 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 					}
 					const json = yield* Effect.tryPromise({
 						try: () => response.json(),
-						catch: () => toUpstreamError("Token exchange returned a non-JSON response"),
+						catch: (cause) =>
+							toUpstreamError("Token exchange returned a non-JSON response", undefined, cause),
 					})
 					return yield* decodeTokenResponse(json).pipe(
-						Effect.mapError(() =>
-							toUpstreamError("Token exchange returned an unexpected payload"),
+						Effect.mapError((cause) =>
+							toUpstreamError(
+								"Token exchange returned an unexpected payload",
+								undefined,
+								cause,
+							),
 						),
 					)
 				})
@@ -493,11 +508,16 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 					}
 					const json = yield* Effect.tryPromise({
 						try: () => response.json(),
-						catch: () => toUpstreamError("Token refresh returned a non-JSON response"),
+						catch: (cause) =>
+							toUpstreamError("Token refresh returned a non-JSON response", undefined, cause),
 					})
 					return yield* decodeTokenResponse(json).pipe(
-						Effect.mapError(() =>
-							toUpstreamError("Token refresh returned an unexpected payload"),
+						Effect.mapError((cause) =>
+							toUpstreamError(
+								"Token refresh returned an unexpected payload",
+								undefined,
+								cause,
+							),
 						),
 					)
 				})
@@ -526,10 +546,13 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 					}
 					const json = yield* Effect.tryPromise({
 						try: () => response.json(),
-						catch: () => toUpstreamError("Userinfo returned a non-JSON response"),
+						catch: (cause) =>
+							toUpstreamError("Userinfo returned a non-JSON response", undefined, cause),
 					})
 					return yield* decodeUserInfo(json).pipe(
-						Effect.mapError(() => toUpstreamError("Userinfo returned an unexpected payload")),
+						Effect.mapError((cause) =>
+							toUpstreamError("Userinfo returned an unexpected payload", undefined, cause),
+						),
 					)
 				})
 
@@ -549,8 +572,8 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 					? yield* encryptValue(tokenResponse.refresh_token)
 					: null
 				const expiresAt =
-					tokenResponse.expires_in != null ? Date.now() + tokenResponse.expires_in * 1000 : null
-				const currentTime = Date.now()
+					tokenResponse.expires_in != null ? (yield* Clock.currentTimeMillis) + tokenResponse.expires_in * 1000 : null
+				const currentTime = yield* Clock.currentTimeMillis
 				const orgId = stateRow.orgId as OrgId
 
 				const existing = yield* dbExecute((db) =>
@@ -649,8 +672,8 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 						? yield* encryptValue(tokenResponse.refresh_token)
 						: null
 					const expiresAt =
-						tokenResponse.expires_in != null ? Date.now() + tokenResponse.expires_in * 1000 : null
-					const currentTime = Date.now()
+						tokenResponse.expires_in != null ? (yield* Clock.currentTimeMillis) + tokenResponse.expires_in * 1000 : null
+					const currentTime = yield* Clock.currentTimeMillis
 					yield* dbExecute((db) =>
 						db
 							.update(oauthConnections)
@@ -674,7 +697,7 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 			) {
 				const config = yield* resolveConfig
 				const row = yield* requireConnection(orgId)
-				const isValid = row.expiresAt == null || row.expiresAt - Date.now() > REFRESH_LEEWAY_MS
+				const isValid = row.expiresAt == null || row.expiresAt - (yield* Clock.currentTimeMillis) > REFRESH_LEEWAY_MS
 
 				if (isValid) {
 					const accessToken = yield* decryptValue({
@@ -758,11 +781,20 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 				}
 				const json = yield* Effect.tryPromise({
 					try: () => response.json(),
-					catch: () => toUpstreamError("Hazel organizations returned a non-JSON response"),
+					catch: (cause) =>
+						toUpstreamError(
+							"Hazel organizations returned a non-JSON response",
+							undefined,
+							cause,
+						),
 				})
 				const decoded = yield* decodeOrganizationsResponse(json).pipe(
-					Effect.mapError(() =>
-						toUpstreamError("Hazel organizations returned an unexpected payload"),
+					Effect.mapError((cause) =>
+						toUpstreamError(
+							"Hazel organizations returned an unexpected payload",
+							undefined,
+							cause,
+						),
 					),
 				)
 				return decoded.data.map((o) => ({
@@ -816,10 +848,13 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 				}
 				const json = yield* Effect.tryPromise({
 					try: () => response.json(),
-					catch: () => toUpstreamError("Hazel channels returned a non-JSON response"),
+					catch: (cause) =>
+						toUpstreamError("Hazel channels returned a non-JSON response", undefined, cause),
 				})
 				const decoded = yield* decodeChannelsResponse(json).pipe(
-					Effect.mapError(() => toUpstreamError("Hazel channels returned an unexpected payload")),
+					Effect.mapError((cause) =>
+						toUpstreamError("Hazel channels returned an unexpected payload", undefined, cause),
+					),
 				)
 				return decoded.data.map((c) => ({
 					id: c.id,
@@ -895,11 +930,20 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 				}
 				const json = yield* Effect.tryPromise({
 					try: () => response.json(),
-					catch: () => toUpstreamError("Hazel webhook provisioning returned a non-JSON response"),
+					catch: (cause) =>
+						toUpstreamError(
+							"Hazel webhook provisioning returned a non-JSON response",
+							undefined,
+							cause,
+						),
 				})
 				return yield* decodeChannelWebhookResponse(json).pipe(
-					Effect.mapError(() =>
-						toUpstreamError("Hazel webhook provisioning returned an unexpected payload"),
+					Effect.mapError((cause) =>
+						toUpstreamError(
+							"Hazel webhook provisioning returned an unexpected payload",
+							undefined,
+							cause,
+						),
 					),
 				)
 			})
@@ -932,6 +976,4 @@ export class HazelOAuthService extends Context.Service<HazelOAuthService, HazelO
 	},
 ) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

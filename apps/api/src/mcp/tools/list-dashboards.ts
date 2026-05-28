@@ -3,7 +3,7 @@ import { formatTable } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
 
 export function registerListDashboardsTool(server: McpToolRegistrar) {
@@ -23,6 +23,7 @@ export function registerListDashboardsTool(server: McpToolRegistrar) {
 						new McpQueryError({
 							message: error.message,
 							pipe: "list_dashboards",
+							cause: error,
 						}),
 				),
 			)
@@ -33,6 +34,12 @@ export function registerListDashboardsTool(server: McpToolRegistrar) {
 				const lowerSearch = search.toLowerCase()
 				dashboards = dashboards.filter((d) => d.name.toLowerCase().includes(lowerSearch))
 			}
+
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				search: search ?? "none",
+				resultCount: dashboards.length,
+			})
 
 			const lines: string[] = [
 				`## Dashboards`,

@@ -1,13 +1,14 @@
 import { McpQueryError, optionalStringParam, requiredStringParam, type McpToolRegistrar } from "./types"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
 import {
 	DashboardTemplateParameterKey,
 	PortableDashboardDocument,
 } from "@maple/domain/http"
 import { DASHBOARD_TEMPLATES, getTemplate } from "@/dashboard-templates"
+import { formatValidationSummary, inspectWidgetsAfterMutation } from "../lib/inspect-widget"
 import {
 	CHART_DISPLAY_AREA,
 	chartDisplayForMetric,
@@ -17,49 +18,13 @@ import {
 } from "@/dashboard-templates/helpers"
 import type { TemplateParameterValues, WidgetDef } from "@/dashboard-templates"
 
-const decodePortableDashboard = Schema.decodeUnknownSync(PortableDashboardDocument)
+const decodePortableDashboard = Schema.decodeUnknownEffect(PortableDashboardDocument)
 const PortableDashboardFromJson = Schema.fromJsonString(PortableDashboardDocument)
 const decodeParamKey = Schema.decodeUnknownSync(DashboardTemplateParameterKey)
 
 // ---------------------------------------------------------------------------
-// Backwards-compat: MCP accepts snake_case template names (service_health, etc.).
-// New registry uses kebab-case (service-health). Translate at the boundary.
-// ---------------------------------------------------------------------------
-
-const TEMPLATE_NAME_ALIASES: Record<string, string> = {
-	service_health: "service-health",
-	error_tracking: "error-tracking",
-	platform_overview: "platform-overview",
-	http_endpoints: "http-endpoints",
-	top_errors: "top-errors",
-	metric_overview: "metric-overview",
-	blank: "blank",
-}
-
-function resolveTemplateId(name: string): string {
-	return TEMPLATE_NAME_ALIASES[name] ?? name
-}
-
-// ---------------------------------------------------------------------------
 // Simplified widget specs path — MCP-only, parses JSON tool input
 // ---------------------------------------------------------------------------
-
-const UNIT_ALIASES: Record<string, string> = {
-	ms: "duration_ms",
-	milliseconds: "duration_ms",
-	us: "duration_us",
-	microseconds: "duration_us",
-	s: "duration_s",
-	seconds: "duration_s",
-	ns: "duration_ns",
-	nanoseconds: "duration_ns",
-	"%": "percent",
-	short: "number",
-}
-
-function normalizeUnit(unit: string): string {
-	return UNIT_ALIASES[unit] ?? unit
-}
 
 function inferUnit(metric: string): string {
 	if (["avg_duration", "p50_duration", "p95_duration", "p99_duration"].includes(metric)) return "duration_ms"
@@ -73,19 +38,11 @@ const VALID_GROUP_BY: Record<string, readonly string[]> = {
 	metrics: ["service.name", "none"],
 }
 
-const GROUP_BY_ALIASES: Record<string, string> = {
-	service: "service.name",
-	span_name: "span.name",
-	status_code: "status.code",
-	http_method: "http.method",
-}
-
 function validateGroupBy(rawGroupBy: string, source: string, widgetTitle: string): string | null {
-	const resolved = GROUP_BY_ALIASES[rawGroupBy] ?? rawGroupBy
 	const validOptions = VALID_GROUP_BY[source] ?? []
 
-	if (validOptions.includes(resolved)) return null
-	if (source === "metrics" && resolved.startsWith("attr.") && resolved.length > 5) return null
+	if (validOptions.includes(rawGroupBy)) return null
+	if (source === "metrics" && rawGroupBy.startsWith("attr.") && rawGroupBy.length > 5) return null
 
 	const optsList = [...validOptions, ...(source === "metrics" ? ["attr.<key>"] : [])]
 	return `Widget "${widgetTitle}": invalid group_by "${rawGroupBy}" for source=${source}. Valid: ${optsList.join(", ")}. ${source === "metrics" ? "Example: attr.signal" : ""}`
@@ -128,10 +85,9 @@ function simpleSpecToWidget(
 
 	let groupBy: string[]
 	if (spec.group_by) {
-		const resolved = GROUP_BY_ALIASES[spec.group_by] ?? spec.group_by
 		const validationError = validateGroupBy(spec.group_by, source, spec.title)
 		if (validationError) return validationError
-		groupBy = [resolved]
+		groupBy = [spec.group_by]
 	} else {
 		groupBy = viz === "stat" ? [] : ["service.name"]
 	}
@@ -148,7 +104,7 @@ function simpleSpecToWidget(
 	})
 
 	const display: Record<string, unknown> = { title: spec.title }
-	display.unit = spec.unit ? normalizeUnit(spec.unit) : inferUnit(metric)
+	display.unit = spec.unit ?? inferUnit(metric)
 
 	if (viz === "table") {
 		if (groupBy.length === 0 || groupBy[0] === "none") {
@@ -343,15 +299,15 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 			"Simplified widgets (provide name + widgets JSON array, same params as query_data):\n" +
 			'  Each: { title, visualization?: "chart"|"stat"|"table"|"list", source: "traces"|"logs"|"metrics", metric?, metric_name?, metric_type?, service_name?, group_by?, unit? }\n' +
 			"  group_by: traces=service.name|span.name|status.code|http.method|none; logs=service.name|severity|none; metrics=service.name|attr.<key>|none\n" +
-			"  Aliases accepted: service, span_name, status_code, http_method\n" +
 			"  Note: table requires a group_by field. list shows recent traces or logs.\n" +
 			"Custom JSON: provide dashboard_json with full widget definitions (use get_dashboard to see schema). " +
-			"For raw widget JSON, trace queries MUST include `metricName: \"\"`, `metricType: \"gauge\"`, and `whereClause` is a custom grammar (use `exists` not SQL `IS NULL`). See `maple://instructions` for the full widget JSON shape.",
+			"For raw widget JSON, trace/log queries omit the metric-only fields (`metricName`/`metricType`/`isMonotonic`); `whereClause` is a custom grammar (use `exists` not SQL `IS NULL`). See `maple://instructions` for the full widget JSON shape.\n\n" +
+			"After persistence, automatically validates every inspectable widget (custom_query_builder_timeseries/breakdown) and includes a per-widget verdict (looks_healthy/suspicious/broken) + sanity flags in the response. " +
+			"Pass `validate: \"false\"` to skip validation when creating dashboards with many widgets.",
 		Schema.Struct({
 			name: requiredStringParam("Dashboard name"),
 			template: optionalStringParam(
-				"Template ID. Snake_case names like service_health are mapped to kebab-case (service-health). " +
-					"Default: service-health (if no widgets/dashboard_json).",
+				"Template ID (kebab-case, e.g. `service-health`). Default: service-health (if no widgets/dashboard_json).",
 			),
 			service_name: optionalStringParam("Scope template widgets to a specific service"),
 			time_range: optionalStringParam("Time range: 1h, 6h, 24h, or 7d (default: 1h)"),
@@ -367,6 +323,9 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 			),
 			dashboard_json: optionalStringParam(
 				"Full dashboard JSON string for complete control over widget configuration.",
+			),
+			validate: optionalStringParam(
+				"Set to 'false' to skip automatic data validation on the created widgets. Default: validate.",
 			),
 		}),
 		Effect.fn("McpTool.createDashboard")(function* (params) {
@@ -399,10 +358,11 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 					params.dashboard_json,
 				).pipe(
 					Effect.mapError(
-						() =>
+						(cause) =>
 							new McpQueryError({
 								message: "Invalid dashboard JSON",
 								pipe: "create_dashboard",
+								cause,
 							}),
 					),
 				)
@@ -417,23 +377,23 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 
 				const timeRangeValue = TIME_RANGE_MAP[params.time_range ?? "1h"] ?? "1h"
 
-				portable = yield* Effect.try({
-					try: () =>
-						decodePortableDashboard({
-							name: params.name,
-							...(params.description && { description: params.description }),
-							timeRange: { type: "relative", value: timeRangeValue },
-							widgets: result,
-						}),
-					catch: (error) =>
-						new McpQueryError({
-							message: `Widget generation error: ${String(error)}`,
-							pipe: "create_dashboard",
-						}),
-				})
+				portable = yield* decodePortableDashboard({
+					name: params.name,
+					...(params.description && { description: params.description }),
+					timeRange: { type: "relative", value: timeRangeValue },
+					widgets: result,
+				}).pipe(
+					Effect.mapError(
+						(error) =>
+							new McpQueryError({
+								message: `Widget generation error: ${String(error)}`,
+								pipe: "create_dashboard",
+								cause: error,
+							}),
+					),
+				)
 			} else if (templateName) {
-				const resolvedId = resolveTemplateId(templateName)
-				const template = getTemplate(resolvedId)
+				const template = getTemplate(templateName)
 				if (!template) {
 					return {
 						isError: true,
@@ -487,6 +447,7 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 						new McpQueryError({
 							message: `Template generation error: ${String(error)}`,
 							pipe: "create_dashboard",
+							cause: error,
 						}),
 				})
 			} else {
@@ -514,9 +475,18 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 						new McpQueryError({
 							message: error.message,
 							pipe: "create_dashboard",
+							cause: error,
 						}),
 				),
 			)
+
+			const validate = params.validate !== "false"
+			const validation = yield* inspectWidgetsAfterMutation({
+				tenant,
+				dashboard,
+				widgetIds: dashboard.widgets.map((w) => w.id),
+				validate,
+			})
 
 			const lines: string[] = [
 				`## Dashboard Created`,
@@ -531,9 +501,14 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 			}
 
 			if (templateName && templateName !== "custom") {
-				lines.push(`Template: ${resolveTemplateId(templateName)}`)
+				lines.push(`Template: ${templateName}`)
 			} else if (params.widgets) {
 				lines.push(`Source: simplified widget specs`)
+			}
+
+			const validationBlock = formatValidationSummary(validation, false)
+			if (validationBlock) {
+				lines.push("", validationBlock)
 			}
 
 			return {
@@ -549,6 +524,7 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 							createdAt: dashboard.createdAt,
 							updatedAt: dashboard.updatedAt,
 						},
+						...(validation.ran && { validation }),
 					},
 				}),
 			}

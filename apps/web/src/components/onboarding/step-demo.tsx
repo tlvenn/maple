@@ -17,7 +17,7 @@ import {
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import { DemoSeedRequest } from "@maple/domain/http"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
-import { getServiceOverviewResultAtom } from "@/lib/services/atoms/tinybird-query-atoms"
+import { getServiceOverviewResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 import { cn } from "@maple/ui/utils"
 
 const CARDS_VARIANTS = {
@@ -58,11 +58,17 @@ export function StepDemo({
 	const overviewResult = useAtomValue(
 		getServiceOverviewResultAtom({ data: { startTime, endTime } }),
 	)
+	// Only a *resolved success* tells us whether the backend already has data.
+	// A failure must NOT be silently read as "empty" — otherwise a transient
+	// fetch error would offer to seed demo data on top of a populated backend.
 	const services = Result.isSuccess(overviewResult) ? overviewResult.value.data : []
 	const realServices = services.filter(
 		(s) => !(typeof s.serviceName === "string" && s.serviceName.startsWith("demo-")),
 	)
 	const hasExistingData = realServices.length > 0
+	// Gate the demo-seed offer on a known-empty backend. If the lookup failed we
+	// can't be sure it's empty, so we surface the error instead of seeding.
+	const overviewFailed = Result.isFailure(overviewResult)
 
 	async function handleSeed() {
 		setIsSeeding(true)
@@ -88,6 +94,50 @@ export function StepDemo({
 		onSkipDemo()
 		onComplete()
 		navigate({ to: "/" })
+	}
+
+	if (overviewFailed) {
+		// We couldn't determine whether the backend already has data. Don't offer
+		// to seed demo data (it could land on top of real telemetry); send the
+		// user to connect their own app instead.
+		return (
+			<div className="flex-1 flex flex-col items-center justify-center px-6 py-12 overflow-auto">
+				<div className="w-full max-w-md flex flex-col gap-8">
+					<div className="text-center space-y-3">
+						<span className="text-[11px] font-semibold uppercase tracking-widest text-destructive">
+							Couldn't check your workspace
+						</span>
+						<h1 className="text-3xl font-semibold tracking-tight">
+							Let's connect your app
+						</h1>
+						<p className="text-muted-foreground text-[15px] leading-relaxed">
+							We couldn't load your existing services right now, so we'll skip the demo and head
+							straight to setup. You can always add demo data later from settings.
+						</p>
+					</div>
+
+					<Card className="border-primary/40 bg-primary/[0.02]">
+						<CardContent className="p-6 flex flex-col gap-5">
+							<div className="flex items-center gap-3">
+								<div className="flex size-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-primary/5 ring-1 ring-inset ring-primary/20 text-primary">
+									<CodeIcon size={18} />
+								</div>
+								<div>
+									<h3 className="text-sm font-semibold tracking-tight">Connect my app</h3>
+									<p className="text-xs text-muted-foreground">
+										Pick a plan and grab your ingest key
+									</p>
+								</div>
+							</div>
+							<Button size="lg" onClick={handleSkip} className="gap-2 w-full">
+								Continue to setup
+								<RocketIcon size={14} />
+							</Button>
+						</CardContent>
+					</Card>
+				</div>
+			</div>
+		)
 	}
 
 	if (hasExistingData) {
@@ -148,6 +198,14 @@ export function StepDemo({
 				</div>
 
 				<motion.div
+					initial={{ opacity: 0, y: 12 }}
+					animate={{ opacity: 1, y: 0 }}
+					transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+				>
+					<DemoPreview />
+				</motion.div>
+
+				<motion.div
 					variants={CARDS_VARIANTS}
 					initial="hidden"
 					animate="show"
@@ -196,6 +254,57 @@ export function StepDemo({
 						</Button>
 					</div>
 				)}
+			</div>
+		</div>
+	)
+}
+
+const PREVIEW_SPANS: { label: string; offset: number; width: number; tone: "root" | "ok" | "slow" }[] = [
+	{ label: "GET /checkout", offset: 0, width: 97, tone: "root" },
+	{ label: "auth.verify", offset: 5, width: 19, tone: "ok" },
+	{ label: "db.query orders", offset: 27, width: 16, tone: "ok" },
+	{ label: "payments.charge", offset: 46, width: 47, tone: "slow" },
+	{ label: "cache.write", offset: 93, width: 5, tone: "ok" },
+]
+
+function DemoPreview() {
+	return (
+		<div className="rounded-xl border bg-card/60 overflow-hidden">
+			<div className="flex items-center justify-between border-b px-4 py-2.5">
+				<div className="flex items-center gap-2">
+					<span className="size-2 rounded-full bg-primary" />
+					<span className="text-xs font-medium">demo-api · trace waterfall</span>
+				</div>
+				<span className="text-[10px] font-semibold uppercase tracking-widest text-destructive">
+					Latency spike
+				</span>
+			</div>
+			<div className="space-y-1.5 p-4">
+				{PREVIEW_SPANS.map((span) => (
+					<div key={span.label} className="flex items-center gap-3">
+						<span className="w-28 shrink-0 truncate text-[11px] text-muted-foreground">
+							{span.label}
+						</span>
+						<div className="relative h-3 flex-1 rounded bg-muted/40">
+							<div
+								className={cn(
+									"absolute inset-y-0 rounded",
+									span.tone === "slow"
+										? "bg-destructive/70"
+										: span.tone === "root"
+											? "bg-primary"
+											: "bg-primary/45",
+								)}
+								style={{ left: `${span.offset}%`, width: `${span.width}%` }}
+							/>
+						</div>
+					</div>
+				))}
+			</div>
+			<div className="border-t px-4 py-2.5">
+				<p className="text-[11px] text-muted-foreground">
+					This is what you'll explore — traces, logs, and errors across four demo services.
+				</p>
 			</div>
 		</div>
 	)

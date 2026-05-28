@@ -1,7 +1,7 @@
 import { formatDuration } from "@/lib/format"
 import { getServiceLegendColor, calculateSelfTime } from "@maple/ui/colors"
 import { getHttpInfo } from "@maple/ui/lib/http"
-import type { SpanNode } from "@/api/tinybird/traces"
+import type { SpanNode } from "@/api/warehouse/traces"
 
 interface TraceTimelineTooltipProps {
 	span: SpanNode
@@ -35,7 +35,7 @@ export function TraceTimelineTooltipContent({
 		? new Date(span.startTime).getTime() - new Date(traceStartTime).getTime()
 		: null
 
-	const httpInfo = getHttpInfo(span.spanName, span.spanAttributes)
+	const httpInfo = getHttpInfo(span)
 
 	return (
 		<div className="space-y-2 font-mono text-xs">

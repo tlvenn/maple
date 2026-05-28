@@ -3,7 +3,7 @@ import { formatTable } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { AlertsService } from "@/services/AlertsService"
 
 const comparatorLabel: Record<string, string> = {
@@ -40,6 +40,7 @@ export function registerListAlertRulesTool(server: McpToolRegistrar) {
 						new McpQueryError({
 							message: error.message,
 							pipe: "list_alert_rules",
+							cause: error,
 						}),
 				),
 			)
@@ -64,6 +65,13 @@ export function registerListAlertRulesTool(server: McpToolRegistrar) {
 			if (enabled_only) {
 				rules = rules.filter((r) => r.enabled)
 			}
+
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				signalType: signal_type ?? "all",
+				severity: severity ?? "all",
+				resultCount: rules.length,
+			})
 
 			const lines: string[] = [
 				`## Alert Rules`,

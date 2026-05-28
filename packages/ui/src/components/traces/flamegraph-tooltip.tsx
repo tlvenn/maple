@@ -35,7 +35,7 @@ export function FlamegraphTooltipContent({
 		? new Date(span.startTime).getTime() - new Date(traceStartTime).getTime()
 		: null
 
-	const httpInfo = getHttpInfo(span.spanName, span.spanAttributes)
+	const httpInfo = getHttpInfo(span)
 
 	return (
 		<div className="space-y-2 font-mono text-xs">

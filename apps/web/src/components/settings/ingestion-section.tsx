@@ -23,9 +23,10 @@ import {
 } from "@maple/ui/components/ui/alert-dialog"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Separator } from "@maple/ui/components/ui/separator"
-import { AlertWarningIcon, CheckIcon, CopyIcon, EyeIcon, ShieldIcon } from "@/components/icons"
+import { AlertWarningIcon, ArrowPathIcon, CheckIcon, CopyIcon, EyeIcon, ShieldIcon } from "@/components/icons"
 import { ingestUrl } from "@/lib/services/common/ingest-url"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { AttributeMappingsSection } from "./attribute-mappings-section"
 
 function maskKey(key: string): string {
 	if (key.length <= 18) return key
@@ -105,22 +106,7 @@ function ApiKeyRow({
 						className="text-destructive hover:text-destructive"
 						disabled={disabled}
 					>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							viewBox="0 0 24 24"
-							width={14}
-							height={14}
-							fill="none"
-							stroke="currentColor"
-							strokeWidth={2}
-							strokeLinecap="round"
-							strokeLinejoin="round"
-						>
-							<path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-							<path d="M3 3v5h5" />
-							<path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-							<path d="M16 16h5v5" />
-						</svg>
+						<ArrowPathIcon size={14} />
 					</InputGroupButton>
 				</InputGroupAddon>
 			</InputGroup>
@@ -219,6 +205,7 @@ export function IngestionSection() {
 
 	return (
 		<>
+			<div className="space-y-4">
 			<div className="grid grid-cols-2 gap-4">
 				<Card>
 					<CardHeader>
@@ -294,6 +281,9 @@ export function IngestionSection() {
 						/>
 					</CardContent>
 				</Card>
+			</div>
+
+			<AttributeMappingsSection />
 			</div>
 
 			<AlertDialog open={regenerateDialogOpen} onOpenChange={setRegenerateDialogOpen}>

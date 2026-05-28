@@ -13,7 +13,8 @@ export interface SystemHealthData {
 	affectedTracesCount: number
 	latency: { p50Ms: number; p95Ms: number }
 	topErrors: Array<{
-		errorType: string
+		fingerprintHash: string
+		label: string
 		count: number
 		affectedServicesCount: number
 	}>
@@ -71,7 +72,8 @@ export interface FindSlowTracesData {
 }
 
 export interface ErrorTypeRow {
-	errorType: string
+	fingerprintHash: string
+	label: string
 	count: number
 	affectedServicesCount: number
 	lastSeen: string
@@ -99,7 +101,7 @@ export interface ErrorDetailTrace {
 
 export interface ErrorDetailData {
 	timeRange: { start: string; end: string }
-	errorType: string
+	fingerprintHash: string
 	traces: ErrorDetailTrace[]
 }
 
@@ -181,7 +183,8 @@ export interface DiagnoseServiceData {
 		apdex: number
 	}
 	topErrors: Array<{
-		errorType: string
+		fingerprintHash: string
+		label: string
 		count: number
 	}>
 	recentTraces: TraceRow[]
@@ -302,9 +305,9 @@ export interface AlertRuleDetailRow extends AlertRuleRow {
 	metricType: string | null
 	metricAggregation: string | null
 	apdexThresholdMs: number | null
-	queryDataSource: string | null
-	queryAggregation: string | null
-	queryWhereClause: string | null
+	queryBuilderDraft: Record<string, unknown> | null
+	rawQuerySql: string | null
+	rawQueryReducer: string | null
 }
 
 export interface GetAlertRuleData {
@@ -389,6 +392,7 @@ export interface GetDashboardData {
 
 export interface CreateDashboardData {
 	dashboard: DashboardRow
+	validation?: WidgetInspectionSummary
 }
 
 export interface UpdateDashboardData {
@@ -398,11 +402,13 @@ export interface UpdateDashboardData {
 export interface AddDashboardWidgetData {
 	dashboard: DashboardRow
 	widgetId: string
+	validation?: WidgetInspectionSummary
 }
 
 export interface UpdateDashboardWidgetData {
 	dashboard: DashboardRow
 	widgetId: string
+	validation?: WidgetInspectionSummary
 }
 
 export interface RemoveDashboardWidgetData {
@@ -521,6 +527,7 @@ export type InspectChartFlag =
 	| "CARDINALITY_EXPLOSION"
 	| "UNIT_MISMATCH"
 	| "BROKEN_BREAKDOWN"
+	| "BUILDER_WARNINGS"
 
 export type InspectChartVerdict = "looks_healthy" | "suspicious" | "broken"
 
@@ -558,6 +565,33 @@ export interface InspectChartQueryResult {
 	stats: InspectChartQueryStats
 	reducedValue?: number | null
 	flags: InspectChartFlag[]
+	builderWarnings?: string[]
+}
+
+export type WidgetInspectionVerdict = InspectChartVerdict | "unsupported" | "skipped" | "error"
+
+export interface WidgetInspectionEntry {
+	widgetId: string
+	title?: string
+	visualization: string
+	verdict: WidgetInspectionVerdict
+	flags: InspectChartFlag[]
+	note?: string
+}
+
+export interface WidgetInspectionSummary {
+	ran: boolean
+	inspected: WidgetInspectionEntry[]
+	healthyCount: number
+	suspiciousCount: number
+	brokenCount: number
+	skippedCount: number
+	capped: boolean
+	timeRange?: {
+		startTime: string
+		endTime: string
+		source: "override" | "dashboard" | "fallback"
+	}
 }
 
 export interface InspectChartDataData {
@@ -705,7 +739,36 @@ export interface UpdateErrorNotificationPolicyData {
 	severity: string
 }
 
+export interface SearchSessionsData {
+	timeRange: { start: string; end: string }
+	sessions: ReadonlyArray<{
+		sessionId: string
+		matchCount: number
+		firstTimestamp: string
+		lastTimestamp: string
+	}>
+}
+
+export interface GetSessionTranscriptData {
+	sessionId: string
+	events: ReadonlyArray<{
+		timestamp: string
+		type: string
+		url: string
+		traceId: string
+		level: string
+		message: string
+		targetSelector: string
+		netMethod: string
+		netUrl: string
+		netStatus: number
+		netDurationMs: number
+	}>
+}
+
 export type StructuredToolOutput =
+	| { tool: "search_sessions"; data: SearchSessionsData }
+	| { tool: "get_session_transcript"; data: GetSessionTranscriptData }
 	| { tool: "search_traces"; data: SearchTracesData }
 	| { tool: "find_slow_traces"; data: FindSlowTracesData }
 	| { tool: "find_errors"; data: FindErrorsData }

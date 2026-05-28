@@ -33,8 +33,8 @@ import {
 } from "@maple/db"
 import { eq } from "drizzle-orm"
 import { Context, Effect, Layer, Option, Redacted, Schema } from "effect"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 
 const ROOT_ROLE = Schema.decodeUnknownSync(RoleName)("root")
 const ORG_ADMIN_ROLE = Schema.decodeUnknownSync(RoleName)("org:admin")
@@ -88,7 +88,7 @@ export interface OrganizationServiceShape {
 }
 
 export class OrganizationService extends Context.Service<OrganizationService, OrganizationServiceShape>()(
-	"OrganizationService",
+	"@maple/api/services/OrganizationService",
 	{
 		make: Effect.gen(function* () {
 			const database = yield* Database
@@ -108,11 +108,14 @@ export class OrganizationService extends Context.Service<OrganizationService, Or
 			const purgeOrgScopedRows = Effect.fn("OrganizationService.purgeOrgScopedRows")(function* (
 				orgId: OrgId,
 			) {
-				for (const table of ORG_SCOPED_TABLES) {
-					yield* database
-						.execute((db) => db.delete(table).where(eq(table.orgId, orgId)))
-						.pipe(Effect.mapError(toPersistenceError))
-				}
+				yield* Effect.forEach(
+					ORG_SCOPED_TABLES,
+					(table) =>
+						database
+							.execute((db) => db.delete(table).where(eq(table.orgId, orgId)))
+							.pipe(Effect.mapError(toPersistenceError)),
+					{ discard: true },
+				)
 			})
 
 			const deleteClerkOrganization = Effect.fn("OrganizationService.deleteClerkOrganization")(
@@ -144,13 +147,11 @@ export class OrganizationService extends Context.Service<OrganizationService, Or
 
 			return {
 				delete: deleteOrganization,
-			}
+			} satisfies OrganizationServiceShape
 		}),
 	},
 ) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 
 	static readonly delete = (orgId: OrgId, roles: ReadonlyArray<RoleName>) =>
 		this.use((service) => service.delete(orgId, roles))

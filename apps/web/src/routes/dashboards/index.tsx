@@ -4,7 +4,10 @@ import { toast } from "sonner"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { DashboardList } from "@/components/dashboard-builder/list/dashboard-list"
-import { parsePortableDashboardJson } from "@/components/dashboard-builder/portable-dashboard"
+import {
+	isPersesDashboardJson,
+	parsePortableDashboardJson,
+} from "@/components/dashboard-builder/portable-dashboard"
 import { useDashboardStore } from "@/hooks/use-dashboard-store"
 import { useDashboardPreferences } from "@/hooks/use-dashboard-preferences"
 import { GridIcon, PlusIcon, UploadIcon } from "@/components/icons"
@@ -24,6 +27,7 @@ function DashboardListPage() {
 		persistenceError,
 		createDashboard,
 		importDashboard,
+		importPersesDashboard,
 		deleteDashboard,
 	} = useDashboardStore()
 
@@ -53,7 +57,26 @@ function DashboardListPage() {
 		reader.onload = () => {
 			void (async () => {
 				try {
-					const imported = parsePortableDashboardJson(reader.result as string)
+					const raw = reader.result as string
+					const parsed = JSON.parse(raw)
+					if (isPersesDashboardJson(parsed)) {
+						const { dashboard, warnings } = await importPersesDashboard(parsed)
+						navigate({ to: "/dashboards/$dashboardId", params: { dashboardId: dashboard.id } })
+						toast.success(`Dashboard "${dashboard.name}" imported from Perses`)
+						if (warnings.length > 0) {
+							const preview = warnings.slice(0, 3).join("\n")
+							const suffix = warnings.length > 3 ? `\n+${warnings.length - 3} more` : ""
+							toast.warning(
+								`Imported with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`,
+								{
+									description: `${preview}${suffix}`,
+								},
+							)
+						}
+						return
+					}
+
+					const imported = parsePortableDashboardJson(raw)
 					const dashboard = await importDashboard(imported)
 					navigate({ to: "/dashboards/$dashboardId", params: { dashboardId: dashboard.id } })
 					toast.success(`Dashboard "${dashboard.name}" imported`)
@@ -117,6 +140,7 @@ function DashboardListPage() {
 						ref={importInputRef}
 						type="file"
 						accept=".json"
+						aria-label="Import dashboard JSON file"
 						className="hidden"
 						onChange={handleImport}
 					/>

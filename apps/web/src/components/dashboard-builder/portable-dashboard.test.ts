@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { parsePortableDashboardJson, toPortableDashboard } from "./portable-dashboard"
+import { isPersesDashboardJson, parsePortableDashboardJson, toPortableDashboard } from "./portable-dashboard"
 
 describe("portable-dashboard", () => {
 	it("exports the canonical portable dashboard payload", () => {
@@ -56,5 +56,11 @@ describe("portable-dashboard", () => {
 				}),
 			),
 		).toThrow()
+	})
+
+	it("detects Perses dashboard resources", () => {
+		expect(isPersesDashboardJson({ kind: "Dashboard", spec: { panels: {} } })).toBe(true)
+		expect(isPersesDashboardJson({ kind: "Datasource", spec: {} })).toBe(false)
+		expect(isPersesDashboardJson({ name: "Maple dashboard", widgets: [] })).toBe(false)
 	})
 })

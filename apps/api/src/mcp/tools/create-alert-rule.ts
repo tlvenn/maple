@@ -6,13 +6,14 @@ import {
 	requiredStringParam,
 	type McpToolRegistrar,
 } from "./types"
-import { Effect, Schema } from "effect"
+import { Effect, Match, Option, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { AlertsService } from "@/services/AlertsService"
 import { AlertRuleUpsertRequest } from "@maple/domain/http"
 
-const decodeAlertRuleRequest = Schema.decodeUnknownSync(AlertRuleUpsertRequest)
+const decodeAlertRuleRequest = Schema.decodeUnknownEffect(AlertRuleUpsertRequest)
+const decodeJsonValue = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 
 const splitCsv = (value: string): string[] =>
 	value
@@ -88,9 +89,9 @@ interface CreateAlertRuleParams {
 	metric_type?: string
 	metric_aggregation?: string
 	apdex_threshold_ms?: number
-	query_data_source?: string
-	query_aggregation?: string
-	query_where_clause?: string
+	query_builder_draft?: string
+	raw_query_sql?: string
+	raw_query_reducer?: string
 }
 
 function buildAlertRuleRequest(
@@ -131,29 +132,57 @@ function buildAlertRuleRequest(
 			error: "threshold is required (or use a template).\n\nExample:\n  threshold=0.05 (for 5% error rate)",
 		}
 
-	if (signalType === "metric") {
-		if (!params.metric_name || !params.metric_type || !params.metric_aggregation) {
-			return {
-				error: 'signal_type=metric requires metric_name, metric_type, and metric_aggregation. Use list_metrics to discover available metrics.\n\nExample:\n  signal_type="metric" metric_name="http.server.duration" metric_type="histogram" metric_aggregation="avg"',
+	// Signal-type-specific validation. Each branch either rejects with an error
+	// or, for builder_query, parses the draft JSON. Non-special signal types
+	// (error_rate, p95_latency, …) fall through with no extra checks.
+	const signalValidation = Match.value(signalType).pipe(
+		Match.when("metric", (): { error: string } | { draft?: unknown } => {
+			if (!params.metric_name || !params.metric_type || !params.metric_aggregation) {
+				return {
+					error: 'signal_type=metric requires metric_name, metric_type, and metric_aggregation. Use list_metrics to discover available metrics.\n\nExample:\n  signal_type="metric" metric_name="http.server.duration" metric_type="histogram" metric_aggregation="avg"',
+				}
 			}
-		}
+			return {}
+		}),
+		Match.when("apdex", (): { error: string } | { draft?: unknown } => {
+			if (!params.apdex_threshold_ms && !templateDefaults.apdexThresholdMs) {
+				return {
+					error: 'signal_type=apdex requires apdex_threshold_ms (milliseconds defining satisfactory response time).\n\nExample:\n  signal_type="apdex" apdex_threshold_ms=500 comparator="lt" threshold=0.8',
+				}
+			}
+			return {}
+		}),
+		Match.when("builder_query", (): { error: string } | { draft?: unknown } => {
+			if (!params.query_builder_draft) {
+				return {
+					error: 'signal_type=builder_query requires query_builder_draft: a JSON string of a query-builder draft (the same shape dashboard custom-query widgets use). Example draft: {"id":"a","name":"A","dataSource":"traces","aggregation":"error_rate","whereClause":"","groupBy":["none"]}',
+				}
+			}
+			const parsed = decodeJsonValue(params.query_builder_draft)
+			if (Option.isNone(parsed)) {
+				return { error: "query_builder_draft must be valid JSON" }
+			}
+			return { draft: parsed.value }
+		}),
+		Match.when("raw_query", (): { error: string } | { draft?: unknown } => {
+			if (!params.raw_query_sql) {
+				return {
+					error: 'signal_type=raw_query requires raw_query_sql: ClickHouse SQL returning a numeric `value` column (optional `group`, `samples` columns). Must reference $__orgFilter and may use $__timeFilter(col), $__startTime, $__endTime, $__interval_s.',
+				}
+			}
+			if (!params.raw_query_sql.includes("$__orgFilter")) {
+				return { error: "raw_query_sql must reference $__orgFilter for org scoping" }
+			}
+			return {}
+		}),
+		Match.orElse((): { error: string } | { draft?: unknown } => ({})),
+	)
+
+	if ("error" in signalValidation) {
+		return { error: signalValidation.error }
 	}
 
-	if (signalType === "apdex") {
-		if (!params.apdex_threshold_ms && !templateDefaults.apdexThresholdMs) {
-			return {
-				error: 'signal_type=apdex requires apdex_threshold_ms (milliseconds defining satisfactory response time).\n\nExample:\n  signal_type="apdex" apdex_threshold_ms=500 comparator="lt" threshold=0.8',
-			}
-		}
-	}
-
-	if (signalType === "query") {
-		if (!params.query_data_source || !params.query_aggregation) {
-			return {
-				error: 'signal_type=query requires query_data_source and query_aggregation.\n\nExample:\n  signal_type="query" query_data_source="traces" query_aggregation="count" comparator="gt" threshold=100',
-			}
-		}
-	}
+	const queryBuilderDraft = signalValidation.draft
 
 	const request: Record<string, unknown> = {
 		name: params.name,
@@ -192,9 +221,9 @@ function buildAlertRuleRequest(
 	if (params.apdex_threshold_ms !== undefined) request.apdexThresholdMs = params.apdex_threshold_ms
 
 	// Query-specific fields
-	if (params.query_data_source) request.queryDataSource = params.query_data_source
-	if (params.query_aggregation) request.queryAggregation = params.query_aggregation
-	if (params.query_where_clause) request.queryWhereClause = params.query_where_clause
+	if (queryBuilderDraft !== undefined) request.queryBuilderDraft = queryBuilderDraft
+	if (params.raw_query_sql) request.rawQuerySql = params.raw_query_sql
+	if (params.raw_query_reducer) request.rawQueryReducer = params.raw_query_reducer
 
 	return { request }
 }
@@ -232,7 +261,7 @@ export function registerCreateAlertRuleTool(server: McpToolRegistrar) {
 			enabled: optionalBooleanParam("Whether the rule is enabled (default: true)"),
 			// Custom-mode params (used when template is 'custom' or omitted)
 			signal_type: optionalStringParam(
-				"Signal type (for custom): error_rate, p95_latency, p99_latency, apdex, throughput, metric, query",
+				"Signal type (for custom): error_rate, p95_latency, p99_latency, apdex, throughput, metric, builder_query, raw_query",
 			),
 			comparator: optionalStringParam(
 				"Comparison operator (for custom): gt (>), gte (>=), lt (<), lte (<=)",
@@ -258,14 +287,14 @@ export function registerCreateAlertRuleTool(server: McpToolRegistrar) {
 			apdex_threshold_ms: optionalNumberParam(
 				"Apdex threshold in milliseconds (required when signal_type=apdex)",
 			),
-			query_data_source: optionalStringParam(
-				"Query data source: traces, logs, metrics (required when signal_type=query)",
+			query_builder_draft: optionalStringParam(
+				"JSON string of a query-builder draft (required when signal_type=builder_query). Same shape as dashboard custom-query widgets: { id, name, dataSource, aggregation, whereClause, groupBy, ... }.",
 			),
-			query_aggregation: optionalStringParam(
-				"Query aggregation function (required when signal_type=query)",
+			raw_query_sql: optionalStringParam(
+				"ClickHouse SQL returning a numeric `value` column, optional `group`/`samples` columns (required when signal_type=raw_query). Must reference $__orgFilter; supports $__timeFilter(col), $__startTime, $__endTime, $__interval_s.",
 			),
-			query_where_clause: optionalStringParam(
-				"Query WHERE clause for filtering (optional, for signal_type=query)",
+			raw_query_reducer: optionalStringParam(
+				"How to collapse raw_query result rows into one value: identity, sum, avg, min, max (default: identity).",
 			),
 		}),
 		Effect.fn("McpTool.createAlertRule")(function* (params) {
@@ -277,25 +306,55 @@ export function registerCreateAlertRuleTool(server: McpToolRegistrar) {
 				}
 			}
 
-			const decoded = yield* Effect.try({
-				try: () => decodeAlertRuleRequest(built.request),
-				catch: (error) =>
-					new McpQueryError({
-						message: `Invalid alert rule: ${String(error)}`,
-						pipe: "create_alert_rule",
-					}),
-			})
+			const decoded = yield* decodeAlertRuleRequest(built.request).pipe(
+				Effect.mapError(
+					(error) =>
+						new McpQueryError({
+							message: `Invalid alert rule: ${String(error)}`,
+							pipe: "create_alert_rule",
+							cause: error,
+						}),
+				),
+			)
 
 			const tenant = yield* resolveTenant
 			const alerts = yield* AlertsService
 
 			const rule = yield* alerts.createRule(tenant.orgId, tenant.userId, tenant.roles, decoded).pipe(
-				Effect.mapError((error) => {
-					const details = "details" in error ? `\n${(error.details as string[]).join("\n")}` : ""
-					return new McpQueryError({
-						message: `${error._tag}: ${error.message}${details}`,
-						pipe: "create_alert_rule",
-					})
+				Effect.catchTag("@maple/http/errors/AlertValidationError", (error) =>
+					Effect.fail(
+						new McpQueryError({
+							message: `${error._tag}: ${error.message}\n${error.details.join("\n")}`,
+							pipe: "create_alert_rule",
+							cause: error,
+						}),
+					),
+				),
+				Effect.catchTags({
+					"@maple/http/errors/AlertForbiddenError": (error) =>
+						Effect.fail(
+							new McpQueryError({
+								message: `${error._tag}: ${error.message}`,
+								pipe: "create_alert_rule",
+								cause: error,
+							}),
+						),
+					"@maple/http/errors/AlertPersistenceError": (error) =>
+						Effect.fail(
+							new McpQueryError({
+								message: `${error._tag}: ${error.message}`,
+								pipe: "create_alert_rule",
+								cause: error,
+							}),
+						),
+					"@maple/http/errors/AlertNotFoundError": (error) =>
+						Effect.fail(
+							new McpQueryError({
+								message: `${error._tag}: ${error.message}`,
+								pipe: "create_alert_rule",
+								cause: error,
+							}),
+						),
 				}),
 			)
 

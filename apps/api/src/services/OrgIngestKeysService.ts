@@ -17,10 +17,10 @@ import {
 	type ResolvedIngestKey,
 } from "@maple/db"
 import { eq } from "drizzle-orm"
-import { Effect, Layer, Option, Redacted, Schema, Context } from "effect"
-import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "./Crypto"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Clock, Context, Effect, Layer, Option, Redacted, Schema } from "effect"
+import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "../lib/Crypto"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 
 const toPersistenceError = (error: unknown) =>
 	new IngestKeyPersistenceError({
@@ -69,7 +69,7 @@ const decryptPrivateKey = (
 const generatePublicKey = () => `maple_pk_${randomBytes(24).toString("base64url")}`
 const generatePrivateKey = () => `maple_sk_${randomBytes(24).toString("base64url")}`
 
-export class OrgIngestKeysService extends Context.Service<OrgIngestKeysService>()("OrgIngestKeysService", {
+export class OrgIngestKeysService extends Context.Service<OrgIngestKeysService>()("@maple/api/services/OrgIngestKeysService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
@@ -120,7 +120,7 @@ export class OrgIngestKeysService extends Context.Service<OrgIngestKeysService>(
 			const existing = yield* selectRow(orgId)
 			if (Option.isSome(existing)) return existing.value
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const publicKey = generatePublicKey()
 			const privateKey = generatePrivateKey()
 			const publicKeyHash = hashIngestKey(publicKey, lookupHmacKey)
@@ -176,7 +176,7 @@ export class OrgIngestKeysService extends Context.Service<OrgIngestKeysService>(
 		) {
 			yield* ensureRow(orgId, userId)
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const publicKey = generatePublicKey()
 			const publicKeyHash = hashIngestKey(publicKey, lookupHmacKey)
 
@@ -213,7 +213,7 @@ export class OrgIngestKeysService extends Context.Service<OrgIngestKeysService>(
 		) {
 			yield* ensureRow(orgId, userId)
 
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const privateKey = generatePrivateKey()
 			const privateKeyHash = hashIngestKey(privateKey, lookupHmacKey)
 			const encryptedPrivate = yield* encryptPrivateKey(privateKey, encryptionKey)
@@ -287,8 +287,6 @@ export class OrgIngestKeysService extends Context.Service<OrgIngestKeysService>(
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 
 	static readonly getOrCreate = (orgId: OrgId, userId: UserId) =>
 		this.use((service) => service.getOrCreate(orgId, userId))

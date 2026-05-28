@@ -1,6 +1,6 @@
 import { DemoSeedError, DemoSeedResponse, type OrgId, type UserId } from "@maple/domain/http"
 import { Context, Effect, Layer } from "effect"
-import { Env } from "./Env"
+import { Env } from "../lib/Env"
 import { OrgIngestKeysService } from "./OrgIngestKeysService"
 import { generateDemoBatches } from "./demo/fixtures"
 
@@ -9,7 +9,7 @@ const DEMO_RATE_PER_HOUR = 250
 
 const toSeedError = (message: string) => new DemoSeedError({ message })
 
-export class DemoService extends Context.Service<DemoService>()("DemoService", {
+export class DemoService extends Context.Service<DemoService>()("@maple/api/services/DemoService", {
 	make: Effect.gen(function* () {
 		const ingestKeys = yield* OrgIngestKeysService
 		const env = yield* Env
@@ -52,24 +52,32 @@ export class DemoService extends Context.Service<DemoService>()("DemoService", {
 				ratePerHour: DEMO_RATE_PER_HOUR,
 			})
 
-			let spansSent = 0
-			for (const batch of tracesByBatch) {
-				yield* postOtlp("/v1/traces", { resourceSpans: batch }, keys.publicKey)
-				spansSent += batch.reduce(
-					(acc, rs) =>
-						acc + rs.scopeSpans.reduce((s, sc) => s + sc.spans.length, 0),
-					0,
-				)
-			}
+			yield* Effect.forEach(
+				tracesByBatch,
+				(batch) => postOtlp("/v1/traces", { resourceSpans: batch }, keys.publicKey),
+				{ concurrency: 1, discard: true },
+			)
+			const spansSent = tracesByBatch.reduce(
+				(total, batch) =>
+					total +
+					batch.reduce((acc, rs) => acc + rs.scopeSpans.reduce((s, sc) => s + sc.spans.length, 0), 0),
+				0,
+			)
 
-			let logsSent = 0
-			for (const batch of logsByBatch) {
-				yield* postOtlp("/v1/logs", { resourceLogs: batch }, keys.publicKey)
-				logsSent += batch.reduce(
-					(acc, rl) => acc + rl.scopeLogs.reduce((s, sc) => s + sc.logRecords.length, 0),
-					0,
-				)
-			}
+			yield* Effect.forEach(
+				logsByBatch,
+				(batch) => postOtlp("/v1/logs", { resourceLogs: batch }, keys.publicKey),
+				{ concurrency: 1, discard: true },
+			)
+			const logsSent = logsByBatch.reduce(
+				(total, batch) =>
+					total +
+					batch.reduce(
+						(acc, rl) => acc + rl.scopeLogs.reduce((s, sc) => s + sc.logRecords.length, 0),
+						0,
+					),
+				0,
+			)
 
 			return new DemoSeedResponse({
 				seeded: true,
@@ -80,10 +88,8 @@ export class DemoService extends Context.Service<DemoService>()("DemoService", {
 			})
 		})
 
-		return { seed } as const
+		return { seed }
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

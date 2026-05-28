@@ -14,7 +14,32 @@ import {
 import { router, type RouterAuthContext } from "./router"
 import { appRegistry } from "./lib/registry"
 import { clearChunkReloadGuard, shouldAttemptChunkReload } from "./lib/chunk-reload"
+import { MapleBrowser } from "@maple-dev/browser"
+import { ingestUrl } from "./lib/services/common/ingest-url"
 import "./styles.css"
+
+// Browser session replay + tracing for the dashboard itself. The effect-sdk
+// client tracer already instruments every Effect HTTP request and feeds its
+// trace ids into the replay session sink, so auto fetch instrumentation is OFF
+// (`instrumentFetch: false`) — otherwise it would attach redundant raw network
+// spans to "Correlated traces" instead of the real Effect/backend traces.
+// Gated on the ingest key alone: present in dev (full sampling) and in prod
+// builds where VITE_MAPLE_INGEST_KEY is set. Prod self-recording is sampled
+// down to keep the self-observability ingest loop manageable.
+const replayIngestKey = import.meta.env.VITE_MAPLE_INGEST_KEY?.trim()
+if (replayIngestKey) {
+	MapleBrowser.init({
+		ingestKey: replayIngestKey,
+		serviceName: "maple-web",
+		endpoint: ingestUrl,
+		environment: import.meta.env.MODE,
+		tracing: { enabled: true, instrumentFetch: false },
+		// Temporarily recording 100% in prod to verify the replay pipeline
+		// end-to-end (only ~3 sessions/day, so 10% sampling captured nothing).
+		// Dial back to a fractional prod rate once a replay is confirmed landing.
+		replay: { enabled: true, sampleRate: 1 },
+	})
+}
 
 window.addEventListener("vite:preloadError", (event) => {
 	if (shouldAttemptChunkReload()) {
@@ -72,6 +97,20 @@ function useAutumnFetchAuth() {
 			window.fetch = original
 		}
 	}, [])
+}
+
+/**
+ * Tag the self-recorded replay session with the signed-in Clerk user id once
+ * Clerk reports one. `MapleBrowser.init` runs at module load (before Clerk),
+ * so the session starts anonymous; `identify` is a no-op when replay isn't
+ * active. Syncs to an external system (the SDK), like the other auth bridges.
+ */
+function MapleIdentify() {
+	const { isSignedIn, userId } = useAuth()
+	useEffect(() => {
+		if (isSignedIn && userId) MapleBrowser.identify(userId)
+	}, [isSignedIn, userId])
+	return null
 }
 
 function AutumnProviderWithClerk({ children }: { children: React.ReactNode }) {
@@ -204,6 +243,7 @@ const app = isClerkAuthEnabled ? (
 		afterSignOutUrl={clerkSignInUrl}
 	>
 		<ClerkAuthBridge />
+		<MapleIdentify />
 		<AutumnErrorBoundary>
 			<AutumnProviderWithClerk>
 				<ClerkInnerApp />

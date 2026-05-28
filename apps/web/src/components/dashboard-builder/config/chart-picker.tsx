@@ -1,5 +1,4 @@
-import { useMemo } from "react"
-import { Atom, useAtom } from "@/lib/effect-atom"
+import { useState } from "react"
 
 import {
 	Dialog,
@@ -20,6 +19,7 @@ import {
 	tablePresets,
 	listPresets,
 	piePresets,
+	funnelPresets,
 	histogramPresets,
 	heatmapPresets,
 	markdownPresets,
@@ -49,6 +49,7 @@ type PickerTab =
 	| "tables"
 	| "lists"
 	| "pies"
+	| "funnels"
 	| "histograms"
 	| "heatmaps"
 	| "notes"
@@ -57,6 +58,7 @@ const tabs: { id: PickerTab; label: string }[] = [
 	{ id: "all", label: "All" },
 	{ id: "charts", label: "Charts" },
 	{ id: "pies", label: "Pies" },
+	{ id: "funnels", label: "Funnels" },
 	{ id: "histograms", label: "Histograms" },
 	{ id: "heatmaps", label: "Heatmaps" },
 	{ id: "stats", label: "Stats" },
@@ -188,6 +190,18 @@ function PiePreviewCard({ preset }: { preset: WidgetPresetDefinition }) {
 	)
 }
 
+function FunnelPreviewCard({ preset }: { preset: WidgetPresetDefinition }) {
+	const entry = getChartById(preset.display.chartId ?? "query-builder-funnel")
+	if (!entry) return <div className="aspect-[4/3]" />
+	const Component = entry.component
+	return (
+		<div className="aspect-[4/3] flex flex-col gap-1.5">
+			<div className="text-[10px] text-muted-foreground">{preset.display.title}</div>
+			<ChartPreview component={Component} />
+		</div>
+	)
+}
+
 function HistogramPreviewCard({ preset }: { preset: WidgetPresetDefinition }) {
 	const entry = getChartById(preset.display.chartId ?? "query-builder-histogram")
 	if (!entry) return <div className="aspect-[4/3]" />
@@ -287,8 +301,7 @@ interface WidgetPickerProps {
 }
 
 export function WidgetPicker({ open, onOpenChange, onSelect }: WidgetPickerProps) {
-	const activeTabAtom = useMemo(() => Atom.make<PickerTab>("all"), [])
-	const [activeTab, setActiveTab] = useAtom(activeTabAtom)
+	const [activeTab, setActiveTab] = useState<PickerTab>("all")
 
 	const handleSelectChart = (chartId: string) => {
 		onSelect(
@@ -320,6 +333,7 @@ export function WidgetPicker({ open, onOpenChange, onSelect }: WidgetPickerProps
 	const showTables = activeTab === "all" || activeTab === "tables"
 	const showLists = activeTab === "all" || activeTab === "lists"
 	const showPies = activeTab === "all" || activeTab === "pies"
+	const showFunnels = activeTab === "all" || activeTab === "funnels"
 	const showHistograms = activeTab === "all" || activeTab === "histograms"
 	const showHeatmaps = activeTab === "all" || activeTab === "heatmaps"
 	const showNotes = activeTab === "all" || activeTab === "notes"
@@ -402,6 +416,36 @@ export function WidgetPicker({ open, onOpenChange, onSelect }: WidgetPickerProps
 										className="group ring-1 ring-border hover:ring-border-active bg-background p-4 text-left transition-all flex flex-col gap-3 rounded-md"
 									>
 										<PiePreviewCard preset={preset} />
+										<div className="flex flex-col gap-0.5">
+											<div className="text-xs font-medium">{preset.name}</div>
+											{preset.description && (
+												<div className="text-[11px] text-dim">
+													{preset.description}
+												</div>
+											)}
+										</div>
+									</button>
+								))}
+							</div>
+						</div>
+					)}
+
+					{showFunnels && (
+						<div className="flex flex-col gap-3">
+							{activeTab === "all" && (
+								<h3 className="text-[10px] font-semibold text-dim uppercase tracking-wider">
+									Funnels
+								</h3>
+							)}
+							<div className="grid grid-cols-3 gap-3">
+								{funnelPresets.map((preset) => (
+									<button
+										key={preset.id}
+										type="button"
+										onClick={() => handleSelectPreset(preset)}
+										className="group ring-1 ring-border hover:ring-border-active bg-background p-4 text-left transition-all flex flex-col gap-3 rounded-md"
+									>
+										<FunnelPreviewCard preset={preset} />
 										<div className="flex flex-col gap-0.5">
 											<div className="text-xs font-medium">{preset.name}</div>
 											{preset.description && (

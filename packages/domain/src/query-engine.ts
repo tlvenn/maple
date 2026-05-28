@@ -2,8 +2,7 @@ import { Schema } from "effect"
 
 const dateTimePattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 
-export const TinybirdDateTime = Schema.String.pipe(
-	Schema.check(Schema.isPattern(dateTimePattern)),
+export const TinybirdDateTime = Schema.String.check(Schema.isPattern(dateTimePattern)).pipe(
 	Schema.annotate({
 		identifier: "TinybirdDateTime",
 		description: "Date time string in YYYY-MM-DD HH:mm:ss format",
@@ -75,7 +74,7 @@ export const ErrorsFilters = Schema.Struct({
 	rootOnly: Schema.optional(Schema.Boolean),
 	services: Schema.optional(Schema.Array(Schema.String)),
 	deploymentEnvs: Schema.optional(Schema.Array(Schema.String)),
-	errorTypes: Schema.optional(Schema.Array(Schema.String)),
+	fingerprintHashes: Schema.optional(Schema.Array(Schema.String)),
 })
 export type ErrorsFilters = Schema.Schema.Type<typeof ErrorsFilters>
 
@@ -237,8 +236,8 @@ export type TracesStatsQuery = Schema.Schema.Type<typeof TracesStatsQuery>
 
 export const AttributeValuesQuery = Schema.Struct({
 	kind: Schema.Literal("attributeValues"),
-	source: Schema.Literal("traces"),
-	scope: Schema.Literals(["span", "resource"]),
+	source: Schema.Literals(["traces", "logs", "metrics"]),
+	scope: Schema.Literals(["span", "resource", "log", "metric"]),
 	attributeKey: Schema.String,
 	limit: Schema.optional(
 		Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(500)),
@@ -356,7 +355,7 @@ export const QueryEngineResult = Schema.Union([
 	}),
 	Schema.Struct({
 		kind: Schema.Literal("attributeValues"),
-		source: Schema.Literal("traces"),
+		source: Schema.Literals(["traces", "logs", "metrics"]),
 		data: Schema.Array(AttributeValueItem),
 	}),
 	Schema.Struct({
@@ -421,9 +420,21 @@ export class QueryEngineEvaluateResponse extends Schema.Class<QueryEngineEvaluat
 	observations: Schema.Array(QueryEngineAlertObservation),
 }) {}
 
+/**
+ * Compiled, evaluation-ready form of an alert rule's query.
+ *
+ * - `kind: "spec"` — a structured QueryEngine `QuerySpec` (built from a query
+ *   builder draft or one of the canned signal types). Evaluated via
+ *   `QueryEngineService.evaluate`.
+ * - `kind: "raw_sql"` — user-authored ClickHouse SQL with macros. Evaluated via
+ *   `QueryEngineService.evaluateRawSql`. `query`/`sampleCountStrategy` are null;
+ *   the alert value comes from the `value` column convention.
+ */
 export class CompiledAlertQueryPlan extends Schema.Class<CompiledAlertQueryPlan>("CompiledAlertQueryPlan")({
-	query: QuerySpec,
+	kind: Schema.Literals(["spec", "raw_sql"]),
+	query: Schema.NullOr(QuerySpec),
+	rawSql: Schema.NullOr(Schema.String),
 	reducer: QueryEngineAlertReducer,
-	sampleCountStrategy: QueryEngineSampleCountStrategy,
+	sampleCountStrategy: Schema.NullOr(QueryEngineSampleCountStrategy),
 	noDataBehavior: QueryEngineNoDataBehavior,
 }) {}

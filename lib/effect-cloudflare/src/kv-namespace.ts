@@ -14,7 +14,7 @@ import * as Data from "effect/Data"
 import * as Effect from "effect/Effect"
 import { WorkerEnvironment } from "./worker-environment.ts"
 
-export class KVNamespaceError extends Data.TaggedError("KVNamespaceError")<{
+export class KVNamespaceError extends Data.TaggedError("@maple/effect-cloudflare/KVNamespaceError")<{
 	message: string
 	cause: unknown
 }> {}
@@ -66,7 +66,7 @@ export interface KVNamespaceClient<Key extends string = string> {
 }
 
 const makeClient = (token: KVNamespaceToken): KVNamespaceClient => {
-	const env = WorkerEnvironment.asEffect()
+	const env = WorkerEnvironment
 	const raw = env.pipe(Effect.map((e) => (e as Record<string, runtime.KVNamespace>)[token.LogicalId]))
 	const tryPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, KVNamespaceError> =>
 		Effect.tryPromise({

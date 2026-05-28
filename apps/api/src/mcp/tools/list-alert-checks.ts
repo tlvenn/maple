@@ -1,9 +1,15 @@
-import { McpQueryError, optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
+import {
+	McpQueryError,
+	optionalNumberParam,
+	optionalStringParam,
+	requiredStringParam,
+	type McpToolRegistrar,
+} from "./types"
 import { formatTable, truncate } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { AlertsService } from "@/services/AlertsService"
 import { AlertRuleId } from "@maple/domain/http"
 
@@ -14,9 +20,7 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 		"list_alert_checks",
 		"List recent alert rule checks (one per evaluation) with observed value, threshold, sample count, and incident linkage. Use to tune thresholds, investigate flappy rules, or correlate a breach with prior near-misses.",
 		Schema.Struct({
-			rule_id: Schema.String.annotate({
-				description: "ID of the alert rule to inspect",
-			}),
+			rule_id: requiredStringParam("ID of the alert rule to inspect"),
 			group_key: optionalStringParam("Filter by a specific group key"),
 			status: optionalStringParam("Filter by check status: breached, healthy, skipped"),
 			since: optionalStringParam("ISO8601 timestamp — only return checks at or after this time"),
@@ -29,10 +33,11 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 
 			const ruleId = yield* Effect.try({
 				try: () => decodeRuleId(rule_id),
-				catch: () =>
+				catch: (cause) =>
 					new McpQueryError({
 						message: `Invalid rule_id: ${rule_id}`,
 						pipe: "list_alert_checks",
+						cause,
 					}),
 			})
 
@@ -49,6 +54,7 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 							new McpQueryError({
 								message: error.message,
 								pipe: "list_alert_checks",
+								cause: error,
 							}),
 					),
 				)
@@ -62,6 +68,13 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 			const healthy = checks.filter((c) => c.status === "healthy").length
 			const skipped = checks.filter((c) => c.status === "skipped").length
 			const transitions = checks.filter((c) => c.incidentTransition !== "none").length
+
+			yield* Effect.annotateCurrentSpan({
+				orgId: tenant.orgId,
+				ruleId: rule_id,
+				status: status ?? "all",
+				resultCount: checks.length,
+			})
 
 			const lines: string[] = [
 				`## Alert Checks`,

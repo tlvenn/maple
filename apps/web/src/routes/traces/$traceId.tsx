@@ -3,9 +3,9 @@ import { Result, useAtomValue } from "@/lib/effect-atom"
 import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 import { TraceId } from "@maple/domain"
-import { toast } from "sonner"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
+import { TraceReplayLink } from "@/components/replays/trace-replay-link"
 import { QueryErrorState } from "@/components/common/query-error-state"
 import { TraceViewTabs } from "@/components/traces/trace-view-tabs"
 import { SpanDetailPanel } from "@/components/traces/span-detail-panel"
@@ -14,10 +14,12 @@ import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@maple/ui/components/ui/resizable"
 import { formatDuration } from "@/lib/format"
 import { getServiceLegendColor } from "@maple/ui/lib/colors"
-import { type Span, type SpanNode } from "@/api/tinybird/traces"
-import { getSpanHierarchyResultAtom } from "@/lib/services/atoms/tinybird-query-atoms"
+import { type Span, type SpanNode } from "@/api/warehouse/traces"
+import { getSpanHierarchyResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 import { findSpanById } from "@/components/traces/flow-utils"
 import { HttpSpanLabel } from "@/components/traces/http-span-label"
+import { TraceIdBadge } from "@/components/traces/trace-id-badge"
+import { CopyableBadge } from "@/components/common/copyable-badge"
 import { getHttpInfo } from "@maple/ui/lib/http"
 
 const TraceDetailSearchSchema = Schema.Struct({
@@ -127,27 +129,8 @@ function TraceDetailPage() {
 						description="This trace could not be found. It may have expired or not been ingested yet."
 					>
 						<div className="flex flex-col items-center justify-center rounded-md border border-dashed p-12 text-center">
-							<p className="text-sm text-muted-foreground">Trace ID</p>
-							<Badge
-								variant="outline"
-								className="mt-1 font-mono text-xs cursor-pointer hover:bg-muted"
-								role="button"
-								tabIndex={0}
-								aria-label="Copy trace ID"
-								onClick={() => {
-									navigator.clipboard.writeText(traceId)
-									toast.success("Trace ID copied to clipboard")
-								}}
-								onKeyDown={(e) => {
-									if (e.key === "Enter" || e.key === " ") {
-										e.preventDefault()
-										navigator.clipboard.writeText(traceId)
-										toast.success("Trace ID copied to clipboard")
-									}
-								}}
-							>
-								{traceId}
-							</Badge>
+							<p className="mb-2 text-sm text-muted-foreground">Trace ID</p>
+							<TraceIdBadge traceId={traceId} />
 							<a
 								href={backToTracesHref}
 								className="mt-6 text-sm text-primary underline underline-offset-4 hover:text-primary/80"
@@ -170,27 +153,8 @@ function TraceDetailPage() {
 						description={`Found ${data.spans.length} span${data.spans.length !== 1 ? "s" : ""}, but the root span is missing. The trace may be incomplete.`}
 					>
 						<div className="flex flex-col items-center justify-center rounded-md border border-dashed p-12 text-center">
-							<p className="text-sm text-muted-foreground">Trace ID</p>
-							<Badge
-								variant="outline"
-								className="mt-1 font-mono text-xs cursor-pointer hover:bg-muted"
-								role="button"
-								tabIndex={0}
-								aria-label="Copy trace ID"
-								onClick={() => {
-									navigator.clipboard.writeText(traceId)
-									toast.success("Trace ID copied to clipboard")
-								}}
-								onKeyDown={(e) => {
-									if (e.key === "Enter" || e.key === " ") {
-										e.preventDefault()
-										navigator.clipboard.writeText(traceId)
-										toast.success("Trace ID copied to clipboard")
-									}
-								}}
-							>
-								{traceId}
-							</Badge>
+							<p className="mb-2 text-sm text-muted-foreground">Trace ID</p>
+							<TraceIdBadge traceId={traceId} />
 							<p className="mt-4 text-sm text-muted-foreground max-w-md">
 								This trace contains spans but the root span was not found. It may not have
 								been ingested yet or could have been dropped during sampling.
@@ -208,7 +172,7 @@ function TraceDetailPage() {
 
 			const services = [...new Set(data.spans.map((s: Span) => s.serviceName))]
 			const rootSpan = data.rootSpans[0]
-			const rootHttpInfo = rootSpan ? getHttpInfo(rootSpan.spanName, rootSpan.spanAttributes) : null
+			const rootHttpInfo = rootSpan ? getHttpInfo(rootSpan) : null
 			const deploymentEnv = rootSpan?.resourceAttributes?.["deployment.environment"]
 			const commitSha = rootSpan?.resourceAttributes?.["deployment.commit_sha"]
 			const hasError = data.spans.some((s: Span) => {
@@ -249,26 +213,9 @@ function TraceDetailPage() {
 					}
 					description={`${data.spans.length} spans across ${services.length} service${services.length !== 1 ? "s" : ""}`}
 					headerActions={
-						<Badge
-							variant="outline"
-							className="font-mono text-xs cursor-pointer hover:bg-muted"
-							role="button"
-							tabIndex={0}
-							aria-label="Copy trace ID"
-							onClick={() => {
-								navigator.clipboard.writeText(traceId)
-								toast.success("Trace ID copied to clipboard")
-							}}
-							onKeyDown={(e) => {
-								if (e.key === "Enter" || e.key === " ") {
-									e.preventDefault()
-									navigator.clipboard.writeText(traceId)
-									toast.success("Trace ID copied to clipboard")
-								}
-							}}
-						>
-							{traceId.slice(0, 8)}...
-						</Badge>
+						<div className="flex items-center gap-2">
+							<TraceReplayLink traceId={traceId} />
+						</div>
 					}
 				>
 					<div className="flex flex-1 flex-col gap-y-3 min-h-0">
@@ -341,11 +288,22 @@ function TraceDetailPage() {
 							{commitSha && (
 								<>
 									<span className="ml-4 text-xs text-muted-foreground">Commit:</span>
-									<Badge variant="outline" className="font-mono text-xs">
+									<CopyableBadge
+										value={commitSha}
+										label="commit SHA"
+										className="font-mono text-xs"
+									>
 										{commitSha.slice(0, 7)}
-									</Badge>
+									</CopyableBadge>
 								</>
 							)}
+
+							<span className="ml-4 text-xs text-muted-foreground">Trace ID:</span>
+							<TraceIdBadge
+								traceId={traceId}
+								size="default"
+								className="text-xs max-w-[10rem]"
+							/>
 						</div>
 
 						<ResizablePanelGroup
@@ -359,7 +317,6 @@ function TraceDetailPage() {
 									totalDurationMs={data.totalDurationMs}
 									traceStartTime={traceStartTime}
 									services={services}
-									defaultExpandDepth={Infinity}
 									selectedSpanId={selectedSpan?.spanId}
 									onSelectSpan={handleSelectSpan}
 								/>

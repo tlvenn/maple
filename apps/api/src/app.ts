@@ -13,8 +13,10 @@ import { HttpDashboardsLive } from "./routes/dashboards.http"
 import { HttpDemoLive } from "./routes/demo.http"
 import { HttpDigestLive } from "./routes/digest.http"
 import { HttpIntegrationsLive, IntegrationsCallbackRouter } from "./routes/integrations.http"
+import { HttpIngestAttributeMappingsLive } from "./routes/ingest-attribute-mappings.http"
 import { HttpIngestKeysLive } from "./routes/ingest-keys.http"
 import { HttpObservabilityLive } from "./routes/observability.http"
+import { HttpOnboardingLive } from "./routes/onboarding.http"
 import { OAuthDiscoveryRouter } from "./routes/oauth-discovery.http"
 import { HttpOrgOpenRouterSettingsLive } from "./routes/org-openrouter-settings.http"
 import { HttpOrgClickHouseSettingsLive } from "./routes/org-clickhouse-settings.http"
@@ -22,28 +24,32 @@ import { HttpOrganizationsLive } from "./routes/organizations.http"
 import { HttpQueryEngineLive } from "./routes/query-engine.http"
 import { HttpScrapeTargetsLive } from "./routes/scrape-targets.http"
 import { HttpServiceDiscoveryLive } from "./routes/sd.http"
+import { HttpSessionReplaysLive } from "./routes/session-replay.http"
 import { AlertRuntime, AlertsService } from "./services/AlertsService"
-import { BucketCacheService } from "./services/BucketCacheService"
+import { BucketCacheService } from "./lib/BucketCacheService"
 import { ErrorsService } from "./services/ErrorsService"
 import { HazelOAuthService } from "./services/HazelOAuthService"
 import { NotificationDispatcher } from "./services/NotificationDispatcher"
 import { ApiKeysService } from "./services/ApiKeysService"
 import { AuthService } from "./services/AuthService"
-import { AuthorizationLive } from "./services/AuthorizationLive"
+import { ApiAuthorizationLayer } from "./services/ApiAuthorizationLayer"
 import { CloudflareLogpushService } from "./services/CloudflareLogpushService"
 import { DashboardPersistenceService } from "./services/DashboardPersistenceService"
 import { DemoService } from "./services/DemoService"
 import { DigestService } from "./services/DigestService"
-import { EdgeCacheService } from "./services/EdgeCacheService"
-import { EmailService } from "./services/EmailService"
-import { Env } from "./services/Env"
+import { EdgeCacheService } from "./lib/EdgeCacheService"
+import { OnboardingService } from "./services/OnboardingService"
+import { EmailService } from "./lib/EmailService"
+import { Env } from "./lib/Env"
+import { IngestAttributeMappingService } from "./services/IngestAttributeMappingService"
 import { OrgIngestKeysService } from "./services/OrgIngestKeysService"
 import { OrgOpenRouterSettingsService } from "./services/OrgOpenRouterSettingsService"
 import { OrgClickHouseSettingsService } from "./services/OrgClickHouseSettingsService"
 import { OrganizationService } from "./services/OrganizationService"
 import { QueryEngineService } from "./services/QueryEngineService"
+import { RawSqlChartService } from "./services/RawSqlChartService"
 import { ScrapeTargetsService } from "./services/ScrapeTargetsService"
-import { WarehouseQueryService } from "./services/WarehouseQueryService"
+import { WarehouseQueryService } from "./lib/WarehouseQueryService"
 
 export const HealthRouter = HttpRouter.use((router) =>
 	router.add("GET", "/health", HttpServerResponse.text("OK")),
@@ -53,11 +59,16 @@ export const McpGetFallback = HttpRouter.use((router) =>
 	router.add("GET", "/mcp", HttpServerResponse.empty({ status: 405 })),
 )
 
-export const DocsRoute = HttpApiScalar.layer(MapleApi, {
+// `layerCdn` loads Scalar's browser bundle from jsDelivr at runtime instead of
+// inlining its ~MB `standalone.min.js` string into the worker bundle — keeps the
+// script out of the deployed bundle (guards the 3 MB worker size limit, error
+// 10027). The `/docs` page now depends on jsDelivr being reachable from the
+// client browser.
+export const DocsRoute = HttpApiScalar.layerCdn(MapleApi, {
 	path: "/docs",
 })
 
-export const InfraLive = Env.Default
+export const InfraLive = Env.layer
 
 export const CoreServicesLive = Layer.mergeAll(
 	AuthService.layer,
@@ -65,16 +76,20 @@ export const CoreServicesLive = Layer.mergeAll(
 	CloudflareLogpushService.layer,
 	DashboardPersistenceService.layer,
 	HazelOAuthService.layer,
+	OnboardingService.layer,
 	OrgIngestKeysService.layer,
 	OrgOpenRouterSettingsService.layer,
 	OrgClickHouseSettingsService.layer,
 	OrganizationService.layer,
 	ScrapeTargetsService.layer,
+	IngestAttributeMappingService.layer,
 ).pipe(Layer.provideMerge(InfraLive))
 
 export const DemoServiceLive = DemoService.layer.pipe(Layer.provideMerge(CoreServicesLive))
 
-export const WarehouseQueryServiceLive = WarehouseQueryService.layer.pipe(Layer.provideMerge(CoreServicesLive))
+export const WarehouseQueryServiceLive = WarehouseQueryService.layer.pipe(
+	Layer.provideMerge(CoreServicesLive),
+)
 
 export const BucketCacheServiceLive = BucketCacheService.layer.pipe(
 	Layer.provideMerge(EdgeCacheService.layer),
@@ -87,7 +102,7 @@ export const QueryEngineServiceLive = QueryEngineService.layer.pipe(
 )
 
 export const AlertsServiceLive = AlertsService.layer.pipe(
-	Layer.provideMerge(Layer.mergeAll(CoreServicesLive, QueryEngineServiceLive, AlertRuntime.Default)),
+	Layer.provideMerge(Layer.mergeAll(CoreServicesLive, QueryEngineServiceLive, AlertRuntime.layer)),
 )
 
 export const NotificationDispatcherLive = NotificationDispatcher.layer.pipe(
@@ -95,12 +110,14 @@ export const NotificationDispatcherLive = NotificationDispatcher.layer.pipe(
 )
 
 export const ErrorsServiceLive = ErrorsService.layer.pipe(
-	Layer.provideMerge(Layer.mergeAll(CoreServicesLive, WarehouseQueryServiceLive, NotificationDispatcherLive)),
+	Layer.provideMerge(
+		Layer.mergeAll(CoreServicesLive, WarehouseQueryServiceLive, NotificationDispatcherLive),
+	),
 )
 
-export const EmailServiceLive = EmailService.Default.pipe(Layer.provide(Env.Default))
+export const EmailServiceLive = EmailService.layer.pipe(Layer.provide(Env.layer))
 
-export const DigestServiceLive = DigestService.Default.pipe(
+export const DigestServiceLive = DigestService.layer.pipe(
 	Layer.provideMerge(Layer.mergeAll(InfraLive, WarehouseQueryServiceLive, EmailServiceLive)),
 )
 
@@ -112,6 +129,7 @@ export const MainLive = Layer.mergeAll(
 	ErrorsServiceLive,
 	DigestServiceLive,
 	DemoServiceLive,
+	RawSqlChartService.layer,
 )
 
 export const ApiRoutes = HttpApiBuilder.layer(MapleApi).pipe(
@@ -124,15 +142,17 @@ export const ApiRoutes = HttpApiBuilder.layer(MapleApi).pipe(
 	Layer.provide(HttpDashboardsLive),
 	Layer.provide(HttpDemoLive),
 	Layer.provide(HttpDigestLive),
+	Layer.provide(HttpIngestAttributeMappingsLive),
 	Layer.provide(HttpIngestKeysLive),
 	Layer.provide(HttpIntegrationsLive),
 	Layer.provide(HttpObservabilityLive),
+	Layer.provide(HttpOnboardingLive),
 	Layer.provide(HttpOrgOpenRouterSettingsLive),
 	Layer.provide(HttpOrgClickHouseSettingsLive),
 	Layer.provide(HttpOrganizationsLive),
 	Layer.provide(HttpScrapeTargetsLive),
 	Layer.provide(HttpServiceDiscoveryLive),
-	Layer.provide(HttpQueryEngineLive),
+	Layer.provide(Layer.mergeAll(HttpQueryEngineLive, HttpSessionReplaysLive)),
 )
 
 export const AllRoutes = Layer.mergeAll(
@@ -155,14 +175,14 @@ export const AllRoutes = Layer.mergeAll(
 	),
 )
 
-export const ApiAuthLive = AuthorizationLive.pipe(
+export const ApiAuthLive = ApiAuthorizationLayer.pipe(
 	Layer.provideMerge(ApiKeysService.layer),
-	Layer.provideMerge(Env.Default),
+	Layer.provideMerge(Env.layer),
 )
 
-// The OTLP tracer/logger is built per-request in worker.ts and injected via
-// `handler(request, services)`. The shared layer only installs the
-// `TracerDisabledWhen` filter, which is a ServiceMap.Reference read by
+// The OTLP tracer/logger is constructed once at worker module scope and
+// provided to the same runtime as the routes. This shared layer only installs
+// the `TracerDisabledWhen` filter, which is a ServiceMap.Reference read by
 // HttpMiddleware regardless of which Tracer is active.
 export const ApiObservabilityLive = Layer.succeed(
 	HttpMiddleware.TracerDisabledWhen,

@@ -1,3 +1,4 @@
+import * as MapleCloudflareSDK from "@maple-dev/effect-sdk/cloudflare"
 import { ConfigProvider, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import { OrgId } from "@maple/domain/http"
 import { OrgOpenRouterSettingsService } from "./services/OrgOpenRouterSettingsService"
@@ -8,6 +9,7 @@ type RegistryModule = typeof import("./mcp/tools/registry")
 
 export interface MapleAgentSetup {
 	readonly runtime: MapleAgentRuntime
+	readonly flushTelemetry: () => Promise<void>
 	readonly mapleToolDefinitions: RegistryModule["mapleToolDefinitions"]
 	readonly toInputSchema: (schema: Schema.Top) => Record<string, unknown>
 }
@@ -17,22 +19,28 @@ const setupCache = new WeakMap<object, Promise<MapleAgentSetup>>()
 const buildSetup = async (env: Record<string, unknown>): Promise<MapleAgentSetup> => {
 	const [appMod, dbMod, envMod, registryMod] = await Promise.all([
 		import("./app"),
-		import("./services/DatabaseD1Live"),
-		import("./services/WorkerEnvironment"),
+		import("./lib/DatabaseD1Live"),
+		import("./lib/WorkerEnvironment"),
 		import("./mcp/tools/registry"),
 	])
 
 	const configLive = ConfigProvider.layer(ConfigProvider.fromUnknown(env))
 	const workerEnvLive = Layer.succeed(envMod.WorkerEnvironment, env as Record<string, any>)
+	const telemetry = MapleCloudflareSDK.make({
+		serviceName: "maple-agent",
+		dropSpanNames: ["McpServer/Notifications."],
+	})
 
 	const layer = appMod.MainLive.pipe(
 		Layer.provideMerge(dbMod.DatabaseD1Live),
 		Layer.provideMerge(workerEnvLive),
+		Layer.provideMerge(telemetry.layer),
 		Layer.provideMerge(configLive),
 	)
 
 	return {
 		runtime: ManagedRuntime.make(layer as any) as MapleAgentRuntime,
+		flushTelemetry: () => telemetry.flush(env),
 		mapleToolDefinitions: registryMod.mapleToolDefinitions,
 		toInputSchema: registryMod.toInputSchema,
 	}
@@ -53,12 +61,21 @@ export const resolveOrgOpenrouterKey = async (
 	env: Record<string, unknown>,
 	orgId: string,
 ): Promise<string | undefined> => {
-	const { runtime } = await getMapleAgentSetup(env)
+	const { runtime, flushTelemetry } = await getMapleAgentSetup(env)
 	const decodedOrgId = decodeOrgId(orgId)
-	const result = await runtime.runPromise(
-		OrgOpenRouterSettingsService.resolveApiKey(decodedOrgId).pipe(
-			Effect.catch(() => Effect.succeed(Option.none<string>())),
-		),
-	)
-	return Option.getOrUndefined(result)
+	try {
+			const result = (await runtime.runPromise(
+				OrgOpenRouterSettingsService.resolveApiKey(decodedOrgId).pipe(
+					Effect.catchCause((cause) =>
+						Effect.as(
+						Effect.logError("Failed to resolve org OpenRouter API key", { cause, orgId }),
+						Option.none<string>(),
+					),
+					),
+				),
+			)) as Option.Option<string>
+		return Option.getOrUndefined(result)
+	} finally {
+		await flushTelemetry()
+	}
 }

@@ -9,10 +9,11 @@ import {
 } from "@maple/ui/components/ui/chart"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@maple/ui/components/ui/card"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
-import { type GetMetricTimeSeriesInput, type MetricTimeSeriesResponse } from "@/api/tinybird/metrics"
+import { type GetMetricTimeSeriesInput, type MetricTimeSeriesResponse } from "@/api/warehouse/metrics"
 import { disabledResultAtom } from "@/lib/services/atoms/disabled-result-atom"
-import { getMetricTimeSeriesResultAtom } from "@/lib/services/atoms/tinybird-query-atoms"
+import { getMetricTimeSeriesResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 import { formatBackendError } from "@/lib/error-messages"
+import { normalizeTimestampInput } from "@/lib/timezone-format"
 
 const chartConfig = {
 	avgValue: {
@@ -29,23 +30,23 @@ interface MetricsVolumeChartProps {
 	metricName: string | null
 	metricType: GetMetricTimeSeriesInput["metricType"] | null
 	serviceName?: string | null
+	startTime: string
+	endTime: string
 }
 
-function formatTinybirdDateTime(date: Date): string {
-	return date.toISOString().slice(0, 19).replace("T", " ")
-}
-
-export function MetricsVolumeChart({ metricName, metricType, serviceName }: MetricsVolumeChartProps) {
-	const endTime = formatTinybirdDateTime(new Date())
-	const startTime = formatTinybirdDateTime(new Date(Date.now() - 60 * 60 * 1000))
-
+export function MetricsVolumeChart({
+	metricName,
+	metricType,
+	serviceName,
+	startTime,
+	endTime,
+}: MetricsVolumeChartProps) {
 	const chartResult = useAtomValue(
 		metricName && metricType
 			? getMetricTimeSeriesResultAtom({
 					data: {
 						metricName,
 						metricType,
-						bucketSeconds: 60,
 						startTime,
 						endTime,
 						...(serviceName ? { service: serviceName } : {}),
@@ -100,7 +101,7 @@ export function MetricsVolumeChart({ metricName, metricType, serviceName }: Metr
 		})
 		.onSuccess((response) => {
 			const chartData = response.data.map((point) => ({
-				time: new Date(point.bucket).toLocaleTimeString("en-US", {
+				time: new Date(normalizeTimestampInput(point.bucket)).toLocaleTimeString("en-US", {
 					hour: "2-digit",
 					minute: "2-digit",
 				}),

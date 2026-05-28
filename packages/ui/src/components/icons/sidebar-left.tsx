@@ -1,5 +1,7 @@
 import type { IconProps } from "./icon"
 
+const paths: ReadonlyArray<string> = ["M3 4H21V20H3Z", "M8 4V20", "M5 9L5 9.01", "M5 13L5 13.01"]
+
 function SidebarLeftIcon({ size = 24, className, ...props }: IconProps) {
 	return (
 		<svg
@@ -9,22 +11,12 @@ function SidebarLeftIcon({ size = 24, className, ...props }: IconProps) {
 			height={size}
 			className={className}
 			fill="none"
+			aria-hidden="true"
 			{...props}
 		>
-			<path
-				d="M8 4L8 20"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeMiterlimit="10"
-				strokeLinecap="square"
-			/>
-			<path
-				d="M22 20L22 4L2 4L2 20L22 20Z"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeMiterlimit="10"
-				strokeLinecap="square"
-			/>
+			{paths.map((d, i) => (
+				<path key={i} d={d} stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+			))}
 		</svg>
 	)
 }

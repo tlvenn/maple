@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react"
-import { createFileRoute, useNavigate } from "@tanstack/react-router"
+import { useState } from "react"
+import { createFileRoute, Navigate } from "@tanstack/react-router"
 import { useAuth } from "@clerk/clerk-react"
 import { AnimatePresence, motion } from "motion/react"
 import { useCustomer } from "autumn-js/react"
@@ -27,50 +27,42 @@ export const STEP_MOTION = {
 
 function QuickStartPage() {
 	const { orgId } = useAuth()
-	const navigate = useNavigate()
 	const {
 		activeStep,
 		setActiveStep,
 		completeStep,
 		isStepComplete,
-		isComplete,
 		qualifyAnswers,
 		setQualifyAnswers,
 		setDemoDataRequested,
 	} = useQuickStart(orgId)
 
-	useEffect(() => {
-		if (isComplete) {
-			navigate({ to: "/" })
-		}
-	}, [isComplete, navigate])
-
 	const { data: customer } = useCustomer()
 	const planSelected = hasSelectedPlan(customer)
 
-	useEffect(() => {
-		if (activeStep !== "plan") return
-		if (!planSelected) return
-		completeStep("plan")
-	}, [activeStep, planSelected, completeStep])
-
-	useEffect(() => {
-		if (activeStep === "plan" || isStepComplete("plan")) return
-		if (planSelected) {
-			completeStep("plan")
-		}
-	}, [activeStep, planSelected, isStepComplete, completeStep])
+	// "plan" completion is the live Autumn plan state, never a persisted flag.
+	// A stale flag would disagree with __root.tsx's no-plan guard and trap the
+	// user in an infinite /quick-start <-> / redirect loop that freezes the tab.
+	const onboardingComplete =
+		isStepComplete("role") && isStepComplete("demo") && planSelected
 
 	const currentStepNumber = STEP_IDS.indexOf(activeStep as StepId) + 1
 	const stepLabel = `Step ${currentStepNumber} of ${STEP_IDS.length}`
 
-	const previousStepIndexRef = useRef(currentStepNumber)
-	const direction =
-		currentStepNumber >= previousStepIndexRef.current ? 1 : -1
+	// Track the previous step index for slide direction by adjusting state
+	// during render — the documented React pattern for previous-render values.
+	const [stepWindow, setStepWindow] = useState<[number, number]>([
+		currentStepNumber,
+		currentStepNumber,
+	])
+	if (stepWindow[1] !== currentStepNumber) {
+		setStepWindow([stepWindow[1], currentStepNumber])
+	}
+	const direction = currentStepNumber >= stepWindow[0] ? 1 : -1
 
-	useEffect(() => {
-		previousStepIndexRef.current = currentStepNumber
-	}, [currentStepNumber])
+	if (onboardingComplete) {
+		return <Navigate to="/" replace />
+	}
 
 	return (
 		<OnboardingLayout
@@ -105,11 +97,7 @@ function QuickStartPage() {
 
 				{activeStep === "plan" && (
 					<MotionStep key="plan" direction={direction}>
-						<StepPlan
-							isComplete={isStepComplete("plan")}
-							onComplete={() => completeStep("plan")}
-							onBack={() => setActiveStep("demo")}
-						/>
+						<StepPlan onBack={() => setActiveStep("demo")} />
 					</MotionStep>
 				)}
 			</AnimatePresence>

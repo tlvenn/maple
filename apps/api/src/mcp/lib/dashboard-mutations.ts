@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Clock, Effect, Schema } from "effect"
 import { randomUUID } from "node:crypto"
 import {
 	DashboardDocument,
@@ -9,7 +9,7 @@ import {
 	WidgetDisplayConfigSchema,
 	WidgetLayoutSchema,
 } from "@maple/domain/http"
-import { resolveTenant } from "@/mcp/lib/query-tinybird"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
 import { McpQueryError } from "@/mcp/tools/types"
 
@@ -31,6 +31,7 @@ const jsonDecodeError = (field: string, tool: string) => (error: unknown) =>
 	new McpQueryError({
 		message: `Invalid ${field}: ${String(error)}`,
 		pipe: tool,
+		cause: error,
 	})
 
 export const decodeWidgetJson = (json: string, tool: string) =>
@@ -63,11 +64,13 @@ export const defaultSizeForVisualization = (visualization: string): { w: number;
 	switch (visualization) {
 		case "stat":
 			return { w: 3, h: 4 }
+		case "gauge":
+			return { w: 3, h: 5 }
 		case "table":
 		case "list":
-			return { w: 6, h: 4 }
+			return { w: 6, h: 5 }
 		default:
-			return { w: 4, h: 4 }
+			return { w: 4, h: 5 }
 	}
 }
 
@@ -96,11 +99,6 @@ export const findNextWidgetPosition = (
 	return { x: 0, y: maxBottom }
 }
 
-export class DashboardMutationNotFound {
-	readonly _tag = "DashboardMutationNotFound"
-	constructor(readonly message: string) {}
-}
-
 /**
  * Shared workflow: resolve tenant, load dashboard by id, run a pure transform
  * over its widgets, and persist the result. The transform receives the
@@ -115,60 +113,57 @@ export class DashboardMutationNotFound {
  * receives a `DashboardConcurrencyError` (mapped here to `McpQueryError`),
  * which is preferable to a silent lost update.
  */
-export const withDashboardMutation = <E, R>(
+export const withDashboardMutation = Effect.fn("withDashboardMutation")(function* <R>(
 	dashboardId: string,
 	tool: string,
 	transform: (
 		existingWidgets: ReadonlyArray<DashboardWidget>,
-	) => Effect.Effect<ReadonlyArray<DashboardWidget>, E, R>,
-) =>
-	Effect.gen(function* () {
-		const tenant = yield* resolveTenant
-		const persistence = yield* DashboardPersistenceService
+	) => Effect.Effect<ReadonlyArray<DashboardWidget>, McpQueryError, R>,
+) {
+	const tenant = yield* resolveTenant
+	const persistence = yield* DashboardPersistenceService
 
-		// `mutate` reports "not found" via a typed `DashboardNotFoundError` and
-		// concurrency exhaustion via `DashboardConcurrencyError`. We collapse
-		// the not-found case into the structured `notFound` return shape that
-		// callers already render to the user, and map every other persistence
-		// error onto `McpQueryError`.
-		const dashboardIdBranded = decodeDashboardId(dashboardId)
+	// `mutate` reports "not found" via a typed `DashboardNotFoundError` and
+	// concurrency exhaustion via `DashboardConcurrencyError`. We collapse
+	// the not-found case into the structured `notFound` return shape that
+	// callers already render to the user, and map the remaining persistence
+	// error tags onto `McpQueryError`.
+	const dashboardIdBranded = decodeDashboardId(dashboardId)
 
-		return yield* persistence
-			.mutate(tenant.orgId, tenant.userId, dashboardIdBranded, (existing) =>
-				Effect.gen(function* () {
-					const nextWidgets = yield* transform(existing.widgets)
-					const now = decodeIsoDateTimeString(new Date().toISOString())
+	return yield* persistence
+		.mutate(tenant.orgId, tenant.userId, dashboardIdBranded, (existing) =>
+			Effect.gen(function* () {
+				const nextWidgets = yield* transform(existing.widgets)
+				const nowMillis = yield* Clock.currentTimeMillis
+				const now = decodeIsoDateTimeString(new Date(nowMillis).toISOString())
 
-					return new DashboardDocument({
-						id: existing.id,
-						name: existing.name,
-						description: existing.description,
-						tags: existing.tags,
-						timeRange: existing.timeRange,
-						variables: existing.variables,
-						widgets: nextWidgets,
-						createdAt: existing.createdAt,
-						updatedAt: now,
-					})
+				return new DashboardDocument({
+					id: existing.id,
+					name: existing.name,
+					description: existing.description,
+					tags: existing.tags,
+					timeRange: existing.timeRange,
+					widgets: nextWidgets,
+					createdAt: existing.createdAt,
+					updatedAt: now,
+				})
+			}),
+		)
+		.pipe(
+			Effect.map((dashboard) => ({ ok: true as const, dashboard })),
+			Effect.catchTag("@maple/http/errors/DashboardNotFoundError", () =>
+				Effect.succeed({
+					ok: false as const,
+					notFound: `Dashboard not found: ${dashboardId}. Use list_dashboards to find available dashboard IDs.`,
 				}),
-			)
-			.pipe(
-				Effect.map((dashboard) => ({ ok: true as const, dashboard })),
-				Effect.catchTag("@maple/http/errors/DashboardNotFoundError", () =>
-					Effect.succeed({
-						ok: false as const,
-						notFound: `Dashboard not found: ${dashboardId}. Use list_dashboards to find available dashboard IDs.`,
-					}),
-				),
-				Effect.mapError((error) => {
-					const message =
-						error !== null &&
-						typeof error === "object" &&
-						"message" in error &&
-						typeof (error as { message: unknown }).message === "string"
-							? (error as { message: string }).message
-							: String(error)
-					return new McpQueryError({ message, pipe: tool })
-				}),
-			)
-	})
+			),
+			Effect.catchTags({
+				"@maple/http/errors/DashboardPersistenceError": (error) =>
+					Effect.fail(new McpQueryError({ message: error.message, pipe: tool, cause: error })),
+				"@maple/http/errors/DashboardConcurrencyError": (error) =>
+					Effect.fail(new McpQueryError({ message: error.message, pipe: tool, cause: error })),
+				"@maple/http/errors/DashboardValidationError": (error) =>
+					Effect.fail(new McpQueryError({ message: error.message, pipe: tool, cause: error })),
+			}),
+		)
+})

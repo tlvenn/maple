@@ -7,22 +7,18 @@ import {
 } from "./types"
 import { Effect, Option, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-tinybird"
+import { resolveTenant } from "../lib/query-warehouse"
 import { resolveActorId } from "../lib/resolve-actor"
 import { ErrorsService } from "@/services/ErrorsService"
 import { ErrorIssueId } from "@maple/domain/http"
 
 const decodeIssueId = Schema.decodeUnknownOption(ErrorIssueId)
 
+const decodeStringArray = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Array(Schema.String)))
+
 const parseArtifactList = (raw: string | undefined): ReadonlyArray<string> => {
 	if (!raw) return []
-	try {
-		const parsed = JSON.parse(raw)
-		if (!Array.isArray(parsed)) return []
-		return parsed.filter((v): v is string => typeof v === "string")
-	} catch {
-		return []
-	}
+	return Option.getOrElse(decodeStringArray(raw), () => [])
 }
 
 export function registerProposeFixTool(server: McpToolRegistrar) {

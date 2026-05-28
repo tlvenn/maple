@@ -3,43 +3,42 @@ import { Atom, Result } from "@/lib/effect-atom"
 import { useRefreshableAtomValue } from "@/hooks/use-refreshable-atom-value"
 import { Effect, Schedule, Schema } from "effect"
 import { useDashboardTimeRange } from "@/components/dashboard-builder/dashboard-providers"
-import { serverFunctionMap } from "@/components/dashboard-builder/data-source-registry"
+import { getServerFunction } from "@/components/dashboard-builder/data-source-registry"
 import type { DashboardWidget, WidgetDataSource } from "@/components/dashboard-builder/types"
+
+/**
+ * The structural shape a data source must satisfy to be fetched. Both the
+ * web `WidgetDataSource` and the JSON-decoded `display.sparkline.dataSource`
+ * (whose `endpoint` is only typed as `string`) are assignable to this.
+ */
+export type WidgetDataSourceLike = {
+	endpoint: string
+	params?: Record<string, unknown>
+	transform?: WidgetDataSource["transform"]
+}
 import { disabledResultAtom } from "@/lib/services/atoms/disabled-result-atom"
 import type { WidgetDataState } from "@/components/dashboard-builder/types"
 import { encodeKey } from "@/lib/cache-key"
 import { formatBackendError } from "@/lib/error-messages"
-import { Cause, Exit } from "effect"
+import { Cause, Option } from "effect"
+import { WarehouseDecodeError, type BackendError } from "@/api/warehouse/effect-utils"
+import { QueryEngineValidationError } from "@maple/domain/http"
 
-const unwrapEffectCause = (error: unknown): unknown => {
-	if (Cause.isCause(error)) return Cause.squash(error)
-	if (Exit.isExit(error)) {
-		const found = Exit.isFailure(error) ? Cause.squash(error.cause) : undefined
-		if (found !== undefined) return found
-	}
-	return error
-}
+// An error means "the query input/response failed validation" (rather than a
+// transient runtime failure) when it is one of these tagged validation errors,
+// either directly or as the `cause` wrapped inside a `WidgetDataAtomError`.
+const isDecodeError = (value: unknown): boolean =>
+	value instanceof WarehouseDecodeError || value instanceof QueryEngineValidationError
 
-const errorTag = (error: unknown): string | undefined => {
-	if (typeof error !== "object" || error === null) return undefined
-	const tag = (error as { _tag?: unknown })._tag
-	return typeof tag === "string" ? tag : undefined
-}
-
-const DECODE_ERROR_TAGS = new Set([
-	"TinybirdDecodeError",
-	"@maple/http/errors/QueryEngineValidationError",
-])
+// Pull the most meaningful error out of whatever `onError` / a Cause hands us:
+// a flattened `Cause` yields its first failure; a bare error is returned as-is.
+const extractError = (input: unknown): unknown =>
+	Cause.isCause(input) ? Option.getOrElse(Cause.findErrorOption(input), () => input) : input
 
 const classifyWidgetErrorKind = (input: unknown): "decode" | "runtime" => {
-	const error = unwrapEffectCause(input)
-	const directTag = errorTag(error)
-	if (directTag && DECODE_ERROR_TAGS.has(directTag)) return "decode"
-	if (typeof error === "object" && error !== null && "cause" in error) {
-		const cause = (error as { cause?: unknown }).cause
-		const causeTag = errorTag(cause)
-		if (causeTag && DECODE_ERROR_TAGS.has(causeTag)) return "decode"
-	}
+	const error = extractError(input)
+	if (isDecodeError(error)) return "decode"
+	if (error instanceof WidgetDataAtomError && isDecodeError(error.cause)) return "decode"
 	return "runtime"
 }
 
@@ -236,10 +235,13 @@ function applyTransform(
 	return rows
 }
 
-class WidgetDataAtomError extends Schema.TaggedErrorClass<WidgetDataAtomError>()("WidgetDataAtomError", {
-	message: Schema.String,
-	cause: Schema.optional(Schema.Unknown),
-}) {}
+class WidgetDataAtomError extends Schema.TaggedErrorClass<WidgetDataAtomError>()(
+	"@maple/web/hooks/WidgetDataAtomError",
+	{
+		message: Schema.String,
+		cause: Schema.optionalKey(Schema.Unknown),
+	},
+) {}
 
 const isTaggedBackendError = (error: unknown): boolean =>
 	typeof error === "object" &&
@@ -265,9 +267,15 @@ const isExpectedEmptyDataError = (error: unknown): boolean => {
 	return typeof message === "string" && EXPECTED_EMPTY_MESSAGES.has(message)
 }
 
-const toWidgetDataAtomError = (error: unknown): unknown => {
+// The error channel the widget-fetch atom exposes: every failure is either a
+// `WidgetDataAtomError` (parse / unknown-endpoint / unstructured failures) or a
+// tagged `@maple/http/errors/*` backend error passed through unchanged so
+// `formatBackendError` can match its specific tag.
+type WidgetFetchError = WidgetDataAtomError | BackendError
+
+const toWidgetDataAtomError = (error: unknown): WidgetFetchError => {
 	if (error instanceof WidgetDataAtomError) return error
-	if (isTaggedBackendError(error)) return error
+	if (isTaggedBackendError(error)) return error as BackendError
 	if (error instanceof Error) {
 		return new WidgetDataAtomError({
 			message: error.message,
@@ -281,32 +289,30 @@ const toWidgetDataAtomError = (error: unknown): unknown => {
 	})
 }
 
+const fetchWidgetData = Effect.fnUntraced(function* (key: string) {
+	const parsed = yield* Effect.try({
+		try: () =>
+			JSON.parse(key) as {
+				endpoint: string
+				params: Record<string, unknown>
+			},
+		catch: toWidgetDataAtomError,
+	})
+
+	const serverFn = getServerFunction(parsed.endpoint)
+	if (!serverFn) {
+		return yield* new WidgetDataAtomError({
+			message: `Unknown endpoint: ${parsed.endpoint}`,
+		})
+	}
+
+	const response = yield* serverFn({ data: parsed.params })
+	return (response as { data?: unknown })?.data ?? response
+})
+
 const widgetFetchFamily = Atom.family((key: string) =>
 	Atom.make(
-		Effect.try({
-			try: () =>
-				JSON.parse(key) as {
-					endpoint: DashboardWidget["dataSource"]["endpoint"]
-					params: Record<string, unknown>
-				},
-			catch: toWidgetDataAtomError,
-		}).pipe(
-			Effect.flatMap(({ endpoint, params }) => {
-				const serverFn = serverFunctionMap[endpoint]
-				if (!serverFn) {
-					return Effect.fail(
-						new WidgetDataAtomError({
-							message: `Unknown endpoint: ${endpoint}`,
-						}),
-					)
-				}
-
-				return (serverFn({ data: params }) as Effect.Effect<unknown, unknown, never>).pipe(
-					Effect.map((response) => {
-						return (response as { data?: unknown })?.data ?? response
-					}),
-				)
-			}),
+		fetchWidgetData(key).pipe(
 			Effect.mapError(toWidgetDataAtomError),
 			Effect.retry({
 				times: 2,
@@ -317,33 +323,38 @@ const widgetFetchFamily = Atom.family((key: string) =>
 	).pipe(Atom.setIdleTTL(120_000)),
 )
 
-const widgetFetchAtom = (input: {
-	endpoint: DashboardWidget["dataSource"]["endpoint"]
-	params: Record<string, unknown>
-}) => widgetFetchFamily(encodeKey(input))
+const widgetFetchAtom = (input: { endpoint: string; params: Record<string, unknown> }) =>
+	widgetFetchFamily(encodeKey(input))
 
-export function useWidgetData(widget: DashboardWidget) {
+/**
+ * Fetches and transforms data for a single data source. Powers both whole
+ * widgets (via `useWidgetData`) and secondary fetches such as a stat widget's
+ * sparkline. Pass `undefined` to render a disabled state without a fetch.
+ */
+export function useWidgetDataSource(dataSource: WidgetDataSourceLike | undefined) {
 	const {
 		state: { resolvedTimeRange },
 	} = useDashboardTimeRange()
 
-	const isStatic = widget.dataSource.endpoint === "markdown_static"
-	const hasServerFn = !!serverFunctionMap[widget.dataSource.endpoint]
+	const isStatic = dataSource?.endpoint === "markdown_static"
+	const hasServerFn = dataSource ? !!getServerFunction(dataSource.endpoint) : false
 
-	const disableReason = isStatic
-		? null
-		: !resolvedTimeRange
-			? "Unable to resolve dashboard time range"
-			: !hasServerFn
-				? `Unknown data source endpoint: ${widget.dataSource.endpoint}`
-				: null
+	const disableReason = !dataSource
+		? "No data source configured"
+		: isStatic
+			? null
+			: !resolvedTimeRange
+				? "Unable to resolve dashboard time range"
+				: !hasServerFn
+					? `Unknown data source endpoint: ${dataSource.endpoint}`
+					: null
 
 	const resolvedParams = useMemo(
 		() =>
 			resolvedTimeRange
 				? interpolateParams(
 						{
-							...widget.dataSource.params,
+							...dataSource?.params,
 							strategy: { enableEmptyRangeFallback: false },
 							startTime: resolvedTimeRange.startTime,
 							endTime: resolvedTimeRange.endTime,
@@ -351,7 +362,7 @@ export function useWidgetData(widget: DashboardWidget) {
 						resolvedTimeRange,
 					)
 				: {},
-		[resolvedTimeRange, widget.dataSource.params],
+		[resolvedTimeRange, dataSource?.params],
 	)
 
 	// Stabilise the atom reference across renders. Atom.family already dedupes
@@ -359,18 +370,18 @@ export function useWidgetData(widget: DashboardWidget) {
 	// where useAtomValue / useAtomRefresh re-subscribe and drop an in-flight
 	// fetch (the user-visible symptom: widgets stuck on the loading skeleton).
 	const fetchAtom = useMemo(() => {
-		if (disableReason !== null || isStatic) {
-			return disabledResultAtom<unknown, WidgetDataAtomError>()
+		if (disableReason !== null || isStatic || !dataSource) {
+			return disabledResultAtom<unknown, WidgetFetchError>()
 		}
 		return widgetFetchAtom({
-			endpoint: widget.dataSource.endpoint,
+			endpoint: dataSource.endpoint,
 			params: resolvedParams,
 		})
-	}, [disableReason, isStatic, widget.dataSource.endpoint, resolvedParams])
+	}, [disableReason, isStatic, dataSource, resolvedParams])
 
 	const result = useRefreshableAtomValue(fetchAtom)
 
-	const transform = widget.dataSource.transform
+	const transform = dataSource?.transform
 
 	const dataState: WidgetDataState = useMemo(() => {
 		if (isStatic) {
@@ -399,6 +410,10 @@ export function useWidgetData(widget: DashboardWidget) {
 	return {
 		dataState,
 	}
+}
+
+export function useWidgetData(widget: DashboardWidget) {
+	return useWidgetDataSource(widget.dataSource)
 }
 
 export const __testables = {

@@ -1,15 +1,15 @@
 import type { AlertDestinationRow } from "@maple/db"
 import { Effect, Schema } from "effect"
-import { decryptAes256Gcm } from "./Crypto"
+import { decryptAes256Gcm } from "../lib/Crypto"
 
 export const DestinationPublicConfigSchema = Schema.Struct({
 	summary: Schema.String,
 	channelLabel: Schema.NullOr(Schema.String),
-	hazelOrganizationId: Schema.optional(Schema.String),
-	hazelOrganizationName: Schema.optional(Schema.String),
-	hazelOrganizationLogoUrl: Schema.optional(Schema.NullOr(Schema.String)),
-	hazelChannelId: Schema.optional(Schema.String),
-	hazelChannelName: Schema.optional(Schema.String),
+	hazelOrganizationId: Schema.optionalKey(Schema.String),
+	hazelOrganizationName: Schema.optionalKey(Schema.String),
+	hazelOrganizationLogoUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
+	hazelChannelId: Schema.optionalKey(Schema.String),
+	hazelChannelName: Schema.optionalKey(Schema.String),
 })
 
 export const DestinationSecretConfigSchema = Schema.Union([
@@ -40,6 +40,10 @@ export const DestinationSecretConfigSchema = Schema.Union([
 		webhookId: Schema.String,
 		webhookUrl: Schema.String,
 		webhookToken: Schema.String,
+	}),
+	Schema.Struct({
+		type: Schema.Literal("discord"),
+		webhookUrl: Schema.String,
 	}),
 ])
 

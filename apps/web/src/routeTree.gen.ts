@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as WidgetLabRouteImport } from './routes/widget-lab'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SettingsRouteImport } from './routes/settings'
@@ -19,19 +20,22 @@ import { Route as QueryBuilderLabRouteImport } from './routes/query-builder-lab'
 import { Route as OrgRequiredRouteImport } from './routes/org-required'
 import { Route as MetricsRouteImport } from './routes/metrics'
 import { Route as McpRouteImport } from './routes/mcp'
-import { Route as LogsRouteImport } from './routes/logs'
 import { Route as DeveloperRouteImport } from './routes/developer'
 import { Route as ConnectorsRouteImport } from './routes/connectors'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as TracesIndexRouteImport } from './routes/traces/index'
 import { Route as ServicesIndexRouteImport } from './routes/services/index'
+import { Route as ReplaysIndexRouteImport } from './routes/replays/index'
+import { Route as LogsIndexRouteImport } from './routes/logs/index'
 import { Route as InfraIndexRouteImport } from './routes/infra/index'
 import { Route as ErrorsIndexRouteImport } from './routes/errors/index'
 import { Route as DashboardsIndexRouteImport } from './routes/dashboards/index'
 import { Route as AlertsIndexRouteImport } from './routes/alerts/index'
 import { Route as TracesTraceIdRouteImport } from './routes/traces/$traceId'
 import { Route as ServicesServiceNameRouteImport } from './routes/services/$serviceName'
+import { Route as ReplaysSessionIdRouteImport } from './routes/replays/$sessionId'
+import { Route as LogsLogIdRouteImport } from './routes/logs/$logId'
 import { Route as InfraHostNameRouteImport } from './routes/infra/$hostName'
 import { Route as ErrorsErrorTypeRouteImport } from './routes/errors/$errorType'
 import { Route as DashboardsTemplatesRouteImport } from './routes/dashboards/templates'
@@ -48,6 +52,11 @@ import { Route as InfraKubernetesNodesNodeNameRouteImport } from './routes/infra
 import { Route as DashboardsDashboardIdWidgetsWidgetIdRouteImport } from './routes/dashboards/$dashboardId_.widgets.$widgetId'
 import { Route as InfraKubernetesWorkloadsKindWorkloadNameRouteImport } from './routes/infra/kubernetes/workloads/$kind/$workloadName'
 
+const WidgetLabRoute = WidgetLabRouteImport.update({
+  id: '/widget-lab',
+  path: '/widget-lab',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignUpRoute = SignUpRouteImport.update({
   id: '/sign-up',
   path: '/sign-up',
@@ -98,11 +107,6 @@ const McpRoute = McpRouteImport.update({
   path: '/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
-const LogsRoute = LogsRouteImport.update({
-  id: '/logs',
-  path: '/logs',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const DeveloperRoute = DeveloperRouteImport.update({
   id: '/developer',
   path: '/developer',
@@ -133,6 +137,16 @@ const ServicesIndexRoute = ServicesIndexRouteImport.update({
   path: '/services/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ReplaysIndexRoute = ReplaysIndexRouteImport.update({
+  id: '/replays/',
+  path: '/replays/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LogsIndexRoute = LogsIndexRouteImport.update({
+  id: '/logs/',
+  path: '/logs/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const InfraIndexRoute = InfraIndexRouteImport.update({
   id: '/infra/',
   path: '/infra/',
@@ -161,6 +175,16 @@ const TracesTraceIdRoute = TracesTraceIdRouteImport.update({
 const ServicesServiceNameRoute = ServicesServiceNameRouteImport.update({
   id: '/services/$serviceName',
   path: '/services/$serviceName',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReplaysSessionIdRoute = ReplaysSessionIdRouteImport.update({
+  id: '/replays/$sessionId',
+  path: '/replays/$sessionId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LogsLogIdRoute = LogsLogIdRouteImport.update({
+  id: '/logs/$logId',
+  path: '/logs/$logId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const InfraHostNameRoute = InfraHostNameRouteImport.update({
@@ -251,7 +275,6 @@ export interface FileRoutesByFullPath {
   '/chat': typeof ChatRoute
   '/connectors': typeof ConnectorsRoute
   '/developer': typeof DeveloperRoute
-  '/logs': typeof LogsRoute
   '/mcp': typeof McpRoute
   '/metrics': typeof MetricsRoute
   '/org-required': typeof OrgRequiredRoute
@@ -262,18 +285,23 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/widget-lab': typeof WidgetLabRoute
   '/alerts/$ruleId': typeof AlertsRuleIdRoute
   '/alerts/create': typeof AlertsCreateRoute
   '/dashboards/$dashboardId': typeof DashboardsDashboardIdRoute
   '/dashboards/templates': typeof DashboardsTemplatesRoute
   '/errors/$errorType': typeof ErrorsErrorTypeRoute
   '/infra/$hostName': typeof InfraHostNameRoute
+  '/logs/$logId': typeof LogsLogIdRoute
+  '/replays/$sessionId': typeof ReplaysSessionIdRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
   '/alerts/': typeof AlertsIndexRoute
   '/dashboards/': typeof DashboardsIndexRoute
   '/errors/': typeof ErrorsIndexRoute
   '/infra/': typeof InfraIndexRoute
+  '/logs/': typeof LogsIndexRoute
+  '/replays/': typeof ReplaysIndexRoute
   '/services/': typeof ServicesIndexRoute
   '/traces/': typeof TracesIndexRoute
   '/errors/issues/$issueId': typeof ErrorsIssuesIssueIdRoute
@@ -291,7 +319,6 @@ export interface FileRoutesByTo {
   '/chat': typeof ChatRoute
   '/connectors': typeof ConnectorsRoute
   '/developer': typeof DeveloperRoute
-  '/logs': typeof LogsRoute
   '/mcp': typeof McpRoute
   '/metrics': typeof MetricsRoute
   '/org-required': typeof OrgRequiredRoute
@@ -302,18 +329,23 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/widget-lab': typeof WidgetLabRoute
   '/alerts/$ruleId': typeof AlertsRuleIdRoute
   '/alerts/create': typeof AlertsCreateRoute
   '/dashboards/$dashboardId': typeof DashboardsDashboardIdRoute
   '/dashboards/templates': typeof DashboardsTemplatesRoute
   '/errors/$errorType': typeof ErrorsErrorTypeRoute
   '/infra/$hostName': typeof InfraHostNameRoute
+  '/logs/$logId': typeof LogsLogIdRoute
+  '/replays/$sessionId': typeof ReplaysSessionIdRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
   '/alerts': typeof AlertsIndexRoute
   '/dashboards': typeof DashboardsIndexRoute
   '/errors': typeof ErrorsIndexRoute
   '/infra': typeof InfraIndexRoute
+  '/logs': typeof LogsIndexRoute
+  '/replays': typeof ReplaysIndexRoute
   '/services': typeof ServicesIndexRoute
   '/traces': typeof TracesIndexRoute
   '/errors/issues/$issueId': typeof ErrorsIssuesIssueIdRoute
@@ -332,7 +364,6 @@ export interface FileRoutesById {
   '/chat': typeof ChatRoute
   '/connectors': typeof ConnectorsRoute
   '/developer': typeof DeveloperRoute
-  '/logs': typeof LogsRoute
   '/mcp': typeof McpRoute
   '/metrics': typeof MetricsRoute
   '/org-required': typeof OrgRequiredRoute
@@ -343,18 +374,23 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
+  '/widget-lab': typeof WidgetLabRoute
   '/alerts/$ruleId': typeof AlertsRuleIdRoute
   '/alerts/create': typeof AlertsCreateRoute
   '/dashboards/$dashboardId': typeof DashboardsDashboardIdRoute
   '/dashboards/templates': typeof DashboardsTemplatesRoute
   '/errors/$errorType': typeof ErrorsErrorTypeRoute
   '/infra/$hostName': typeof InfraHostNameRoute
+  '/logs/$logId': typeof LogsLogIdRoute
+  '/replays/$sessionId': typeof ReplaysSessionIdRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
   '/alerts/': typeof AlertsIndexRoute
   '/dashboards/': typeof DashboardsIndexRoute
   '/errors/': typeof ErrorsIndexRoute
   '/infra/': typeof InfraIndexRoute
+  '/logs/': typeof LogsIndexRoute
+  '/replays/': typeof ReplaysIndexRoute
   '/services/': typeof ServicesIndexRoute
   '/traces/': typeof TracesIndexRoute
   '/errors/issues/$issueId': typeof ErrorsIssuesIssueIdRoute
@@ -374,7 +410,6 @@ export interface FileRouteTypes {
     | '/chat'
     | '/connectors'
     | '/developer'
-    | '/logs'
     | '/mcp'
     | '/metrics'
     | '/org-required'
@@ -385,18 +420,23 @@ export interface FileRouteTypes {
     | '/settings'
     | '/sign-in'
     | '/sign-up'
+    | '/widget-lab'
     | '/alerts/$ruleId'
     | '/alerts/create'
     | '/dashboards/$dashboardId'
     | '/dashboards/templates'
     | '/errors/$errorType'
     | '/infra/$hostName'
+    | '/logs/$logId'
+    | '/replays/$sessionId'
     | '/services/$serviceName'
     | '/traces/$traceId'
     | '/alerts/'
     | '/dashboards/'
     | '/errors/'
     | '/infra/'
+    | '/logs/'
+    | '/replays/'
     | '/services/'
     | '/traces/'
     | '/errors/issues/$issueId'
@@ -414,7 +454,6 @@ export interface FileRouteTypes {
     | '/chat'
     | '/connectors'
     | '/developer'
-    | '/logs'
     | '/mcp'
     | '/metrics'
     | '/org-required'
@@ -425,18 +464,23 @@ export interface FileRouteTypes {
     | '/settings'
     | '/sign-in'
     | '/sign-up'
+    | '/widget-lab'
     | '/alerts/$ruleId'
     | '/alerts/create'
     | '/dashboards/$dashboardId'
     | '/dashboards/templates'
     | '/errors/$errorType'
     | '/infra/$hostName'
+    | '/logs/$logId'
+    | '/replays/$sessionId'
     | '/services/$serviceName'
     | '/traces/$traceId'
     | '/alerts'
     | '/dashboards'
     | '/errors'
     | '/infra'
+    | '/logs'
+    | '/replays'
     | '/services'
     | '/traces'
     | '/errors/issues/$issueId'
@@ -454,7 +498,6 @@ export interface FileRouteTypes {
     | '/chat'
     | '/connectors'
     | '/developer'
-    | '/logs'
     | '/mcp'
     | '/metrics'
     | '/org-required'
@@ -465,18 +508,23 @@ export interface FileRouteTypes {
     | '/settings'
     | '/sign-in'
     | '/sign-up'
+    | '/widget-lab'
     | '/alerts/$ruleId'
     | '/alerts/create'
     | '/dashboards/$dashboardId'
     | '/dashboards/templates'
     | '/errors/$errorType'
     | '/infra/$hostName'
+    | '/logs/$logId'
+    | '/replays/$sessionId'
     | '/services/$serviceName'
     | '/traces/$traceId'
     | '/alerts/'
     | '/dashboards/'
     | '/errors/'
     | '/infra/'
+    | '/logs/'
+    | '/replays/'
     | '/services/'
     | '/traces/'
     | '/errors/issues/$issueId'
@@ -495,7 +543,6 @@ export interface RootRouteChildren {
   ChatRoute: typeof ChatRoute
   ConnectorsRoute: typeof ConnectorsRoute
   DeveloperRoute: typeof DeveloperRoute
-  LogsRoute: typeof LogsRoute
   McpRoute: typeof McpRoute
   MetricsRoute: typeof MetricsRoute
   OrgRequiredRoute: typeof OrgRequiredRoute
@@ -506,18 +553,23 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
+  WidgetLabRoute: typeof WidgetLabRoute
   AlertsRuleIdRoute: typeof AlertsRuleIdRoute
   AlertsCreateRoute: typeof AlertsCreateRoute
   DashboardsDashboardIdRoute: typeof DashboardsDashboardIdRoute
   DashboardsTemplatesRoute: typeof DashboardsTemplatesRoute
   ErrorsErrorTypeRoute: typeof ErrorsErrorTypeRoute
   InfraHostNameRoute: typeof InfraHostNameRoute
+  LogsLogIdRoute: typeof LogsLogIdRoute
+  ReplaysSessionIdRoute: typeof ReplaysSessionIdRoute
   ServicesServiceNameRoute: typeof ServicesServiceNameRoute
   TracesTraceIdRoute: typeof TracesTraceIdRoute
   AlertsIndexRoute: typeof AlertsIndexRoute
   DashboardsIndexRoute: typeof DashboardsIndexRoute
   ErrorsIndexRoute: typeof ErrorsIndexRoute
   InfraIndexRoute: typeof InfraIndexRoute
+  LogsIndexRoute: typeof LogsIndexRoute
+  ReplaysIndexRoute: typeof ReplaysIndexRoute
   ServicesIndexRoute: typeof ServicesIndexRoute
   TracesIndexRoute: typeof TracesIndexRoute
   ErrorsIssuesIssueIdRoute: typeof ErrorsIssuesIssueIdRoute
@@ -533,6 +585,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/widget-lab': {
+      id: '/widget-lab'
+      path: '/widget-lab'
+      fullPath: '/widget-lab'
+      preLoaderRoute: typeof WidgetLabRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sign-up': {
       id: '/sign-up'
       path: '/sign-up'
@@ -603,13 +662,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof McpRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/logs': {
-      id: '/logs'
-      path: '/logs'
-      fullPath: '/logs'
-      preLoaderRoute: typeof LogsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/developer': {
       id: '/developer'
       path: '/developer'
@@ -652,6 +704,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServicesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/replays/': {
+      id: '/replays/'
+      path: '/replays'
+      fullPath: '/replays/'
+      preLoaderRoute: typeof ReplaysIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/logs/': {
+      id: '/logs/'
+      path: '/logs'
+      fullPath: '/logs/'
+      preLoaderRoute: typeof LogsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/infra/': {
       id: '/infra/'
       path: '/infra'
@@ -692,6 +758,20 @@ declare module '@tanstack/react-router' {
       path: '/services/$serviceName'
       fullPath: '/services/$serviceName'
       preLoaderRoute: typeof ServicesServiceNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/replays/$sessionId': {
+      id: '/replays/$sessionId'
+      path: '/replays/$sessionId'
+      fullPath: '/replays/$sessionId'
+      preLoaderRoute: typeof ReplaysSessionIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/logs/$logId': {
+      id: '/logs/$logId'
+      path: '/logs/$logId'
+      fullPath: '/logs/$logId'
+      preLoaderRoute: typeof LogsLogIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/infra/$hostName': {
@@ -807,7 +887,6 @@ const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRoute,
   ConnectorsRoute: ConnectorsRoute,
   DeveloperRoute: DeveloperRoute,
-  LogsRoute: LogsRoute,
   McpRoute: McpRoute,
   MetricsRoute: MetricsRoute,
   OrgRequiredRoute: OrgRequiredRoute,
@@ -818,18 +897,23 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
+  WidgetLabRoute: WidgetLabRoute,
   AlertsRuleIdRoute: AlertsRuleIdRoute,
   AlertsCreateRoute: AlertsCreateRoute,
   DashboardsDashboardIdRoute: DashboardsDashboardIdRoute,
   DashboardsTemplatesRoute: DashboardsTemplatesRoute,
   ErrorsErrorTypeRoute: ErrorsErrorTypeRoute,
   InfraHostNameRoute: InfraHostNameRoute,
+  LogsLogIdRoute: LogsLogIdRoute,
+  ReplaysSessionIdRoute: ReplaysSessionIdRoute,
   ServicesServiceNameRoute: ServicesServiceNameRoute,
   TracesTraceIdRoute: TracesTraceIdRoute,
   AlertsIndexRoute: AlertsIndexRoute,
   DashboardsIndexRoute: DashboardsIndexRoute,
   ErrorsIndexRoute: ErrorsIndexRoute,
   InfraIndexRoute: InfraIndexRoute,
+  LogsIndexRoute: LogsIndexRoute,
+  ReplaysIndexRoute: ReplaysIndexRoute,
   ServicesIndexRoute: ServicesIndexRoute,
   TracesIndexRoute: TracesIndexRoute,
   ErrorsIssuesIssueIdRoute: ErrorsIssuesIssueIdRoute,

@@ -1,31 +1,17 @@
 import * as React from "react"
 
+import { Button } from "@maple/ui/components/ui/button"
 import { SpanRow } from "./span-row"
 import { useTraceView } from "./trace-view-context"
-import type { SpanNode } from "@/api/tinybird/traces"
+import { collectAllCollapsibleIds, computeDefaultExpandedSpanIds } from "./auto-collapse"
+import type { SpanNode } from "@/api/warehouse/traces"
 
-interface SpanHierarchyProps {
-	defaultExpandDepth?: number
-}
-
-function collectSpanIds(nodes: SpanNode[], depth: number, maxDepth: number): Set<string> {
-	const ids = new Set<string>()
-	for (const node of nodes) {
-		if (depth < maxDepth) {
-			ids.add(node.spanId)
-			const childIds = collectSpanIds(node.children, depth + 1, maxDepth)
-			childIds.forEach((id) => ids.add(id))
-		}
-	}
-	return ids
-}
-
-export function SpanHierarchy({ defaultExpandDepth = Infinity }: SpanHierarchyProps) {
+export function SpanHierarchy() {
 	const { rootSpans, totalDurationMs, traceStartTime, services, selectedSpanId, onSelectSpan } =
 		useTraceView()
 
 	const [expandedSpans, setExpandedSpans] = React.useState<Set<string>>(() => {
-		return collectSpanIds(rootSpans, 0, defaultExpandDepth)
+		return computeDefaultExpandedSpanIds(rootSpans, { keepVisibleSpanId: selectedSpanId })
 	})
 
 	const toggleSpan = (spanId: string) => {
@@ -74,8 +60,24 @@ export function SpanHierarchy({ defaultExpandDepth = Infinity }: SpanHierarchyPr
 			<div className="flex items-center border-b bg-muted/30 px-2 py-1.5 text-xs font-medium text-muted-foreground">
 				{/* Left section header */}
 				<div className="flex items-center gap-2 flex-1 min-w-0">
-					<div className="w-6 shrink-0" />
-					<span className="flex-1">Span</span>
+					<div className="flex items-center gap-0.5">
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-5 px-1.5 text-[10px]"
+							onClick={() => setExpandedSpans(collectAllCollapsibleIds(rootSpans))}
+						>
+							Expand all
+						</Button>
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-5 px-1.5 text-[10px]"
+							onClick={() => setExpandedSpans(new Set())}
+						>
+							Collapse all
+						</Button>
+					</div>
 				</div>
 				{/* Right section header (fixed widths matching rows) */}
 				<div className="flex items-center gap-2 shrink-0 ml-2">

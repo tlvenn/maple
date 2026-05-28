@@ -47,13 +47,24 @@ export interface QueryBuilderWidgetState {
 	statValueField: string
 	unit: ValueUnit
 	legendPosition: LegendPosition
+	seriesStatsEnabled: boolean
 	tableLimit: string
+	// Threshold lines (chart) / threshold coloring (stat, gauge)
+	thresholds: Array<{ value: number; color: string }>
+	// Gauge-specific
+	gaugeMin: string
+	gaugeMax: string
+	// Stat-specific: render a trend sparkline behind the value
+	sparklineEnabled: boolean
 	// List-specific
 	listDataSource: ListDataSource
 	listWhereClause: string
 	listLimit: string
 	listColumns: ListColumnDraft[]
 	listRootOnly: boolean
+	// Heatmap-specific
+	heatmapColorScale: "viridis" | "magma" | "cividis" | "blues" | "reds"
+	heatmapScaleType: "linear" | "log"
 }
 
 export function inferDisplayUnitForQuery(query: QueryBuilderQueryDraft): ValueUnit | undefined {
@@ -113,6 +124,13 @@ export function parsePositiveNumber(raw: string): number | undefined {
 	return parsed
 }
 
+export function parseFiniteNumber(raw: string): number | undefined {
+	const trimmed = raw.trim()
+	if (trimmed.length === 0) return undefined
+	const parsed = Number(trimmed)
+	return Number.isFinite(parsed) ? parsed : undefined
+}
+
 function toQueryGroupByArray(groupBy: unknown): string[] {
 	if (Array.isArray(groupBy)) {
 		return groupBy.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
@@ -126,23 +144,33 @@ function toMetricType(input: unknown, fallback: QueryBuilderMetricType): QueryBu
 	return fallback
 }
 
+function toStatAggregate(value: unknown): StatAggregate {
+	return value === "sum" ||
+		value === "first" ||
+		value === "count" ||
+		value === "avg" ||
+		value === "max" ||
+		value === "min"
+		? value
+		: "first"
+}
+
 function normalizeLoadedQuery(raw: QueryBuilderQueryDraft, index: number): QueryBuilderQueryDraft {
 	const base = createQueryDraft(index)
-	return {
-		...base,
-		...raw,
+	const source: QueryBuilderDataSource =
+		raw.dataSource === "traces" || raw.dataSource === "logs" || raw.dataSource === "metrics"
+			? raw.dataSource
+			: base.dataSource
+
+	const shared = {
+		id: raw.id || base.id,
 		name: raw.name || queryLabel(index),
-		dataSource:
-			raw.dataSource === "traces" || raw.dataSource === "logs" || raw.dataSource === "metrics"
-				? raw.dataSource
-				: base.dataSource,
-		signalSource:
-			raw.signalSource === "default" || raw.signalSource === "meter"
-				? raw.signalSource
-				: base.signalSource,
-		metricType: toMetricType(raw.metricType, base.metricType),
-		isMonotonic: raw.isMonotonic ?? raw.metricType === "sum",
-		groupBy: toQueryGroupByArray(raw.groupBy),
+		enabled: raw.enabled ?? base.enabled,
+		hidden: raw.hidden ?? base.hidden,
+		whereClause: raw.whereClause ?? base.whereClause,
+		aggregation: raw.aggregation || base.aggregation,
+		stepInterval: raw.stepInterval ?? base.stepInterval,
+		orderByDirection: raw.orderByDirection ?? base.orderByDirection,
 		addOns: {
 			groupBy: raw.addOns?.groupBy ?? base.addOns.groupBy,
 			having: raw.addOns?.having ?? base.addOns.having,
@@ -150,7 +178,25 @@ function normalizeLoadedQuery(raw: QueryBuilderQueryDraft, index: number): Query
 			limit: raw.addOns?.limit ?? base.addOns.limit,
 			legend: raw.addOns?.legend ?? base.addOns.legend,
 		},
+		groupBy: toQueryGroupByArray(raw.groupBy),
+		having: raw.having ?? base.having,
+		orderBy: raw.orderBy ?? base.orderBy,
+		limit: raw.limit ?? base.limit,
+		legend: raw.legend ?? base.legend,
 	}
+
+	if (source === "metrics") {
+		const metrics = raw.dataSource === "metrics" ? raw : undefined
+		return {
+			...shared,
+			dataSource: "metrics",
+			signalSource: metrics?.signalSource === "meter" ? "meter" : "default",
+			metricName: metrics?.metricName ?? "",
+			metricType: toMetricType(metrics?.metricType, "gauge"),
+			isMonotonic: metrics?.isMonotonic ?? metrics?.metricType === "sum",
+		}
+	}
+	return source === "logs" ? { ...shared, dataSource: "logs" } : { ...shared, dataSource: "traces" }
 }
 
 export function toSeriesFieldOptions(state: QueryBuilderWidgetState): string[] {
@@ -207,9 +253,21 @@ export function toInitialState(widget: DashboardWidget): QueryBuilderWidgetState
 			: {}
 
 	const listDs = widget.display.listDataSource === "logs" ? ("logs" as const) : ("traces" as const)
-	const legendRaw = widget.display.chartPresentation?.legend
+	const chartPresentation = widget.display.chartPresentation
+	const legendRaw = chartPresentation?.legend
 	const legendPosition: LegendPosition =
-		legendRaw === "hidden" ? "hidden" : legendRaw === "right" ? "right" : "bottom"
+		legendRaw === "hidden"
+			? "hidden"
+			: legendRaw === "right"
+				? "right"
+				: legendRaw === "visible"
+					? "bottom"
+					: "hidden"
+	// Legacy widgets persisted a `legend` value but no `seriesStats`; if they
+	// showed a legend they showed the stats table, so default it on for them.
+	const seriesStatsEnabled =
+		chartPresentation?.seriesStats ??
+		(legendRaw != null && legendRaw !== "hidden")
 
 	const baseFromWidget = {
 		visualization: widget.visualization,
@@ -224,13 +282,14 @@ export function toInitialState(widget: DashboardWidget): QueryBuilderWidgetState
 				? rawComparison.includePercentChange
 				: true,
 		debug: params.debug === true,
-		statAggregate: widget.dataSource.transform?.reduceToValue?.aggregate ?? "first",
+		statAggregate: toStatAggregate(widget.dataSource.transform?.reduceToValue?.aggregate),
 		statValueField: widget.dataSource.transform?.reduceToValue?.field ?? "",
 		unit:
 			widget.display.unit ??
 			inferDefaultUnitForQueries((params.queries as QueryBuilderQueryDraft[] | undefined) ?? []) ??
 			"number",
 		legendPosition,
+		seriesStatsEnabled,
 		tableLimit:
 			typeof widget.dataSource.transform?.limit === "number"
 				? String(widget.dataSource.transform.limit)
@@ -241,6 +300,15 @@ export function toInitialState(widget: DashboardWidget): QueryBuilderWidgetState
 		listColumns: (widget.display.columns ??
 			(listDs === "logs" ? LOG_DEFAULT_COLUMNS : TRACE_DEFAULT_COLUMNS)) as ListColumnDraft[],
 		listRootOnly: widget.display.listRootOnly ?? true,
+		heatmapColorScale: widget.display.heatmap?.colorScale ?? "blues",
+		heatmapScaleType: widget.display.heatmap?.scaleType ?? "linear",
+		thresholds: (widget.display.thresholds ?? []).map((threshold) => ({
+			value: threshold.value,
+			color: threshold.color,
+		})),
+		gaugeMin: widget.display.gauge?.min != null ? String(widget.display.gauge.min) : "",
+		gaugeMax: widget.display.gauge?.max != null ? String(widget.display.gauge.max) : "",
+		sparklineEnabled: widget.display.sparkline?.enabled === true,
 	} satisfies Omit<QueryBuilderWidgetState, "queries" | "formulas">
 
 	// List widgets don't use the query builder — return early with a dummy query
@@ -291,29 +359,43 @@ export function toInitialState(widget: DashboardWidget): QueryBuilderWidgetState
 			? params.source
 			: "traces"
 
-	const fallback: QueryBuilderQueryDraft = {
-		...fallbackQuery,
-		dataSource: source,
+	const fallbackBase = {
+		id: fallbackQuery.id,
+		name: fallbackQuery.name,
+		enabled: fallbackQuery.enabled,
+		hidden: fallbackQuery.hidden,
+		whereClause: formatFiltersAsWhereClause(params),
 		aggregation: typeof params.metric === "string" ? params.metric : fallbackQuery.aggregation,
 		stepInterval:
 			typeof params.bucketSeconds === "number"
 				? String(params.bucketSeconds)
 				: fallbackQuery.stepInterval,
-		whereClause: formatFiltersAsWhereClause(params),
-		groupBy: toQueryGroupByArray(params.groupBy),
-		metricName:
-			typeof (params.filters as Record<string, unknown> | undefined)?.metricName === "string"
-				? ((params.filters as Record<string, unknown>).metricName as string)
-				: fallbackQuery.metricName,
-		metricType: toMetricType(
-			(params.filters as Record<string, unknown> | undefined)?.metricType,
-			fallbackQuery.metricType,
-		),
+		orderByDirection: fallbackQuery.orderByDirection,
 		addOns: {
 			...fallbackQuery.addOns,
 			groupBy: Array.isArray(params.groupBy) ? params.groupBy.length > 0 : false,
 		},
+		groupBy: toQueryGroupByArray(params.groupBy),
+		having: fallbackQuery.having,
+		orderBy: fallbackQuery.orderBy,
+		limit: fallbackQuery.limit,
+		legend: fallbackQuery.legend,
 	}
+
+	const filterRecord = params.filters as Record<string, unknown> | undefined
+	const fallback: QueryBuilderQueryDraft =
+		source === "metrics"
+			? {
+					...fallbackBase,
+					dataSource: "metrics",
+					signalSource: "default",
+					metricName: typeof filterRecord?.metricName === "string" ? filterRecord.metricName : "",
+					metricType: toMetricType(filterRecord?.metricType, "gauge"),
+					isMonotonic: false,
+				}
+			: source === "logs"
+				? { ...fallbackBase, dataSource: "logs" }
+				: { ...fallbackBase, dataSource: "traces" }
 
 	return { ...baseFromWidget, queries: [fallback], formulas: [] }
 }
@@ -435,7 +517,8 @@ export function buildWidgetDataSource(
 		transform: sharedTransform,
 	}
 
-	if (state.visualization === "stat") {
+	// Stat and gauge both reduce the timeseries to a single scalar.
+	if (state.visualization === "stat" || state.visualization === "gauge") {
 		return {
 			...base,
 			transform: {
@@ -445,6 +528,21 @@ export function buildWidgetDataSource(
 					aggregate: state.statAggregate,
 				},
 			},
+		}
+	}
+
+	// Pie + histogram render a breakdown (one row per category) — they need the
+	// `breakdown` endpoint that returns `{name, value}[]`, not the timeseries
+	// endpoint that returns `{bucket, series}[]`. Without this, the preview tile
+	// silently calls the wrong endpoint and renders weighted pie/histogram bars
+	// from time-bucket counts (looks like uniform slices because every bucket
+	// has roughly the same count).
+	if (state.visualization === "pie" || state.visualization === "histogram") {
+		const visibleQueries = state.queries.filter(isVisibleQuery)
+		return {
+			endpoint: "custom_query_builder_breakdown",
+			params: { queries: visibleQueries },
+			transform: sharedTransform,
 		}
 	}
 
@@ -504,6 +602,7 @@ export function buildWidgetDisplay(
 		chartPresentation: {
 			...widget.display.chartPresentation,
 			legend: legendValue,
+			seriesStats: state.seriesStatsEnabled,
 		},
 	}
 	if (state.visualization === "chart") {
@@ -512,7 +611,49 @@ export function buildWidgetDisplay(
 		display.curveType = state.curveType
 		display.unit = state.unit
 	}
-	if (state.visualization === "stat") display.unit = state.unit
+	if (state.visualization === "stat") {
+		display.unit = state.unit
+		display.sparkline = state.sparklineEnabled
+			? {
+					enabled: true,
+					// The sparkline reuses the stat's query as a raw timeseries —
+					// i.e. the same data source minus the scalar reduceToValue.
+					dataSource: buildWidgetDataSource(
+						widget,
+						{ ...state, visualization: "chart" },
+						[],
+					),
+				}
+			: undefined
+	}
+	if (state.visualization === "gauge") {
+		display.unit = state.unit
+		const min = parseFiniteNumber(state.gaugeMin)
+		const max = parseFiniteNumber(state.gaugeMax)
+		display.gauge = {
+			min: min ?? 0,
+			max: max ?? 100,
+		}
+	}
+	if (
+		state.visualization === "chart" ||
+		state.visualization === "stat" ||
+		state.visualization === "gauge"
+	) {
+		display.thresholds =
+			state.thresholds.length > 0
+				? state.thresholds.map((threshold) => ({
+						value: threshold.value,
+						color: threshold.color,
+					}))
+				: undefined
+	}
+	if (state.visualization === "heatmap") {
+		display.heatmap = {
+			colorScale: state.heatmapColorScale,
+			scaleType: state.heatmapScaleType,
+		}
+	}
 	if (state.visualization === "table") {
 		const groupByQuery = state.queries.find((query) => isVisibleQuery(query) && hasActiveGroupBy(query))
 		if (groupByQuery) {

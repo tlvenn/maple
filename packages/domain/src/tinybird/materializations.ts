@@ -3,8 +3,8 @@ import {
 	serviceUsage,
 	serviceMapSpans,
 	serviceMapChildren,
-	serviceMapEdgesHourly,
 	serviceMapDbEdgesHourly,
+	serviceExternalEdgesHourly,
 	servicePlatformsHourly,
 	serviceOverviewSpans,
 	errorSpans,
@@ -15,6 +15,7 @@ import {
 	attributeValuesHourly,
 	tracesAggregatesHourly,
 	logsAggregatesHourly,
+	metricCatalog,
 } from "./datasources"
 
 /**
@@ -221,12 +222,12 @@ export const serviceUsageMetricsExpHistogramMv = defineMaterializedView(
 
 /**
  * Materialized view projecting trace spans needed for service dependency map.
- * Extracts peer.service and deployment.environment from Map columns at write time
- * so the service map JOIN query avoids scanning heavy Map columns.
+ * Extracts deployment.environment from Map columns at write time so the service
+ * map JOIN query avoids scanning heavy Map columns.
  */
 export const serviceMapSpansMv = defineMaterializedView("service_map_spans_mv", {
 	description:
-		"Materialized view projecting trace spans needed for service dependency map. Extracts peer.service and deployment.environment from Map columns at write time.",
+		"Materialized view projecting trace spans needed for service dependency map. Extracts deployment.environment from Map columns at write time.",
 	datasource: serviceMapSpans,
 	nodes: [
 		node({
@@ -243,7 +244,6 @@ export const serviceMapSpansMv = defineMaterializedView("service_map_spans_mv", 
           Duration,
           StatusCode,
           TraceState,
-          SpanAttributes['peer.service'] AS PeerService,
           ResourceAttributes['deployment.environment'] AS DeploymentEnv
         FROM traces
         WHERE SpanKind IN ('Client', 'Producer', 'Server', 'Consumer')
@@ -321,50 +321,31 @@ export const serviceMapChildrenMv = defineMaterializedView("service_map_children
 	],
 })
 
-/**
- * Materialized view pre-aggregating service-to-service edges per hour.
- * Aggregates Client spans with peer.service into hourly buckets at write time
- * so the service map query scans pre-aggregated rows instead of individual spans.
- */
-export const serviceMapEdgesHourlyMv = defineMaterializedView("service_map_edges_hourly_mv", {
-	description:
-		"Pre-aggregates Client spans with peer.service into hourly service-to-service edge buckets for fast service map queries.",
-	datasource: serviceMapEdgesHourly,
-	nodes: [
-		node({
-			name: "service_map_edges_hourly_mv_node",
-			sql: `
-        SELECT
-          OrgId,
-          toStartOfHour(toDateTime(Timestamp)) AS Hour,
-          ServiceName AS SourceService,
-          SpanAttributes['peer.service'] AS TargetService,
-          ResourceAttributes['deployment.environment'] AS DeploymentEnv,
-          count() AS CallCount,
-          countIf(StatusCode = 'Error') AS ErrorCount,
-          sum(Duration / 1000000) AS DurationSumMs,
-          max(Duration / 1000000) AS MaxDurationMs,
-          countIf(TraceState LIKE '%th:%') AS SampledSpanCount,
-          countIf(TraceState = '' OR TraceState NOT LIKE '%th:%') AS UnsampledSpanCount,
-          sum(SampleRate) AS SampleRateSum
-        FROM traces
-        WHERE SpanKind = 'Client'
-          AND SpanAttributes['peer.service'] != ''
-        GROUP BY OrgId, Hour, SourceService, TargetService, DeploymentEnv
-      `,
-		}),
-	],
-})
+// `service_map_edges_hourly` (service-to-service edges) is intentionally NOT
+// populated by a materialized view. The downstream service name can only be
+// recovered by joining a Client/Producer span to its child Server/Consumer
+// span (modern OTEL instrumentation no longer emits a `peer.service`
+// attribute) — a cross-span join that an *incremental* ClickHouse MV cannot
+// express. The table is filled by the scheduled hourly rollup in
+// `ServiceMapRollupService`, which runs that join once per completed hour.
+//
+// Why not a *refreshable* MV (`REFRESH EVERY 1 HOUR`), which can run a join?
+//  - This schema deploys to both Tinybird and ClickHouse; Tinybird has no
+//    refreshable-MV equivalent, so the rollup (routed via WarehouseQueryService)
+//    is the only mechanism that works for both backends.
+//  - Refreshable MVs are still experimental on the deployed ClickHouse (24.8).
+//  - The job adds bounded-lookback catch-up + skip-existing idempotency that a
+//    `REFRESH ... APPEND` MV does not provide.
 
 /**
  * Materialized view pre-aggregating service-to-database edges per hour.
- * Aggregates Client/Producer spans with `db.system` set into hourly buckets at
- * write time so the database-node query reads pre-aggregated rows instead of
- * scanning raw span attributes.
+ * Aggregates Client/Producer spans with `db.system.name` set into hourly
+ * buckets at write time so the database-node query reads pre-aggregated rows
+ * instead of scanning raw span attributes.
  */
 export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_edges_hourly_mv", {
 	description:
-		"Pre-aggregates Client/Producer spans with db.system into hourly service-to-database edge buckets for fast service map db-node queries.",
+		"Pre-aggregates Client/Producer spans with db.system.name into hourly service-to-database edge buckets for fast service map db-node queries.",
 	datasource: serviceMapDbEdgesHourly,
 	nodes: [
 		node({
@@ -374,7 +355,7 @@ export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_
           OrgId,
           toStartOfHour(toDateTime(Timestamp)) AS Hour,
           ServiceName,
-          SpanAttributes['db.system'] AS DbSystem,
+          SpanAttributes['db.system.name'] AS DbSystem,
           ResourceAttributes['deployment.environment'] AS DeploymentEnv,
           count() AS CallCount,
           countIf(StatusCode = 'Error') AS ErrorCount,
@@ -385,13 +366,90 @@ export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_
           sum(SampleRate) AS SampleRateSum
         FROM traces
         WHERE SpanKind IN ('Client', 'Producer')
-          AND SpanAttributes['db.system'] != ''
+          AND SpanAttributes['db.system.name'] != ''
           AND ServiceName != ''
         GROUP BY OrgId, Hour, ServiceName, DbSystem, DeploymentEnv
       `,
 		}),
 	],
 })
+
+/**
+ * Materialized view pre-aggregating service-to-external-target edges per hour.
+ * Captures Client/Producer spans WITHOUT `db.system.name` set (DB calls go to
+ * `service_map_db_edges_hourly_mv`) — i.e. plain HTTP outbound, messaging
+ * producers, and RPC clients.
+ *
+ * `TargetType` precedence: messaging > rpc > http. A span carrying both
+ * `messaging.system` and `server.address` (rare, but happens when a queue
+ * client also tags the broker address) lands as messaging — its identity is
+ * the queue, not the host. RPC is preferred over http for the same reason.
+ *
+ * For HTTP the fallback chain for `TargetName` is
+ * `server.address` → `http.host` → `url.authority` — modern OTel SDKs emit
+ * `server.address`; legacy ones still emit `http.host`; some emit `url.authority`.
+ */
+export const serviceExternalEdgesHourlyMv = defineMaterializedView(
+	"service_external_edges_hourly_mv",
+	{
+		description:
+			"Pre-aggregates Client/Producer spans without db.system.name into hourly service-to-external-target edges (http / messaging / rpc) for the service-detail Dependencies tab.",
+		datasource: serviceExternalEdgesHourly,
+		nodes: [
+			node({
+				name: "service_external_edges_hourly_mv_node",
+				sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(Timestamp)) AS Hour,
+          ServiceName,
+          multiIf(
+            SpanAttributes['messaging.destination'] != '' OR SpanAttributes['messaging.system'] != '', 'messaging',
+            SpanAttributes['rpc.service'] != '' OR SpanAttributes['rpc.system'] != '', 'rpc',
+            'http'
+          ) AS TargetType,
+          multiIf(
+            SpanAttributes['messaging.destination'] != '' OR SpanAttributes['messaging.system'] != '', SpanAttributes['messaging.system'],
+            SpanAttributes['rpc.service'] != '' OR SpanAttributes['rpc.system'] != '', SpanAttributes['rpc.system'],
+            ''
+          ) AS TargetSystem,
+          multiIf(
+            SpanAttributes['messaging.destination'] != '' OR SpanAttributes['messaging.system'] != '',
+              if(SpanAttributes['messaging.destination'] != '', SpanAttributes['messaging.destination'], SpanAttributes['messaging.system']),
+            SpanAttributes['rpc.service'] != '' OR SpanAttributes['rpc.system'] != '',
+              if(SpanAttributes['rpc.service'] != '', SpanAttributes['rpc.service'], SpanAttributes['rpc.system']),
+            if(SpanAttributes['server.address'] != '',
+              SpanAttributes['server.address'],
+              if(SpanAttributes['http.host'] != '',
+                SpanAttributes['http.host'],
+                SpanAttributes['url.authority']))
+          ) AS TargetName,
+          ResourceAttributes['deployment.environment'] AS DeploymentEnv,
+          count() AS CallCount,
+          countIf(StatusCode = 'Error') AS ErrorCount,
+          sum(Duration / 1000000) AS DurationSumMs,
+          max(Duration / 1000000) AS MaxDurationMs,
+          sum(SampleRate) AS SampleRateSum
+        FROM traces
+        WHERE SpanKind IN ('Client', 'Producer')
+          AND SpanAttributes['db.system.name'] = ''
+          AND ServiceName != ''
+          AND (
+               SpanAttributes['server.address'] != ''
+            OR SpanAttributes['http.host'] != ''
+            OR SpanAttributes['url.authority'] != ''
+            OR SpanAttributes['messaging.destination'] != ''
+            OR SpanAttributes['messaging.system'] != ''
+            OR SpanAttributes['rpc.service'] != ''
+            OR SpanAttributes['rpc.system'] != ''
+          )
+        GROUP BY OrgId, Hour, ServiceName, TargetType, TargetSystem, TargetName, DeploymentEnv
+        HAVING TargetName != ''
+      `,
+			}),
+		],
+	},
+)
 
 /**
  * Materialized view pre-aggregating per-service hosting-platform attributes per hour.
@@ -510,11 +568,59 @@ export const errorEventsMv = defineMaterializedView("error_events_mv", {
           ) AS _topFrames,
           if(length(_topFrames) > 0, _topFrames[1], '') AS _topFrame,
           arrayStringConcat(_topFrames, '\\n') AS _fpFrames,
-          if(
-            _fpFrames = '',
-            replaceRegexpAll(substring(StatusMessage, 1, 200), '[0-9a-fA-F]{8,}|[0-9]+', '#'),
-            ''
-          ) AS _msgFallback
+          -- JSON detection (only consulted when _fpFrames = '')
+          isValidJSON(StatusMessage) AS _isJson,
+          _isJson AND JSONType(StatusMessage) = 'Object' AS _isJsonObj,
+          -- General, KEY-NAME-AGNOSTIC canonical signature: iterate ALL top-level
+          -- keys, redact volatile tokens (long hex / numbers) in each raw value, then
+          -- sort by "key=value" so key order & whitespace don't matter. No assumption
+          -- about which keys exist — works for any producer's JSON shape. (Nested
+          -- objects are hashed as their raw substring; only top-level is canonicalized.)
+          arrayStringConcat(
+            arraySort(
+              arrayMap(
+                kv -> concat(kv.1, '=', replaceRegexpAll(kv.2, '[0-9a-fA-F]{8,}|[0-9]+', '#')),
+                JSONExtractKeysAndValuesRaw(StatusMessage)
+              )
+            ),
+            '|'
+          ) AS _jsonSig,
+          -- Fold into the existing fallback hash slot. Non-JSON path is unchanged.
+          multiIf(
+            _fpFrames != '', '',
+            _isJsonObj,      _jsonSig,
+            replaceRegexpAll(substring(StatusMessage, 1, 200), '[0-9a-fA-F]{8,}|[0-9]+', '#')
+          ) AS _msgFallback,
+          -- Display-only, best-effort human label (decoupled from the fingerprint:
+          -- many labels may map to one hash). The broad key list here is a DISPLAY
+          -- heuristic only; the fingerprint above makes no key-name assumption.
+          multiIf(
+            JSONExtractString(StatusMessage, 'title')   != '', JSONExtractString(StatusMessage, 'title'),
+            JSONExtractString(StatusMessage, 'message') != '', JSONExtractString(StatusMessage, 'message'),
+            JSONExtractString(StatusMessage, 'error')   != '', JSONExtractString(StatusMessage, 'error'),
+            JSONExtractString(StatusMessage, '_tag')    != '', JSONExtractString(StatusMessage, '_tag'),
+            JSONExtractString(StatusMessage, 'reason')  != '', JSONExtractString(StatusMessage, 'reason'),
+            JSONExtractString(StatusMessage, 'name')    != '', JSONExtractString(StatusMessage, 'name'),
+            JSONExtractString(StatusMessage, 'type')    != '', extract(JSONExtractString(StatusMessage, 'type'), '([^/]+)$'),
+            'JSON error'
+          ) AS _jsonLabel,
+          multiIf(
+            StatusMessage = '', 'Unknown Error',
+            position(StatusMessage, '{ readonly') = 1 OR position(StatusMessage, '└─') > 0,
+              if(
+                extract(StatusMessage, 'readonly (\\\\w+)') != '',
+                concat('Schema parse error: ', extract(StatusMessage, 'readonly (\\\\w+)')),
+                'Schema parse error'
+              ),
+            _isJsonObj OR position(StatusMessage, '[') = 1, _jsonLabel,
+            left(StatusMessage, multiIf(
+              position(StatusMessage, ': ')  > 3, toInt64(position(StatusMessage, ': '))  - 1,
+              position(StatusMessage, ' (')  > 3, toInt64(position(StatusMessage, ' (')) - 1,
+              position(StatusMessage, '\\n') > 3, toInt64(position(StatusMessage, '\\n')) - 1,
+              least(toInt64(length(StatusMessage)), 150)
+            ))
+          ) AS _statusLabel,
+          if(_exType != '', _exType, _statusLabel) AS _errorLabel
         SELECT
           OrgId,
           toDateTime(Timestamp) AS Timestamp,
@@ -529,7 +635,8 @@ export const errorEventsMv = defineMaterializedView("error_events_mv", {
           _topFrame AS TopFrame,
           cityHash64(OrgId, ServiceName, _exType, _fpFrames, _msgFallback) AS FingerprintHash,
           StatusMessage,
-          Duration
+          Duration,
+          _errorLabel AS ErrorLabel
         FROM traces
         WHERE StatusCode = 'Error'
       `,
@@ -693,6 +800,166 @@ export const metricAttributeKeysMv = defineMaterializedView("metric_attribute_ke
         FROM metrics_sum
         WHERE Attributes != map()
         GROUP BY OrgId, Hour, AttributeKey, AttributeScope
+      `,
+		}),
+	],
+})
+
+// ---------------------------------------------------------------------------
+// Metric catalog — one MV per raw metric table, all feeding `metric_catalog`.
+// Each hourly-rolls up distinct metrics so the Metrics page discovery queries
+// read the tiny catalog instead of scanning raw datapoints.
+// ---------------------------------------------------------------------------
+
+export const metricCatalogSumMv = defineMaterializedView("metric_catalog_sum_mv", {
+	description: "Hourly rollup of distinct sum metrics into metric_catalog.",
+	datasource: metricCatalog,
+	nodes: [
+		node({
+			name: "metric_catalog_sum_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(TimeUnix)) AS Hour,
+          'sum' AS MetricType,
+          ServiceName,
+          MetricName,
+          anyLast(MetricDescription) AS MetricDescription,
+          anyLast(MetricUnit) AS MetricUnit,
+          anyLast(toUInt8(IsMonotonic)) AS IsMonotonic,
+          count() AS DataPointCount,
+          min(toDateTime(TimeUnix)) AS FirstSeen,
+          max(toDateTime(TimeUnix)) AS LastSeen
+        FROM metrics_sum
+        GROUP BY OrgId, Hour, MetricType, ServiceName, MetricName
+      `,
+		}),
+	],
+})
+
+export const metricCatalogGaugeMv = defineMaterializedView("metric_catalog_gauge_mv", {
+	description: "Hourly rollup of distinct gauge metrics into metric_catalog.",
+	datasource: metricCatalog,
+	nodes: [
+		node({
+			name: "metric_catalog_gauge_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(TimeUnix)) AS Hour,
+          'gauge' AS MetricType,
+          ServiceName,
+          MetricName,
+          anyLast(MetricDescription) AS MetricDescription,
+          anyLast(MetricUnit) AS MetricUnit,
+          toUInt8(0) AS IsMonotonic,
+          count() AS DataPointCount,
+          min(toDateTime(TimeUnix)) AS FirstSeen,
+          max(toDateTime(TimeUnix)) AS LastSeen
+        FROM metrics_gauge
+        GROUP BY OrgId, Hour, MetricType, ServiceName, MetricName
+      `,
+		}),
+	],
+})
+
+export const metricCatalogHistogramMv = defineMaterializedView("metric_catalog_histogram_mv", {
+	description: "Hourly rollup of distinct histogram metrics into metric_catalog.",
+	datasource: metricCatalog,
+	nodes: [
+		node({
+			name: "metric_catalog_histogram_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(TimeUnix)) AS Hour,
+          'histogram' AS MetricType,
+          ServiceName,
+          MetricName,
+          anyLast(MetricDescription) AS MetricDescription,
+          anyLast(MetricUnit) AS MetricUnit,
+          toUInt8(0) AS IsMonotonic,
+          count() AS DataPointCount,
+          min(toDateTime(TimeUnix)) AS FirstSeen,
+          max(toDateTime(TimeUnix)) AS LastSeen
+        FROM metrics_histogram
+        GROUP BY OrgId, Hour, MetricType, ServiceName, MetricName
+      `,
+		}),
+	],
+})
+
+export const metricCatalogExpHistogramMv = defineMaterializedView("metric_catalog_exp_histogram_mv", {
+	description: "Hourly rollup of distinct exponential histogram metrics into metric_catalog.",
+	datasource: metricCatalog,
+	nodes: [
+		node({
+			name: "metric_catalog_exp_histogram_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(TimeUnix)) AS Hour,
+          'exponential_histogram' AS MetricType,
+          ServiceName,
+          MetricName,
+          anyLast(MetricDescription) AS MetricDescription,
+          anyLast(MetricUnit) AS MetricUnit,
+          toUInt8(0) AS IsMonotonic,
+          count() AS DataPointCount,
+          min(toDateTime(TimeUnix)) AS FirstSeen,
+          max(toDateTime(TimeUnix)) AS LastSeen
+        FROM metrics_exponential_histogram
+        GROUP BY OrgId, Hour, MetricType, ServiceName, MetricName
+      `,
+		}),
+	],
+})
+
+export const logAttributeValuesMv = defineMaterializedView("log_attribute_values_mv", {
+	description: "Aggregates log attribute values from logs hourly.",
+	datasource: attributeValuesHourly,
+	nodes: [
+		node({
+			name: "log_attribute_values_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(Timestamp)) AS Hour,
+          AttributeKey,
+          AttributeValue,
+          'log' AS AttributeScope,
+          count() AS UsageCount
+        FROM logs
+        ARRAY JOIN
+          mapKeys(LogAttributes) AS AttributeKey,
+          mapValues(LogAttributes) AS AttributeValue
+        WHERE AttributeValue != ''
+        GROUP BY OrgId, Hour, AttributeKey, AttributeValue, AttributeScope
+      `,
+		}),
+	],
+})
+
+export const metricAttributeValuesMv = defineMaterializedView("metric_attribute_values_mv", {
+	description: "Aggregates metric attribute values from metrics_sum hourly.",
+	datasource: attributeValuesHourly,
+	nodes: [
+		node({
+			name: "metric_attribute_values_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(TimeUnix)) AS Hour,
+          AttributeKey,
+          AttributeValue,
+          'metric' AS AttributeScope,
+          count() AS UsageCount
+        FROM metrics_sum
+        ARRAY JOIN
+          mapKeys(Attributes) AS AttributeKey,
+          mapValues(Attributes) AS AttributeValue
+        WHERE AttributeValue != ''
+        GROUP BY OrgId, Hour, AttributeKey, AttributeValue, AttributeScope
       `,
 		}),
 	],

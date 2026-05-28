@@ -1,9 +1,14 @@
 import { useMemo } from "react"
 import { Atom, Result, useAtomValue } from "@/lib/effect-atom"
-import { getCustomChartTimeSeriesResultAtom } from "@/lib/services/atoms/tinybird-query-atoms"
-import { computeBucketSeconds } from "@/api/tinybird/timeseries-utils"
+import { getCustomChartTimeSeriesResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
+import { computeBucketSeconds } from "@/api/warehouse/timeseries-utils"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
-import { type RuleFormState, signalToQueryParams, flattenAlertChartData } from "@/lib/alerts/form-utils"
+import {
+	type AlertPreviewGroupBy,
+	type RuleFormState,
+	signalToQueryParams,
+	flattenAlertChartData,
+} from "@/lib/alerts/form-utils"
 
 const CHART_BUCKET_TARGET = 96
 const emptyChartAtom = Atom.make(Result.initial())
@@ -19,11 +24,12 @@ export function useAlertRuleChart(form: RuleFormState) {
 	const queryParams = useMemo(() => signalToQueryParams(form), [form])
 
 	const chartGroupBy = useMemo(
-		() =>
-			form.serviceNames.length > 1 || (form.serviceNames.length === 0 && form.groupBy.length > 0)
-				? ("service" as const)
-				: ("none" as const),
-		[form.serviceNames.length, form.groupBy],
+		(): AlertPreviewGroupBy =>
+			queryParams?.groupBy ??
+			(form.serviceNames.length > 1 || (form.serviceNames.length === 0 && form.groupBy.length > 0)
+				? "service"
+				: "none"),
+		[queryParams?.groupBy, form.serviceNames.length, form.groupBy],
 	)
 
 	const chartQueryInput = useMemo(() => {

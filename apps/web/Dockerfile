@@ -15,9 +15,10 @@ RUN apt-get update && \
 RUN bun install
 COPY --from=pruner /app/out/full/ ./
 
-# The web build imports `@maple-dev/effect-sdk/client`, whose subpath exports
-# point at pre-built `dist/` only. Build that first so rolldown can resolve.
-RUN bunx turbo build --filter=@maple-dev/effect-sdk
+# `@maple-dev/effect-sdk` and `@maple-dev/browser` both only expose pre-built
+# `dist/` via their exports map — build them first so rolldown can resolve
+# the imports during `vite build`.
+RUN bunx turbo build --filter=@maple-dev/effect-sdk --filter=@maple-dev/browser
 
 # Build-time env vars (baked into the SPA bundle)
 ARG VITE_API_BASE_URL

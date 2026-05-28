@@ -18,10 +18,10 @@ import {
 } from "@maple/domain/http"
 import { scrapeTargets } from "@maple/db"
 import { and, eq } from "drizzle-orm"
-import { Cause, Effect, Exit, Layer, Option, Redacted, Schema, Context } from "effect"
-import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "./Crypto"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Cause, Clock, Context, Effect, Exit, Layer, Option, Redacted, Schema } from "effect"
+import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "../lib/Crypto"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 import { safeFetch, validateExternalUrl } from "../lib/url-validator"
 
 type ScrapeTargetRow = typeof scrapeTargets.$inferSelect
@@ -115,18 +115,18 @@ const decryptCredentials = (
 		() => toEncryptionError("Failed to decrypt auth credentials"),
 	)
 
-const VALID_AUTH_TYPES = ["none", "bearer", "basic"] as const
+const decodeAuthTypeEffect = Schema.decodeUnknownEffect(ScrapeAuthType)
 
 const validateAuthType = (authType: string | undefined) => {
 	if (authType === undefined) return Effect.succeed(undefined)
-	if (!(VALID_AUTH_TYPES as readonly string[]).includes(authType)) {
-		return Effect.fail(
-			new ScrapeTargetValidationError({
-				message: `Invalid auth type: "${authType}". Must be one of: ${VALID_AUTH_TYPES.join(", ")}`,
-			}),
-		)
-	}
-	return Effect.succeed(authType as (typeof VALID_AUTH_TYPES)[number])
+	return decodeAuthTypeEffect(authType).pipe(
+		Effect.mapError(
+			() =>
+				new ScrapeTargetValidationError({
+					message: `Invalid auth type: "${authType}". Must be one of: none, bearer, basic`,
+				}),
+		),
+	)
 }
 
 const validateAuthCredentials = (authType: string, authCredentials: string | null | undefined) => {
@@ -235,7 +235,7 @@ const validateLabelsJson = (labelsJson: string | null | undefined) => {
 }
 
 export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, ScrapeTargetsServiceShape>()(
-	"ScrapeTargetsService",
+	"@maple/api/services/ScrapeTargetsService",
 	{
 		make: Effect.gen(function* () {
 			const database = yield* Database
@@ -318,7 +318,7 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 					}
 				}
 
-				const now = Date.now()
+				const now = yield* Clock.currentTimeMillis
 				const id = decodeTargetIdSync(randomUUID())
 
 				yield* database
@@ -367,7 +367,7 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 				yield* validateInterval(request.scrapeIntervalSeconds)
 				yield* validateLabelsJson(request.labelsJson)
 
-				const now = Date.now()
+				const now = yield* Clock.currentTimeMillis
 				const updates: Record<string, unknown> = { updatedAt: now }
 
 				if (request.name !== undefined) updates.name = request.name.trim()
@@ -513,7 +513,7 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 					}
 				}
 
-				const now = Date.now()
+				const now = yield* Clock.currentTimeMillis
 				const requestExit = yield* Effect.tryPromise({
 					try: async () => {
 						const controller = new AbortController()
@@ -593,6 +593,4 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 	},
 ) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 }

@@ -13,10 +13,10 @@ import {
 } from "@maple/domain/http"
 import { orgOpenrouterSettings } from "@maple/db"
 import { eq } from "drizzle-orm"
-import { Context, Effect, Layer, Option, Redacted, Schema } from "effect"
-import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "./Crypto"
-import { Database } from "./DatabaseLive"
-import { Env } from "./Env"
+import { Clock, Context, Effect, Layer, Option, Redacted, Schema } from "effect"
+import { decryptAes256Gcm, encryptAes256Gcm, parseBase64Aes256GcmKey, type EncryptedValue } from "../lib/Crypto"
+import { Database } from "../lib/DatabaseLive"
+import { Env } from "../lib/Env"
 
 type ActiveRow = typeof orgOpenrouterSettings.$inferSelect
 
@@ -121,7 +121,7 @@ export interface OrgOpenRouterSettingsServiceShape {
 export class OrgOpenRouterSettingsService extends Context.Service<
 	OrgOpenRouterSettingsService,
 	OrgOpenRouterSettingsServiceShape
->()("OrgOpenRouterSettingsService", {
+>()("@maple/api/services/OrgOpenRouterSettingsService", {
 	make: Effect.gen(function* () {
 		const database = yield* Database
 		const env = yield* Env
@@ -177,7 +177,7 @@ export class OrgOpenRouterSettingsService extends Context.Service<
 			const apiKey = yield* normalizeApiKey(payload.apiKey)
 			const existing = yield* selectActiveRow(orgId)
 			const encrypted = yield* encryptKey(apiKey, encryptionKey)
-			const now = Date.now()
+			const now = yield* Clock.currentTimeMillis
 			const last4 = toLast4(apiKey)
 
 			yield* database
@@ -252,12 +252,10 @@ export class OrgOpenRouterSettingsService extends Context.Service<
 			upsert,
 			delete: deleteSettings,
 			resolveApiKey,
-		}
+		} satisfies OrgOpenRouterSettingsServiceShape
 	}),
 }) {
 	static readonly layer = Layer.effect(this, this.make)
-	static readonly Live = this.layer
-	static readonly Default = this.layer
 
 	static readonly get = (orgId: OrgId, roles: ReadonlyArray<RoleName>) =>
 		this.use((service) => service.get(orgId, roles))

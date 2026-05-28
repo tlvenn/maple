@@ -1,10 +1,19 @@
-import { Result, useAtom, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
-import { useCallback, useEffect, useMemo, useRef } from "react"
-import { Cause, Exit, Schema } from "effect"
 import {
+	Result,
+	useAtom,
+	useAtomRefresh,
+	useAtomSet,
+	useAtomSubscribe,
+	useAtomValue,
+} from "@/lib/effect-atom"
+import { useCallback, useMemo, useRef } from "react"
+import { Cause, Exit, Option, Schema } from "effect"
+import {
+	DashboardConcurrencyError,
 	DashboardCreateRequest,
 	DashboardDocument,
 	DashboardId,
+	DashboardPersesImportRequest,
 	DashboardUpsertRequest,
 	IsoDateTimeString,
 	PortableDashboardDocument,
@@ -29,6 +38,30 @@ function generateId() {
 	return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
+function isExitLike(value: unknown): value is Exit.Exit<unknown, unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"_tag" in value &&
+		((value as { _tag: unknown })._tag === "Success" || (value as { _tag: unknown })._tag === "Failure")
+	)
+}
+
+function messageFromError(error: unknown): string | null {
+	if (error instanceof Error && error.message.trim().length > 0) {
+		return error.message
+	}
+
+	if (typeof error === "object" && error !== null) {
+		const message = (error as { message?: unknown }).message
+		if (typeof message === "string" && message.trim().length > 0) {
+			return message
+		}
+	}
+
+	return null
+}
+
 function findNextPosition(widgets: DashboardWidget[], newWidth: number): { x: number; y: number } {
 	if (widgets.length === 0) {
 		return { x: 0, y: 0 }
@@ -47,56 +80,48 @@ function findNextPosition(widgets: DashboardWidget[], newWidth: number): { x: nu
 }
 
 function getErrorMessage(error: unknown): string {
-	if (error instanceof Error && error.message.trim().length > 0) {
-		return error.message
+	const directMessage = messageFromError(error)
+	if (directMessage) return directMessage
+
+	if (isExitLike(error) && Exit.isFailure(error)) {
+		const failure = Option.getOrUndefined(Cause.findErrorOption(error.cause))
+		const failureMessage = messageFromError(failure)
+		if (failureMessage) return failureMessage
+
+		const squashed = Cause.squash(error.cause)
+		const squashedMessage = messageFromError(squashed)
+		if (squashedMessage) return squashedMessage
 	}
 
 	return "Dashboard persistence is temporarily unavailable"
 }
 
-// Walk a Cause/Exit failure chain to detect a server-side concurrency
-// rejection. The persistence layer surfaces these as a tagged error with the
-// `@maple/http/errors/DashboardConcurrencyError` identifier; this matches both
-// Effect-tagged class instances and the JSON shape the HTTP boundary decodes
-// into on the client side.
-function isConcurrencyConflict(failure: unknown): boolean {
-	const visit = (value: unknown): boolean => {
-		if (value === null || typeof value !== "object") return false
-		const tag = (value as { _tag?: unknown })._tag
-		if (typeof tag === "string" && tag.includes("DashboardConcurrencyError")) return true
-		if (Cause.isCause(value)) {
-			return visit(Cause.squash(value))
-		}
-		return false
-	}
-
-	if (Exit.isExit(failure)) {
-		if (!Exit.isFailure(failure)) return false
-		return visit(Cause.squash(failure.cause))
-	}
-	return visit(failure)
+// Detect a server-side concurrency rejection. The persistence layer surfaces
+// these as the tagged `DashboardConcurrencyError` from `@maple/domain/http`;
+// pull the first failure out of the mutation's `Exit` and match on its tag.
+function isConcurrencyConflict(failure: Exit.Exit<unknown, unknown>): boolean {
+	if (!Exit.isFailure(failure)) return false
+	return Option.match(Cause.findErrorOption(failure.cause), {
+		onNone: () => false,
+		onSome: (error) => error instanceof DashboardConcurrencyError,
+	})
 }
 
+const decodeDashboardDocument = Schema.decodeUnknownOption(DashboardDocument)
+
+// Validate an unknown payload (a mutation result or list item) against the
+// `DashboardDocument` schema. A decoded document is structurally a `Dashboard`
+// once its `readonly` arrays are widened to the mutable web equivalents (its
+// branded ids / ISO timestamps are already assignable to the web type's strings).
 function ensureDashboard(value: unknown): Dashboard | null {
-	if (typeof value !== "object" || value === null) {
-		return null
-	}
-
-	const dashboard = value as Partial<Dashboard>
-
-	if (
-		typeof dashboard.id !== "string" ||
-		typeof dashboard.name !== "string" ||
-		!Array.isArray(dashboard.widgets) ||
-		typeof dashboard.createdAt !== "string" ||
-		typeof dashboard.updatedAt !== "string" ||
-		typeof dashboard.timeRange !== "object" ||
-		dashboard.timeRange === null
-	) {
-		return null
-	}
-
-	return dashboard as Dashboard
+	return Option.match(decodeDashboardDocument(value), {
+		onNone: () => null,
+		onSome: (document) => ({
+			...document,
+			tags: document.tags ? [...document.tags] : undefined,
+			widgets: [...document.widgets] as Dashboard["widgets"],
+		}),
+	})
 }
 
 function toDashboardDocument(dashboard: Dashboard): DashboardDocument {
@@ -186,6 +211,9 @@ export function useDashboardStore() {
 	const createMutation = useAtomSet(MapleApiAtomClient.mutation("dashboards", "create"), {
 		mode: "promiseExit",
 	})
+	const importPersesMutation = useAtomSet(MapleApiAtomClient.mutation("dashboards", "importPerses"), {
+		mode: "promiseExit",
+	})
 	const upsertMutation = useAtomSet(MapleApiAtomClient.mutation("dashboards", "upsert"), {
 		mode: "promiseExit",
 	})
@@ -199,17 +227,21 @@ export function useDashboardStore() {
 	// (from a refetch), not on re-mount with the same stale result. Without this guard,
 	// navigating between routes re-applies the old listResult and overwrites optimistic updates.
 	const lastSyncedListResult = useRef(listResult)
-	useEffect(() => {
-		if (listResult === lastSyncedListResult.current) return
-		lastSyncedListResult.current = listResult
-		if (Result.isSuccess(listResult)) {
-			const parsed = parseDashboards(listResult.value.dashboards)
-			setDashboards((previous) => reconcileDashboards(previous, parsed))
-			setPersistenceError(null)
-		} else if (Result.isFailure(listResult)) {
-			setPersistenceError(getErrorMessage(listResult))
-		}
-	}, [listResult, setDashboards, setPersistenceError])
+	const syncListResult = useCallback(
+		(nextListResult: typeof listResult) => {
+			if (nextListResult === lastSyncedListResult.current) return
+			lastSyncedListResult.current = nextListResult
+			if (Result.isSuccess(nextListResult)) {
+				const parsed = parseDashboards(nextListResult.value.dashboards)
+				setDashboards((previous) => reconcileDashboards(previous, parsed))
+				setPersistenceError(null)
+			} else if (Result.isFailure(nextListResult)) {
+				setPersistenceError(getErrorMessage(nextListResult))
+			}
+		},
+		[setDashboards, setPersistenceError],
+	)
+	useAtomSubscribe(listQueryAtom, syncListResult)
 
 	const isLoading = dashboards.length === 0 && !Result.isSuccess(listResult)
 
@@ -331,6 +363,41 @@ export function useDashboardStore() {
 		[createMutation, readOnly, setDashboards, setPersistenceError],
 	)
 
+	const importPersesDashboard = useCallback(
+		async (
+			persesDashboard: Record<string, unknown>,
+		): Promise<{ dashboard: Dashboard; warnings: string[] }> => {
+			if (readOnly) {
+				throw new Error("Dashboards are read-only")
+			}
+
+			const result = await importPersesMutation({
+				payload: new DashboardPersesImportRequest({
+					dashboard: persesDashboard,
+				}),
+				reactivityKeys: ["dashboards"],
+			})
+
+			if (Exit.isFailure(result)) {
+				setPersistenceError(getErrorMessage(result))
+				throw new Error(getErrorMessage(result))
+			}
+
+			const dashboard = ensureDashboard(result.value.dashboard)
+			if (dashboard === null) {
+				throw new Error("Imported Perses dashboard payload is invalid")
+			}
+
+			setDashboards((previous) => [dashboard, ...previous.filter((item) => item.id !== dashboard.id)])
+
+			return {
+				dashboard,
+				warnings: [...result.value.warnings],
+			}
+		},
+		[importPersesMutation, readOnly, setDashboards, setPersistenceError],
+	)
+
 	const createDashboard = useCallback(
 		async (name: string): Promise<Dashboard> => {
 			if (readOnly) {
@@ -425,8 +492,8 @@ export function useDashboardStore() {
 				visualization === "stat"
 					? { w: 3, h: 4, minW: 2, minH: 2 }
 					: visualization === "table" || visualization === "list"
-						? { w: 6, h: 4, minW: 3, minH: 3 }
-						: { w: 4, h: 4, minW: 2, minH: 2 }
+						? { w: 6, h: 5, minW: 3, minH: 3 }
+						: { w: 4, h: 5, minW: 2, minH: 2 }
 
 			const widgetId = generateId()
 			let widgetRef: DashboardWidget | null = null
@@ -650,6 +717,7 @@ export function useDashboardStore() {
 		persistenceError,
 		createDashboard,
 		importDashboard,
+		importPersesDashboard,
 		updateDashboard,
 		deleteDashboard,
 		updateDashboardTimeRange,

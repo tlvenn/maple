@@ -10,15 +10,18 @@ import {
 	ErrorsService,
 	HazelOAuthService,
 	NotificationDispatcher,
+	OnboardingEmailService,
+	OnboardingService,
 	OrgClickHouseSettingsService,
 	QueryEngineService,
+	ServiceMapRollupService,
 	WarehouseQueryService,
 } from "@maple/api/alerting"
 import * as MapleCloudflareSDK from "@maple-dev/effect-sdk/cloudflare"
 import {
 	runScheduledEffect,
-	WorkerConfigProviderLive,
-	WorkerEnvironmentLive,
+	WorkerConfigProviderLayer,
+	WorkerEnvironment,
 } from "@maple/effect-cloudflare"
 import { Cause, Effect, Layer } from "effect"
 
@@ -28,16 +31,16 @@ import { Cause, Effect, Layer } from "effect"
 const telemetry = MapleCloudflareSDK.make({ serviceName: "alerting" })
 
 const buildLayer = (_env: Record<string, unknown>) => {
-	const ConfigLive = WorkerConfigProviderLive
-	const EnvLive = Env.Default.pipe(Layer.provide(ConfigLive))
+	const ConfigLive = WorkerConfigProviderLayer
+	const EnvLive = Env.layer.pipe(Layer.provide(ConfigLive))
 
-	const DatabaseLive = DatabaseD1Live.pipe(Layer.provide(WorkerEnvironmentLive))
+	const DatabaseLive = DatabaseD1Live.pipe(Layer.provide(WorkerEnvironment.layer))
 
 	const BaseLive = Layer.mergeAll(EnvLive, DatabaseLive)
 
-	const OrgClickHouseSettingsLive = OrgClickHouseSettingsService.Live.pipe(Layer.provide(BaseLive))
+	const OrgClickHouseSettingsLive = OrgClickHouseSettingsService.layer.pipe(Layer.provide(BaseLive))
 
-	const WarehouseQueryServiceLive = WarehouseQueryService.Live.pipe(
+	const WarehouseQueryServiceLive = WarehouseQueryService.layer.pipe(
 		Layer.provide(Layer.mergeAll(EnvLive, OrgClickHouseSettingsLive)),
 	)
 
@@ -49,38 +52,58 @@ const buildLayer = (_env: Record<string, unknown>) => {
 		Layer.provide(BucketCacheServiceLive),
 	)
 
-	const HazelOAuthServiceLive = HazelOAuthService.Live.pipe(Layer.provide(BaseLive))
+	const HazelOAuthServiceLive = HazelOAuthService.layer.pipe(Layer.provide(BaseLive))
 
-	const AlertsServiceLive = AlertsService.Live.pipe(
+	const AlertsServiceLive = AlertsService.layer.pipe(
 		Layer.provide(
 			Layer.mergeAll(
 				BaseLive,
 				QueryEngineServiceLive,
 				WarehouseQueryServiceLive,
-				AlertRuntime.Default,
+				AlertRuntime.layer,
 				HazelOAuthServiceLive,
 			),
 		),
 	)
 
-	const NotificationDispatcherLive = NotificationDispatcher.Live.pipe(
+	const NotificationDispatcherLive = NotificationDispatcher.layer.pipe(
 		Layer.provide(Layer.mergeAll(BaseLive, HazelOAuthServiceLive)),
 	)
 
-	const ErrorsServiceLive = ErrorsService.Live.pipe(
+	const ErrorsServiceLive = ErrorsService.layer.pipe(
 		Layer.provide(Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, NotificationDispatcherLive)),
 	)
 
-	const EmailServiceLive = EmailService.Default.pipe(Layer.provide(EnvLive))
+	const EmailServiceLive = EmailService.layer.pipe(Layer.provide(EnvLive))
 
-	const DigestServiceLive = DigestService.Default.pipe(
+	const DigestServiceLive = DigestService.layer.pipe(
 		Layer.provide(Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, EmailServiceLive)),
 	)
 
-	return Layer.mergeAll(AlertsServiceLive, DigestServiceLive, ErrorsServiceLive).pipe(
-		Layer.provideMerge(telemetry.layer),
-		Layer.provideMerge(ConfigLive),
+	const OnboardingServiceLive = OnboardingService.layer.pipe(Layer.provide(BaseLive))
+
+	const OnboardingEmailServiceLive = OnboardingEmailService.layer.pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				BaseLive,
+				EmailServiceLive,
+				OnboardingServiceLive,
+				WarehouseQueryServiceLive,
+			),
+		),
 	)
+
+	const ServiceMapRollupServiceLive = ServiceMapRollupService.layer.pipe(
+		Layer.provide(Layer.mergeAll(BaseLive, WarehouseQueryServiceLive)),
+	)
+
+	return Layer.mergeAll(
+		AlertsServiceLive,
+		DigestServiceLive,
+		OnboardingEmailServiceLive,
+		ErrorsServiceLive,
+		ServiceMapRollupServiceLive,
+	).pipe(Layer.provideMerge(telemetry.layer), Layer.provideMerge(ConfigLive))
 }
 
 const alertTick = Effect.gen(function* () {
@@ -144,6 +167,47 @@ const digestTick = Effect.gen(function* () {
 	),
 )
 
+const onboardingTick = Effect.gen(function* () {
+	const onboardingEmails = yield* OnboardingEmailService
+	const result = yield* onboardingEmails.runOnboardingTick()
+	yield* Effect.logInfo("Onboarding tick complete").pipe(
+		Effect.annotateLogs({
+			ensuredCount: result.ensuredCount,
+			sentCount: result.sentCount,
+			errorCount: result.errorCount,
+			firstDataDetected: result.firstDataDetected,
+			skipped: result.skipped,
+		}),
+	)
+}).pipe(
+	Effect.withSpan("alerting.onboarding_tick"),
+	Effect.catchCause((cause) =>
+		Effect.logError("Onboarding tick failed").pipe(
+			Effect.annotateLogs({ error: Cause.pretty(cause) }),
+		),
+	),
+)
+
+const serviceMapRollupTick = Effect.gen(function* () {
+	const rollup = yield* ServiceMapRollupService
+	const result = yield* rollup.runRollupTick()
+	yield* Effect.logInfo("Service map rollup tick complete").pipe(
+		Effect.annotateLogs({
+			orgsProcessed: result.orgsProcessed,
+			hoursRolledUp: result.hoursRolledUp,
+			edgesWritten: result.edgesWritten,
+			orgFailures: result.orgFailures,
+		}),
+	)
+}).pipe(
+	Effect.withSpan("alerting.service_map_rollup_tick"),
+	Effect.catchCause((cause) =>
+		Effect.logError("Service map rollup tick failed").pipe(
+			Effect.annotateLogs({ error: Cause.pretty(cause) }),
+		),
+	),
+)
+
 interface ScheduledEventLike {
 	readonly cron: string
 }
@@ -161,7 +225,11 @@ export default {
 		const program =
 			event.cron === "*/15 * * * *"
 				? digestTick
-				: Effect.all([alertTick, errorTick], { concurrency: 2, discard: true })
+				: event.cron === "0 * * * *"
+					? serviceMapRollupTick
+					: event.cron === "0 9 * * *"
+						? onboardingTick
+						: Effect.all([alertTick, errorTick], { concurrency: 2, discard: true })
 		try {
 			await runScheduledEffect(buildLayer(env), program, ctx)
 		} finally {

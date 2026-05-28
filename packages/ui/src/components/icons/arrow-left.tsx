@@ -1,5 +1,7 @@
 import type { IconProps } from "./icon"
 
+const paths: ReadonlyArray<string> = ["M21 12H6", "M12 6L6 12L12 18"]
+
 function ArrowLeftIcon({ size = 24, className, ...props }: IconProps) {
 	return (
 		<svg
@@ -9,22 +11,12 @@ function ArrowLeftIcon({ size = 24, className, ...props }: IconProps) {
 			height={size}
 			className={className}
 			fill="none"
+			aria-hidden="true"
 			{...props}
 		>
-			<path
-				d="M21 12L3 12L3.5 12"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeMiterlimit="10"
-				strokeLinecap="square"
-			/>
-			<path
-				d="M10 19L3 12L10 5"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeMiterlimit="10"
-				strokeLinecap="square"
-			/>
+			{paths.map((d, i) => (
+				<path key={i} d={d} stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+			))}
 		</svg>
 	)
 }

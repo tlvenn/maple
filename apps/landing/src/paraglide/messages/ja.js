@@ -127,6 +127,14 @@ export const nav_distributed_tracing = () => `分散トレーシング`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
+export const nav_browser_sessions = () => `Browser Sessions`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
 export const nav_metrics_dashboards = () => `メトリクス & ダッシュボード`
 
 
@@ -216,6 +224,14 @@ export const nav_vs_grafana = () => `Maple vs Grafana`
  */
 /* @__NO_SIDE_EFFECTS__ */
 export const nav_vs_new_relic = () => `Maple vs New Relic`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const nav_vs_dash0 = () => `Maple vs Dash0`
 
 
 /**
@@ -503,7 +519,31 @@ export const mcp_lede = () => `Maple ships with a first-class MCP server. Any co
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const k8s_eyebrow = () => `06 · Kubernetes`
+export const sessions_eyebrow = () => `06 · Sessions`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const sessions_title = () => `Watch what the user did.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const sessions_lede = () => `Session replay with every click, route, console line, and failed request captured. Replay and your spans share one session id — so you jump from the moment it broke straight to the trace behind it.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const k8s_eyebrow = () => `07 · Kubernetes`
 
 
 /**
@@ -751,7 +791,7 @@ export const bill_v_enterprise = () => `Enterprise tier`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const bill_v_usage = () => `$0.25 / GB ingested`
+export const bill_v_usage = () => `$0.30 / GB ingested`
 
 
 /**
@@ -864,6 +904,14 @@ export const bill_link_vs_gf = () => `Full vs Grafana Cloud`
  */
 /* @__NO_SIDE_EFFECTS__ */
 export const bill_link_vs_nr = () => `Full vs New Relic`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const bill_link_vs_dash0 = () => `Full vs Dash0`
 
 
 /**
@@ -2075,6 +2123,14 @@ export const footer_vs_new_relic = () => `vs New Relic`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
+export const footer_vs_dash0 = () => `vs Dash0`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
 export const footer_integrations = () => `インテグレーション`
 
 
@@ -2884,6 +2940,142 @@ export const page_roadmap_heading = () => `構築中のもの`
  */
 /* @__NO_SIDE_EFFECTS__ */
 export const page_roadmap_subtitle = () => `Mapleの開発の透明なビュー。リリース済み、進行中、今後の方向性をご覧ください。`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_title = () => `Browser Sessions | Maple`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_desc = () => `See what your users actually did, then jump straight to the trace behind it. Full session replay with clicks, console, network, and errors on one timeline.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_label = () => `Browser Sessions`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_heading = () => `Watch the session. Jump to the trace.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_subtitle = () => `See exactly what the user did — every navigation, click, console line, network call, and error — each one tagged with the trace it triggered. Replay and your backend share one session id, so a single click takes you from what they saw to why it broke.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_timeline = () => `Session timeline`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_timeline_desc = () => `Every navigation, click, input, console line, network call, and error in one ordered stream you can scrub through.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_replay = () => `Pixel-perfect replay`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_replay_desc = () => `Watch the session play back exactly as the user experienced it — every scroll, input, and state change.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_correlation = () => `From replay to root cause`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_correlation_desc = () => `Replay and spans share one session id. Jump from any moment on screen to the exact trace behind it.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_capture = () => `Console & network, captured`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_capture_desc = () => `Console logs and network requests with status codes, recorded inline — so you see the failure, not just the symptom.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_errors = () => `Error context`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_errors_desc = () => `Exceptions and rejections land on the timeline right next to the actions that led up to them.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_privacy = () => `Private by default`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_bs_privacy_desc = () => `Mask inputs and text before anything leaves the browser. Tune sampling and redaction in a single line of setup.`
 
 
 /**
@@ -3708,6 +3900,142 @@ export const page_dd_selfhost = () => `セルフホスト可能`
  */
 /* @__NO_SIDE_EFFECTS__ */
 export const page_dd_selfhost_desc = () => `自社インフラでMapleを実行し、完全なデータ主権、コンプライアンス、コスト管理を実現。`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_title = () => `Dash0 Alternative (Open Source) — Maple vs Dash0`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_desc = () => `Compare Maple and Dash0 for observability. Both are OpenTelemetry-native with transparent pricing and an MCP integration — Maple adds open source, self-hosting, and full control over your data.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_heading = () => `Maple vs Dash0`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_subtitle = () => `Dash0 and Maple are both OpenTelemetry-native with transparent usage-based pricing and no per-seat fees. The difference is ownership: Maple is open source and self-hostable, so you can run it on your own infrastructure — including your own ClickHouse — for full data sovereignty and retention control, instead of a closed SaaS backend.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_advantages = () => `Key advantages over Dash0`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_oss = () => `Open source`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_oss_desc = () => `Maple's source is available under the Functional Source License (FSL-1.1) — inspect every line, contribute features, and trust there are no black boxes. Dash0's backend is closed-source SaaS.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_selfhost = () => `Self-hosting available`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_selfhost_desc = () => `Run Maple on your own infrastructure for data residency and compliance. Dash0 is SaaS-only, so your telemetry has to live in their cloud.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_retention = () => `Full retention control`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_retention_desc = () => `Self-hosting puts you in control of retention and storage — keep data as long as your compliance and debugging workflows require, instead of fixed SaaS windows.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_sovereignty = () => `Your data, your perimeter`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_sovereignty_desc = () => `Keep telemetry inside your own infrastructure for sovereignty and compliance — no third-party cloud sees your data unless you choose the hosted version.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_clickhouse = () => `Run on your own ClickHouse`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_clickhouse_desc = () => `Maple's query engine speaks ClickHouse, so a self-hosted deployment can run on a ClickHouse instance you operate and scale yourself.`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_migrate = () => `Drop-in pipeline migration`
+
+
+/**
+ * 
+ * @returns {string}
+ */
+/* @__NO_SIDE_EFFECTS__ */
+export const page_dash0_migrate_desc = () => `Both platforms ingest standard OTLP, so moving your telemetry is just re-pointing your OpenTelemetry Collector exporter — no instrumentation changes. (Dashboards and alerts are recreated in Maple.)`
 
 
 /**
