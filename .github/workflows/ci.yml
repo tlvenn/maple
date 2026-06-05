@@ -26,18 +26,6 @@ jobs:
 
             - run: bun turbo typecheck test build --filter='!@maple/ingest'
 
-    knip:
-        name: Knip
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-
-            - run: bun install --frozen-lockfile
-
-            - run: bun knip
-
     shell:
         name: Shell
         runs-on: ubuntu-latest
@@ -54,27 +42,11 @@ jobs:
                   sh -n scripts/install.sh
                   sh -n scripts/uninstall.sh
 
-    service-map-perf:
-        name: Service Map Perf
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-
-            - run: bun install --frozen-lockfile
-
-            # Headless Chromium + its system libs for the rendering benchmark.
-            - name: Install Playwright Chromium
-              run: bunx playwright install --with-deps chromium
-              working-directory: apps/web
-
-            # Boots a self-hosted dev server (see playwright.config.ts) and runs the
-            # canvas-particle rendering gate against the synthetic /service-map-bench
-            # route (120 services / 400 edges at high traffic).
-            - name: Run perf gate
-              run: bun --filter=@maple/web test:perf
-
+    # Self-host fork: `knip` and `service-map-perf` upstream jobs are dropped.
+    # Knip is upstream's dead-code hygiene gate — not signal we benefit from.
+    # Service Map Perf is a Playwright/Chromium rendering benchmark that
+    # boots a synthetic dev server; not relevant to whether self-host builds
+    # work. The full upstream `ci.yml` lives at Makisuo/maple if needed.
+    #
     # Note: the `apps/ingest` Rust crate is built and tested by
-    # `.github/workflows/ingest-rust-tests.yml`, which also runs the load
-    # benchmark and posts results to the PR.
+    # `.github/workflows/ingest-rust-tests.yml` (also disabled on this fork).
