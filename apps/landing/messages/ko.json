@@ -368,9 +368,9 @@
 	"page_k8s_install_title": "\ud074\ub7ec\uc2a4\ud130\uc5d0 \ud55c \ubc88\uc5d0 \ubc30\ud3ec",
 	"page_k8s_install_lede": "\ucc28\ud2b8\ub97c \ucc98\uc74c\ubd80\ud130 \ub05d\uae4c\uc9c0 \uc77d\uc744 \uc218 \uc788\uc2b5\ub2c8\ub2e4. \uba85\ub839\uc5b4 \uc138 \uc904\uc774\uba74 kubelet, host, kube-state \uba54\ud2b8\ub9ad\uc774 OTLP\ub85c \ud750\ub974\uae30 \uc2dc\uc791\ud569\ub2c8\ub2e4.",
 	"page_k8s_install_window": "helm install maple-k8s-infra",
-	"page_k8s_install_step_1": "\ucc28\ud2b8 \ub9ac\ud3ec\uc9c0\ud1a0\ub9ac \ucd94\uac00",
-	"page_k8s_install_step_2": "\uc778\ub371\uc2a4 \uc5c5\ub370\uc774\ud2b8",
-	"page_k8s_install_step_3": "\ud074\ub7ec\uc2a4\ud130\uc5d0 \uc124\uce58",
+	"page_k8s_install_step_1": "\uc778\uc81c\uc2a4\ud2b8 \ud0a4 \uc2dc\ud06c\ub9bf \uc0dd\uc131",
+	"page_k8s_install_step_2": "\ucc28\ud2b8 \uc124\uce58",
+	"page_k8s_install_step_3": "\ub864\uc544\uc6c3 \ud655\uc778",
 	"page_k8s_install_copy": "\ubcf5\uc0ac",
 
 	"page_compare_label": "\ube44\uad50",

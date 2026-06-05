@@ -1,7 +1,8 @@
-import * as React from "react"
 import { Navigate, createFileRoute } from "@tanstack/react-router"
 import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
+
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@maple/ui/components/ui/resizable"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { ReplaySurface } from "@/components/replays/replay-player"
@@ -15,17 +16,17 @@ import {
 	getSessionTranscriptResultAtom,
 } from "@/lib/services/atoms/warehouse-query-atoms"
 import { QueryErrorState } from "@/components/common/query-error-state"
-import { Skeleton } from "@maple/ui/components/ui/skeleton"
+import { ClockIcon, PulseIcon, EyeIcon, CircleWarningIcon, UserIcon, GlobeIcon } from "@/components/icons"
+import { formatDuration } from "@/components/replays/replay-format"
 import {
-	GlobeIcon,
-	ComputerIcon,
-	ClockIcon,
-	PulseIcon,
-	EyeIcon,
-	CircleWarningIcon,
-	UserIcon,
-} from "@/components/icons"
-import { formatDuration, gradientFor } from "@/components/replays/replay-format"
+	CopyButton,
+	DetailRow,
+	deviceIcon,
+	ReplayDetailSkeleton,
+	Reveal,
+	SessionIdentityHeader,
+	StatTile,
+} from "@/components/replays/session-detail-parts"
 import { useSessionReplaysEnabled } from "@/hooks/use-session-replays-enabled"
 
 const detailSearchSchema = Schema.Struct({
@@ -51,15 +52,12 @@ function ReplayDetailPageContent() {
 	const { sessionId } = Route.useParams()
 	const detailResult = useAtomValue(getReplayResultAtom({ data: { sessionId } }))
 
-	const breadcrumbs = [
-		{ label: "Session Replays", href: "/replays" },
-		{ label: sessionId.slice(0, 8) },
-	]
+	const breadcrumbs = [{ label: "Session Replays", href: "/replays" }, { label: sessionId.slice(0, 8) }]
 
 	return Result.builder(detailResult)
 		.onInitial(() => (
 			<DashboardLayout breadcrumbs={breadcrumbs} title="Loading session…">
-				<Skeleton className="h-[60vh] w-full rounded-xl" />
+				<ReplayDetailSkeleton />
 			</DashboardLayout>
 		))
 		.onError((error) => (
@@ -88,176 +86,136 @@ function ReplayDetailPageContent() {
 
 			return (
 				<DashboardLayout breadcrumbs={breadcrumbs} title="Session Replay">
-					{/* Identity header */}
-					<div className="mb-5 flex flex-wrap items-center gap-3">
-						<div
-							className={`grid size-11 shrink-0 place-items-center rounded-full bg-gradient-to-br ${gradientFor(sessionId)} text-base font-semibold text-white shadow-sm`}
-						>
-							{(label[0] ?? "?").toUpperCase()}
-						</div>
-						<div className="min-w-0">
-							<div className="flex items-center gap-2">
-								<h2 className="truncate text-lg font-semibold leading-tight">{label}</h2>
-								<StatusPill active={isActive} />
-							</div>
-							<a
-								href={session.urlInitial}
-								target="_blank"
-								rel="noreferrer"
-								className="inline-flex max-w-md items-center gap-1.5 truncate font-mono text-xs text-muted-foreground hover:text-foreground"
-							>
-								<GlobeIcon className="size-3 shrink-0 opacity-70" />
-								<span className="truncate">{session.urlInitial}</span>
-							</a>
-						</div>
-					</div>
+					<div className="flex h-full min-h-0 flex-col gap-3">
+						<Reveal>
+							<SessionIdentityHeader
+								sessionId={sessionId}
+								label={label}
+								urlInitial={session.urlInitial}
+								startTime={session.startTime}
+								isActive={isActive}
+							/>
+						</Reveal>
 
-					<ReplayPlayerProvider sessionId={sessionId}>
-						{/* Content-sized split: player + details flow with the page (one outer
-						    scroll), so neither panel gets its own scrollbar. */}
-						<div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1.9fr_1fr]">
-							<ReplaySurface url={session.urlInitial} />
-							<div className="space-y-5">
-								{/* Activity stat tiles */}
-								<div className="grid grid-cols-2 gap-2.5">
-									<StatTile
-										icon={<ClockIcon className="size-4" />}
-										label="Duration"
-										value={formatDuration(session.durationMs)}
-									/>
-									<StatTile
-										icon={<PulseIcon className="size-4" />}
-										label="Clicks"
-										value={String(session.clickCount)}
-									/>
-									<StatTile
-										icon={<EyeIcon className="size-4" />}
-										label="Pages"
-										value={String(session.pageViews || 1)}
-									/>
-									<StatTile
-										icon={<CircleWarningIcon className="size-4" />}
-										label="Errors"
-										value={String(session.errorCount)}
-										tone={session.errorCount > 0 ? "error" : undefined}
-									/>
-								</div>
+						<ReplayPlayerProvider sessionId={sessionId}>
+							{/* DevTools-style dock: the player + details + timeline scroll inside the
+						    top panel; the console / network / errors panel docks below and is
+						    resizable by dragging the divider. */}
+							<ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
+								<ResizablePanel defaultSize="60%" minSize="30%" className="min-h-0">
+									<div className="h-full space-y-4 overflow-auto pr-1">
+										<Reveal delay={0.06}>
+											<div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1.9fr_1fr]">
+												<ReplaySurface url={session.urlInitial} />
+												<div className="space-y-4">
+													{/* Activity stat tiles */}
+													<div className="grid grid-cols-2 gap-2.5">
+														<StatTile
+															icon={<ClockIcon className="size-4" />}
+															label="Duration"
+															value={formatDuration(session.durationMs)}
+														/>
+														<StatTile
+															icon={<PulseIcon className="size-4" />}
+															label="Clicks"
+															value={String(session.clickCount)}
+														/>
+														<StatTile
+															icon={<EyeIcon className="size-4" />}
+															label="Pages"
+															value={String(session.pageViews || 1)}
+														/>
+														<StatTile
+															icon={<CircleWarningIcon className="size-4" />}
+															label="Errors"
+															value={String(session.errorCount)}
+															tone={
+																session.errorCount > 0 ? "error" : undefined
+															}
+														/>
+													</div>
 
-								{/* Details */}
-								<section className="rounded-xl border border-border">
-									<h3 className="border-b border-border px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-										Details
-									</h3>
-									<dl className="divide-y divide-border">
-										<DetailRow icon={<UserIcon className="size-3.5" />} label="User">
-											{session.userId || "Anonymous"}
-										</DetailRow>
-										<DetailRow icon={<ComputerIcon className="size-3.5" />} label="Browser">
-											{session.browserName || "—"}
-											<span className="text-muted-foreground">
-												{session.osName ? ` · ${session.osName}` : ""}
-											</span>
-										</DetailRow>
-										<DetailRow icon={<ComputerIcon className="size-3.5" />} label="Device">
-											<span className="capitalize">{session.deviceType || "—"}</span>
-										</DetailRow>
-										<DetailRow icon={<GlobeIcon className="size-3.5" />} label="Country">
-											{session.country || "—"}
-										</DetailRow>
-										<DetailRow icon={<PulseIcon className="size-3.5" />} label="Service">
-											<span className="font-mono text-xs">{session.serviceName || "—"}</span>
-										</DetailRow>
-									</dl>
-								</section>
-							</div>
-						</div>
+													{/* Details */}
+													<section className="overflow-hidden rounded-xl border border-border bg-card">
+														<h3 className="border-b border-border px-4 py-2.5 font-display text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+															Details
+														</h3>
+														<dl className="divide-y divide-border">
+															<DetailRow
+																icon={<UserIcon className="size-3.5" />}
+																label="User"
+															>
+																{session.userId || "Anonymous"}
+															</DetailRow>
+															<DetailRow
+																icon={<GlobeIcon className="size-3.5" />}
+																label="Browser"
+															>
+																{session.browserName || "—"}
+																<span className="text-muted-foreground">
+																	{session.osName
+																		? ` · ${session.osName}`
+																		: ""}
+																</span>
+															</DetailRow>
+															<DetailRow
+																icon={deviceIcon(session.deviceType)}
+																label="Device"
+															>
+																<span className="capitalize">
+																	{session.deviceType || "—"}
+																</span>
+															</DetailRow>
+															<DetailRow
+																icon={<GlobeIcon className="size-3.5" />}
+																label="Country"
+															>
+																{session.country || "—"}
+															</DetailRow>
+															<DetailRow
+																icon={<PulseIcon className="size-3.5" />}
+																label="Service"
+															>
+																<span className="inline-flex items-center gap-1">
+																	<span className="truncate font-mono text-xs">
+																		{session.serviceName || "—"}
+																	</span>
+																	{session.serviceName && (
+																		<CopyButton
+																			value={session.serviceName}
+																			label="Copy service name"
+																		/>
+																	)}
+																</span>
+															</DetailRow>
+														</dl>
+													</section>
+												</div>
+											</div>
+										</Reveal>
 
-						{/* Synced trace timeline — recording activity + correlated traces on a
+										{/* Synced trace timeline — recording activity + correlated traces on a
 						    shared playhead. Replaces the old flat correlated-traces list. */}
-						<div className="mt-4">
-							<ReplayEditorTimeline traceIds={session.traceIds} />
-						</div>
+										<Reveal delay={0.12}>
+											<ReplayEditorTimeline traceIds={session.traceIds} />
+										</Reveal>
+									</div>
+								</ResizablePanel>
 
-						{/* Distilled console / network / error stream, clickable to seek. */}
-						<div className="mt-4">
-							<SessionEventsPanel sessionId={sessionId} />
-						</div>
-					</ReplayPlayerProvider>
+								<ResizableHandle
+									withHandle
+									className="cursor-row-resize bg-border/60 transition-colors hover:bg-primary/40 active:bg-primary/50"
+								/>
+
+								{/* Distilled console / network / error stream, clickable to seek. */}
+								<ResizablePanel defaultSize="40%" minSize="15%" className="min-h-0">
+									<SessionEventsPanel sessionId={sessionId} />
+								</ResizablePanel>
+							</ResizablePanelGroup>
+						</ReplayPlayerProvider>
+					</div>
 				</DashboardLayout>
 			)
 		})
 		.render()
 }
-
-function StatusPill({ active }: { active: boolean }) {
-	if (!active) {
-		return (
-			<span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-				<span className="size-1.5 rounded-full bg-muted-foreground/50" />
-				Ended
-			</span>
-		)
-	}
-	return (
-		<span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-			<span className="relative flex size-1.5">
-				<span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500 opacity-75" />
-				<span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
-			</span>
-			Live
-		</span>
-	)
-}
-
-function StatTile({
-	icon,
-	label,
-	value,
-	tone,
-}: {
-	icon: React.ReactNode
-	label: string
-	value: string
-	tone?: "error"
-}) {
-	return (
-		<div className="rounded-xl border border-border p-3">
-			<div
-				className={`mb-1.5 flex items-center gap-1.5 text-xs font-medium ${
-					tone === "error" ? "text-destructive" : "text-muted-foreground"
-				}`}
-			>
-				<span className="opacity-80">{icon}</span>
-				{label}
-			</div>
-			<div
-				className={`text-xl font-semibold tabular-nums ${
-					tone === "error" ? "text-destructive" : ""
-				}`}
-			>
-				{value}
-			</div>
-		</div>
-	)
-}
-
-function DetailRow({
-	icon,
-	label,
-	children,
-}: {
-	icon: React.ReactNode
-	label: string
-	children: React.ReactNode
-}) {
-	return (
-		<div className="flex items-center justify-between gap-4 px-4 py-2.5 text-sm">
-			<dt className="flex items-center gap-2 text-muted-foreground">
-				<span className="opacity-70">{icon}</span>
-				{label}
-			</dt>
-			<dd className="truncate text-right font-medium">{children}</dd>
-		</div>
-	)
-}
-

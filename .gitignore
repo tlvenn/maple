@@ -29,6 +29,12 @@ apps/api/scripts/.bench/
 .dev.vars
 apps/chat-agent/.dev.vars
 
+# playwright (perf harness artifacts)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 # sst
 .sst
 /bin/

@@ -2,6 +2,7 @@ import { HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi"
 import { Schema } from "effect"
 import { IsoDateTimeString, ScrapeAuthType, ScrapeIntervalSeconds, ScrapeTargetId } from "../primitives"
 import { Authorization } from "./current-tenant"
+import { warehouseHttpErrors } from "./warehouse-errors"
 
 export class ScrapeTargetResponse extends Schema.Class<ScrapeTargetResponse>("ScrapeTargetResponse")({
 	id: ScrapeTargetId,
@@ -64,6 +65,36 @@ export class ScrapeTargetProbeResponse extends Schema.Class<ScrapeTargetProbeRes
 	lastScrapeAt: Schema.NullOr(IsoDateTimeString),
 	lastScrapeError: Schema.NullOr(Schema.String),
 }) {}
+
+export class ScrapeTargetCheckResponse extends Schema.Class<ScrapeTargetCheckResponse>(
+	"ScrapeTargetCheckResponse",
+)({
+	timestamp: IsoDateTimeString,
+	success: Schema.Boolean,
+	up: Schema.Number,
+	durationSeconds: Schema.NullOr(Schema.Number),
+	samplesScraped: Schema.NullOr(Schema.Number),
+	samplesPostMetricRelabeling: Schema.NullOr(Schema.Number),
+	seriesAdded: Schema.NullOr(Schema.Number),
+	serviceName: Schema.String,
+	job: Schema.String,
+	instance: Schema.String,
+	message: Schema.NullOr(Schema.String),
+}) {}
+
+export class ScrapeTargetChecksListResponse extends Schema.Class<ScrapeTargetChecksListResponse>(
+	"ScrapeTargetChecksListResponse",
+)({
+	checks: Schema.Array(ScrapeTargetCheckResponse),
+}) {}
+
+export const ListScrapeTargetChecksQuery = Schema.Struct({
+	since: Schema.optionalKey(IsoDateTimeString),
+	until: Schema.optionalKey(IsoDateTimeString),
+	limit: Schema.optionalKey(
+		Schema.NumberFromString.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 200 })),
+	),
+})
 
 export class ScrapeTargetPersistenceError extends Schema.TaggedErrorClass<ScrapeTargetPersistenceError>()(
 	"@maple/http/errors/ScrapeTargetPersistenceError",
@@ -143,6 +174,16 @@ export class ScrapeTargetsApiGroup extends HttpApiGroup.make("scrapeTargets")
 			},
 			success: ScrapeTargetProbeResponse,
 			error: [ScrapeTargetNotFoundError, ScrapeTargetPersistenceError, ScrapeTargetEncryptionError],
+		}),
+	)
+	.add(
+		HttpApiEndpoint.get("listChecks", "/:targetId/checks", {
+			params: {
+				targetId: ScrapeTargetId,
+			},
+			query: ListScrapeTargetChecksQuery,
+			success: ScrapeTargetChecksListResponse,
+			error: [ScrapeTargetNotFoundError, ScrapeTargetPersistenceError, ...warehouseHttpErrors],
 		}),
 	)
 	.prefix("/api/scrape-targets")

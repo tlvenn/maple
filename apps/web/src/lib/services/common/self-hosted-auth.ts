@@ -1,4 +1,4 @@
-import { clearMapleAuthHeaders, setMapleAuthHeadersProvider } from "./auth-headers"
+import { clearMapleAuthHeaders, setActiveOrgId, setMapleAuthHeadersProvider } from "./auth-headers"
 
 const SELF_HOSTED_TOKEN_STORAGE_KEY = "maple.self_hosted.token"
 const SELF_HOSTED_AUTH_EVENT = "maple:self-hosted-auth-changed"
@@ -37,6 +37,7 @@ export const clearSelfHostedSessionToken = () => {
 		// Ignore storage failures.
 	}
 	clearMapleAuthHeaders()
+	setActiveOrgId(null)
 	dispatchSelfHostedAuthChanged()
 }
 
@@ -82,6 +83,7 @@ export const resolveSelfHostedRouterAuth = async (apiBaseUrl: string) => {
 			return unauthenticatedState
 		}
 
+		setActiveOrgId(body.orgId)
 		return {
 			isAuthenticated: true,
 			orgId: body.orgId,

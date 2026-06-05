@@ -4,8 +4,14 @@ import {
 	ScrapeIntervalSeconds,
 	UpdateScrapeTargetRequest,
 } from "@maple/domain/http"
-import type { ScrapeAuthType, ScrapeTargetId, ScrapeTargetResponse } from "@maple/domain/http"
-import { useState } from "react"
+import type {
+	ScrapeAuthType,
+	ScrapeTargetCheckResponse,
+	ScrapeTargetChecksListResponse,
+	ScrapeTargetId,
+	ScrapeTargetResponse,
+} from "@maple/domain/http"
+import { useState, type KeyboardEvent, type ReactNode } from "react"
 import { Exit, Schema } from "effect"
 import { toast } from "sonner"
 
@@ -44,9 +50,14 @@ import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Switch } from "@maple/ui/components/ui/switch"
 import { cn } from "@maple/ui/lib/utils"
 import {
+	BoltIcon,
+	CircleCheckIcon,
+	CircleInfoIcon,
 	CircleXmarkIcon,
 	DotsVerticalIcon,
+	ExternalLinkIcon,
 	FireIcon,
+	HistoryIcon,
 	LoaderIcon,
 	PencilIcon,
 	PlusIcon,
@@ -54,9 +65,11 @@ import {
 	TrashIcon,
 } from "@/components/icons"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
-import { formatRelativeTime } from "@/lib/format"
+import { formatDuration, formatNumber, formatRelativeTime } from "@/lib/format"
 
 type ScrapeTarget = ScrapeTargetResponse
+type ScrapeTargetCheck = ScrapeTargetCheckResponse
+type ScrapeTargetChecksResult = Result.Result<ScrapeTargetChecksListResponse, unknown>
 
 const AUTH_TYPE_LABELS: Record<ScrapeAuthType, string> = {
 	none: "None",
@@ -66,12 +79,105 @@ const AUTH_TYPE_LABELS: Record<ScrapeAuthType, string> = {
 
 const asScrapeIntervalSeconds = Schema.decodeUnknownSync(ScrapeIntervalSeconds)
 
+function formatDurationSeconds(value: number | null): string {
+	if (value == null) return "-"
+	return formatDuration(value * 1000)
+}
+
+function formatOptionalCount(value: number | null): string {
+	if (value == null) return "-"
+	return formatNumber(Math.round(value))
+}
+
+function formatDateTime(value: string): string {
+	return new Date(value).toLocaleString(undefined, {
+		month: "short",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+	})
+}
+
+function hostnameFromUrl(value: string): string {
+	try {
+		return new URL(value).host
+	} catch {
+		return value
+	}
+}
+
+function labelEntries(labelsJson: string | null): Array<[string, string]> {
+	if (!labelsJson) return []
+	try {
+		const parsed = JSON.parse(labelsJson) as unknown
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return []
+		return Object.entries(parsed).filter(
+			(entry): entry is [string, string] => typeof entry[1] === "string",
+		)
+	} catch {
+		return []
+	}
+}
+
+function checksFromResult(result: ScrapeTargetChecksResult): ScrapeTargetCheck[] {
+	return Result.builder(result)
+		.onSuccess((response) => [...response.checks] as ScrapeTargetCheck[])
+		.orElse(() => [])
+}
+
+function scheduledStatus(
+	target: ScrapeTarget,
+	latestCheck: ScrapeTargetCheck | null,
+	isLoading: boolean,
+) {
+	if (!target.enabled) {
+		return {
+			label: "Disabled",
+			detail: "Collector skips this target",
+			dotClass: "bg-muted-foreground/30",
+			badgeVariant: "outline" as const,
+		}
+	}
+	if (isLoading) {
+		return {
+			label: "Checking",
+			detail: "Loading scheduled history",
+			dotClass: "bg-muted-foreground/40",
+			badgeVariant: "outline" as const,
+		}
+	}
+	if (!latestCheck) {
+		return {
+			label: "No checks",
+			detail: "No scheduled scrape observed",
+			dotClass: "bg-severity-warn",
+			badgeVariant: "warning" as const,
+		}
+	}
+	if (latestCheck.success) {
+		return {
+			label: "Up",
+			detail: `Scheduled ${formatRelativeTime(latestCheck.timestamp)}`,
+			dotClass: "bg-severity-info",
+			badgeVariant: "success" as const,
+		}
+	}
+	return {
+		label: "Down",
+		detail: `Scheduled ${formatRelativeTime(latestCheck.timestamp)}`,
+		dotClass: "bg-destructive",
+		badgeVariant: "error" as const,
+	}
+}
+
 export function ScrapeTargetsSection() {
 	const [dialogOpen, setDialogOpen] = useState(false)
 	const [isSaving, setIsSaving] = useState(false)
 	const [togglingId, setTogglingId] = useState<ScrapeTargetId | null>(null)
 	const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<ScrapeTarget | null>(null)
 	const [probingId, setProbingId] = useState<ScrapeTargetId | null>(null)
+	const [selectedTargetId, setSelectedTargetId] = useState<ScrapeTargetId | null>(null)
 
 	const [editingTarget, setEditingTarget] = useState<ScrapeTarget | null>(null)
 	const [formName, setFormName] = useState("")
@@ -103,6 +209,7 @@ export function ScrapeTargetsSection() {
 	const targets = Result.builder(listResult)
 		.onSuccess((response) => [...response.targets] as ScrapeTarget[])
 		.orElse(() => [])
+	const selectedTarget = targets.find((target) => target.id === selectedTargetId) ?? null
 
 	async function handleProbe(target: ScrapeTarget) {
 		setProbingId(target.id)
@@ -148,21 +255,11 @@ export function ScrapeTargetsSection() {
 
 	function buildAuthCredentials(): string | null {
 		if (formAuthType === "bearer") {
-			if (!formAuthToken.trim()) {
-				if (editingTarget?.hasCredentials && editingTarget.authType === "bearer") {
-					return null
-				}
-				return null
-			}
+			if (!formAuthToken.trim()) return null
 			return JSON.stringify({ token: formAuthToken.trim() })
 		}
 		if (formAuthType === "basic") {
-			if (!formAuthUsername.trim() && !formAuthPassword.trim()) {
-				if (editingTarget?.hasCredentials && editingTarget.authType === "basic") {
-					return null
-				}
-				return null
-			}
+			if (!formAuthUsername.trim() && !formAuthPassword.trim()) return null
 			return JSON.stringify({
 				username: formAuthUsername.trim(),
 				password: formAuthPassword.trim(),
@@ -177,9 +274,16 @@ export function ScrapeTargetsSection() {
 			return
 		}
 
+		let parsedInterval: ScrapeIntervalSeconds
+		try {
+			parsedInterval = asScrapeIntervalSeconds(Number.parseInt(formInterval, 10) || 15)
+		} catch {
+			toast.error("Scrape interval must be an integer from 5 to 300 seconds")
+			return
+		}
+
 		setIsSaving(true)
 		const authCredentials = buildAuthCredentials()
-		const parsedInterval = asScrapeIntervalSeconds(Number.parseInt(formInterval, 10) || 15)
 
 		if (editingTarget) {
 			const result = await updateMutation({
@@ -214,6 +318,7 @@ export function ScrapeTargetsSection() {
 			if (Exit.isSuccess(result)) {
 				toast.success("Scrape target created")
 				setDialogOpen(false)
+				setSelectedTargetId(result.value.id)
 				refreshTargets()
 			} else {
 				toast.error("Failed to create scrape target")
@@ -227,6 +332,7 @@ export function ScrapeTargetsSection() {
 		const result = await deleteMutation({ params: { targetId } })
 		if (Exit.isSuccess(result)) {
 			toast.success("Scrape target deleted")
+			if (selectedTargetId === targetId) setSelectedTargetId(null)
 			refreshTargets()
 		} else {
 			toast.error("Failed to delete scrape target")
@@ -252,9 +358,9 @@ export function ScrapeTargetsSection() {
 	return (
 		<>
 			<div className="space-y-4">
-				<div className="flex items-center justify-between">
+				<div className="flex items-center justify-between gap-3">
 					<p className="text-muted-foreground text-sm">
-						Scrape metrics from Prometheus exporter endpoints.
+						Scrape Prometheus exporters and inspect scheduled scrape health.
 					</p>
 					<Button size="sm" className="shrink-0" onClick={openAddDialog}>
 						<PlusIcon size={14} />
@@ -289,107 +395,45 @@ export function ScrapeTargetsSection() {
 						</Button>
 					</Empty>
 				) : (
-					<div className="divide-y">
-						{targets.map((target) => (
-							<div key={target.id} className="flex items-center gap-3 px-1 py-3">
-								<div
-									className={cn(
-										"size-2 shrink-0 rounded-full",
-										!target.enabled
-											? "bg-muted-foreground/30"
-											: target.lastScrapeError
-												? "bg-destructive"
-												: target.lastScrapeAt
-													? "bg-severity-info"
-													: "bg-severity-warn",
-									)}
+					<div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+						<div className="divide-y overflow-hidden rounded-lg border bg-card/40">
+							{targets.map((target) => (
+								<ScrapeTargetRow
+									key={target.id}
+									target={target}
+									selected={target.id === selectedTarget?.id}
+									toggling={togglingId === target.id}
+									probing={probingId === target.id}
+									onSelect={setSelectedTargetId}
+									onProbe={handleProbe}
+									onToggle={handleToggleEnabled}
+									onEdit={openEditDialog}
+									onDelete={setDeleteConfirmTarget}
 								/>
-
-								<div className="min-w-0 flex-1">
-									<div className="flex items-center gap-2">
-										<span className="truncate text-sm font-medium">{target.name}</span>
-										{target.serviceName && (
-											<Badge variant="outline" className="shrink-0">
-												{target.serviceName}
-											</Badge>
-										)}
-										{target.authType !== "none" && (
-											<Badge variant="outline" className="shrink-0">
-												{AUTH_TYPE_LABELS[target.authType] ?? target.authType}
-											</Badge>
-										)}
-									</div>
-									<div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-3 text-xs">
-										<span className="max-w-[300px] truncate font-mono">{target.url}</span>
-										<span>{target.scrapeIntervalSeconds}s interval</span>
-										{target.lastScrapeAt && (
-											<span>
-												Last scraped {formatRelativeTime(target.lastScrapeAt)}
-											</span>
-										)}
-									</div>
-									{target.lastScrapeError && (
-										<div className="mt-1.5 flex items-center gap-1.5 text-xs text-destructive">
-											<CircleXmarkIcon size={12} className="shrink-0" />
-											<span className="truncate">{target.lastScrapeError}</span>
-										</div>
-									)}
+							))}
+						</div>
+						{selectedTarget ? (
+							<ScrapeTargetDetails
+								target={selectedTarget}
+								probing={probingId === selectedTarget.id}
+								toggling={togglingId === selectedTarget.id}
+								onProbe={handleProbe}
+								onToggle={handleToggleEnabled}
+								onEdit={openEditDialog}
+								onDelete={setDeleteConfirmTarget}
+							/>
+						) : (
+							<div className="hidden rounded-lg border bg-card/40 p-4 lg:block">
+								<div className="text-muted-foreground flex h-full min-h-[260px] flex-col items-center justify-center gap-2 text-center text-xs">
+									<CircleInfoIcon size={18} />
+									<span>Click a target to inspect scheduled checks.</span>
 								</div>
-
-								<Switch
-									checked={target.enabled}
-									onCheckedChange={() => handleToggleEnabled(target)}
-									disabled={togglingId === target.id}
-								/>
-
-								<Button
-									variant="outline"
-									size="sm"
-									onClick={() => handleProbe(target)}
-									disabled={probingId === target.id}
-								>
-									{probingId === target.id ? (
-										<LoaderIcon size={14} className="animate-spin" />
-									) : (
-										<PulseIcon size={14} />
-									)}
-									Test
-								</Button>
-
-								<DropdownMenu>
-									<DropdownMenuTrigger
-										render={
-											<Button
-												variant="ghost"
-												size="icon-sm"
-												className="text-muted-foreground hover:text-foreground shrink-0"
-											/>
-										}
-									>
-										<DotsVerticalIcon size={14} />
-									</DropdownMenuTrigger>
-									<DropdownMenuContent align="end">
-										<DropdownMenuItem onClick={() => openEditDialog(target)}>
-											<PencilIcon size={14} />
-											Edit
-										</DropdownMenuItem>
-										<DropdownMenuSeparator />
-										<DropdownMenuItem
-											variant="destructive"
-											onClick={() => setDeleteConfirmTarget(target)}
-										>
-											<TrashIcon size={14} />
-											Delete
-										</DropdownMenuItem>
-									</DropdownMenuContent>
-								</DropdownMenu>
 							</div>
-						))}
+						)}
 					</div>
 				)}
 			</div>
 
-			{/* Add / Edit Dialog */}
 			<Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
 				<DialogContent>
 					<DialogHeader>
@@ -537,7 +581,6 @@ export function ScrapeTargetsSection() {
 				</DialogContent>
 			</Dialog>
 
-			{/* Delete Confirmation */}
 			<AlertDialog
 				open={deleteConfirmTarget !== null}
 				onOpenChange={(open) => {
@@ -569,5 +612,360 @@ export function ScrapeTargetsSection() {
 				</AlertDialogContent>
 			</AlertDialog>
 		</>
+	)
+}
+
+function ScrapeTargetRow({
+	target,
+	selected,
+	toggling,
+	probing,
+	onSelect,
+	onProbe,
+	onToggle,
+	onEdit,
+	onDelete,
+}: {
+	target: ScrapeTarget
+	selected: boolean
+	toggling: boolean
+	probing: boolean
+	onSelect: (targetId: ScrapeTargetId) => void
+	onProbe: (target: ScrapeTarget) => void
+	onToggle: (target: ScrapeTarget) => void
+	onEdit: (target: ScrapeTarget) => void
+	onDelete: (target: ScrapeTarget) => void
+}) {
+	const latestCheckResult = useAtomValue(
+		MapleApiAtomClient.query("scrapeTargets", "listChecks", {
+			params: { targetId: target.id },
+			query: { limit: 1 },
+			reactivityKeys: ["scrapeTargetChecks", target.id, "latest"],
+		}),
+	)
+	const latestCheck = checksFromResult(latestCheckResult).at(0) ?? null
+	const status = scheduledStatus(target, latestCheck, Result.isInitial(latestCheckResult))
+
+	function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+		if (event.key === "Enter" || event.key === " ") {
+			event.preventDefault()
+			onSelect(target.id)
+		}
+	}
+
+	return (
+		<div
+			role="button"
+			tabIndex={0}
+			aria-pressed={selected}
+			onClick={() => onSelect(target.id)}
+			onKeyDown={handleKeyDown}
+			className={cn(
+				"flex cursor-pointer items-center gap-3 px-3 py-3 outline-none transition-colors hover:bg-muted/50 focus-visible:bg-muted/50",
+				selected && "bg-muted/60",
+			)}
+		>
+			<div className={cn("size-2 shrink-0 rounded-full", status.dotClass)} />
+
+			<div className="min-w-0 flex-1">
+				<div className="flex min-w-0 items-center gap-2">
+					<span className="truncate text-sm font-medium">{target.name}</span>
+					<Badge variant={status.badgeVariant} className="shrink-0">
+						{status.label}
+					</Badge>
+					{target.serviceName && (
+						<Badge variant="outline" className="shrink-0">
+							{target.serviceName}
+						</Badge>
+					)}
+					{target.authType !== "none" && (
+						<Badge variant="outline" className="shrink-0">
+							{AUTH_TYPE_LABELS[target.authType] ?? target.authType}
+						</Badge>
+					)}
+				</div>
+				<div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+					<span className="max-w-[280px] truncate font-mono">{hostnameFromUrl(target.url)}</span>
+					<span>{target.scrapeIntervalSeconds}s interval</span>
+					<span>{status.detail}</span>
+					{target.lastScrapeAt && <span>Manual test {formatRelativeTime(target.lastScrapeAt)}</span>}
+				</div>
+				{latestCheck?.message && !latestCheck.success && (
+					<div className="mt-1.5 flex items-center gap-1.5 text-xs text-destructive">
+						<CircleXmarkIcon size={12} className="shrink-0" />
+						<span className="truncate">{latestCheck.message}</span>
+					</div>
+				)}
+				{target.lastScrapeError && (
+					<div className="mt-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+						<CircleInfoIcon size={12} className="shrink-0" />
+						<span className="truncate">Manual test: {target.lastScrapeError}</span>
+					</div>
+				)}
+			</div>
+
+			<div onClick={(event) => event.stopPropagation()}>
+				<Switch
+					checked={target.enabled}
+					onCheckedChange={() => onToggle(target)}
+					disabled={toggling}
+				/>
+			</div>
+
+			<Button
+				variant="outline"
+				size="sm"
+				onClick={(event) => {
+					event.stopPropagation()
+					onProbe(target)
+				}}
+				disabled={probing}
+			>
+				{probing ? <LoaderIcon size={14} className="animate-spin" /> : <BoltIcon size={14} />}
+				Test
+			</Button>
+
+			<div onClick={(event) => event.stopPropagation()}>
+				<DropdownMenu>
+					<DropdownMenuTrigger
+						render={
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								className="text-muted-foreground hover:text-foreground shrink-0"
+							/>
+						}
+					>
+						<DotsVerticalIcon size={14} />
+					</DropdownMenuTrigger>
+					<DropdownMenuContent align="end">
+						<DropdownMenuItem onClick={() => onEdit(target)}>
+							<PencilIcon size={14} />
+							Edit
+						</DropdownMenuItem>
+						<DropdownMenuSeparator />
+						<DropdownMenuItem variant="destructive" onClick={() => onDelete(target)}>
+							<TrashIcon size={14} />
+							Delete
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
+			</div>
+		</div>
+	)
+}
+
+function ScrapeTargetDetails({
+	target,
+	probing,
+	toggling,
+	onProbe,
+	onToggle,
+	onEdit,
+	onDelete,
+}: {
+	target: ScrapeTarget
+	probing: boolean
+	toggling: boolean
+	onProbe: (target: ScrapeTarget) => void
+	onToggle: (target: ScrapeTarget) => void
+	onEdit: (target: ScrapeTarget) => void
+	onDelete: (target: ScrapeTarget) => void
+}) {
+	const checksQueryAtom = MapleApiAtomClient.query("scrapeTargets", "listChecks", {
+		params: { targetId: target.id },
+		query: { limit: 20 },
+		reactivityKeys: ["scrapeTargetChecks", target.id],
+	})
+	const checksResult = useAtomValue(checksQueryAtom)
+	const checks = checksFromResult(checksResult)
+	const latestCheck = checks.at(0) ?? null
+	const status = scheduledStatus(target, latestCheck, Result.isInitial(checksResult))
+	const labels = labelEntries(target.labelsJson)
+
+	return (
+		<aside className="rounded-lg border bg-card/40">
+			<div className="space-y-3 border-b p-4">
+				<div className="flex items-start justify-between gap-3">
+					<div className="min-w-0">
+						<div className="flex items-center gap-2">
+							<div className={cn("size-2 rounded-full", status.dotClass)} />
+							<h3 className="truncate text-sm font-semibold">{target.name}</h3>
+						</div>
+						<p className="text-muted-foreground mt-1 truncate font-mono text-xs">{target.url}</p>
+					</div>
+					<Badge variant={status.badgeVariant}>{status.label}</Badge>
+				</div>
+				<div className="flex flex-wrap items-center gap-2">
+					<Button variant="outline" size="sm" onClick={() => onProbe(target)} disabled={probing}>
+						{probing ? <LoaderIcon size={14} className="animate-spin" /> : <BoltIcon size={14} />}
+						Test
+					</Button>
+					<Button variant="outline" size="sm" onClick={() => onEdit(target)}>
+						<PencilIcon size={14} />
+						Edit
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						onClick={() => onToggle(target)}
+						disabled={toggling}
+					>
+						{target.enabled ? "Disable" : "Enable"}
+					</Button>
+					<Button variant="ghost" size="sm" className="text-destructive" onClick={() => onDelete(target)}>
+						<TrashIcon size={14} />
+						Delete
+					</Button>
+				</div>
+			</div>
+
+			<div className="space-y-5 p-4">
+				<section className="space-y-2">
+					<div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+						<PulseIcon size={13} />
+						Scheduled Scrape
+					</div>
+					<div className="grid grid-cols-2 gap-2 text-xs">
+						<MetricBox label="Interval" value={`${target.scrapeIntervalSeconds}s`} />
+						<MetricBox
+							label="Duration"
+							value={latestCheck ? formatDurationSeconds(latestCheck.durationSeconds) : "-"}
+						/>
+						<MetricBox
+							label="Samples"
+							value={latestCheck ? formatOptionalCount(latestCheck.samplesScraped) : "-"}
+						/>
+						<MetricBox
+							label="Post relabel"
+							value={
+								latestCheck ? formatOptionalCount(latestCheck.samplesPostMetricRelabeling) : "-"
+							}
+						/>
+					</div>
+				</section>
+
+				<section className="space-y-2">
+					<div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+						<ExternalLinkIcon size={13} />
+						Target
+					</div>
+					<div className="divide-y rounded-md border bg-background/35 text-xs">
+						<DetailRow label="Service" value={target.serviceName ?? target.name} />
+						<DetailRow label="Instance" value={hostnameFromUrl(target.url)} />
+						<DetailRow label="Auth" value={AUTH_TYPE_LABELS[target.authType] ?? target.authType} />
+						<DetailRow label="Target ID" value={<span className="font-mono">{target.id}</span>} />
+						<DetailRow label="Created" value={formatDateTime(target.createdAt)} />
+						<DetailRow label="Updated" value={formatDateTime(target.updatedAt)} />
+					</div>
+					{labels.length > 0 && (
+						<div className="flex flex-wrap gap-1.5 pt-1">
+							{labels.map(([key, value]) => (
+								<Badge key={key} variant="outline" className="max-w-full">
+									<span className="truncate font-mono">
+										{key}={value}
+									</span>
+								</Badge>
+							))}
+						</div>
+					)}
+				</section>
+
+				<section className="space-y-2">
+					<div className="flex items-center justify-between gap-3">
+						<div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+							<HistoryIcon size={13} />
+							Check History
+						</div>
+						{latestCheck && (
+							<span className="text-muted-foreground text-xs">
+								Latest {formatRelativeTime(latestCheck.timestamp)}
+							</span>
+						)}
+					</div>
+					<ChecksTable result={checksResult} checks={checks} />
+				</section>
+			</div>
+		</aside>
+	)
+}
+
+function MetricBox({ label, value }: { label: string; value: string }) {
+	return (
+		<div className="rounded-md border bg-background/35 px-3 py-2">
+			<div className="text-muted-foreground text-[0.65rem] uppercase">{label}</div>
+			<div className="mt-1 font-mono text-sm">{value}</div>
+		</div>
+	)
+}
+
+function DetailRow({ label, value }: { label: string; value: ReactNode }) {
+	return (
+		<div className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 px-3 py-2">
+			<span className="text-muted-foreground">{label}</span>
+			<span className="min-w-0 truncate text-right">{value}</span>
+		</div>
+	)
+}
+
+function ChecksTable({ result, checks }: { result: ScrapeTargetChecksResult; checks: ScrapeTargetCheck[] }) {
+	if (Result.isInitial(result)) {
+		return (
+			<div className="space-y-2">
+				<Skeleton className="h-8 w-full" />
+				<Skeleton className="h-8 w-full" />
+				<Skeleton className="h-8 w-full" />
+			</div>
+		)
+	}
+	if (!Result.isSuccess(result)) {
+		return (
+			<div className="rounded-md border bg-background/35 px-3 py-6 text-center text-xs text-muted-foreground">
+				Failed to load scheduled checks.
+			</div>
+		)
+	}
+	if (checks.length === 0) {
+		return (
+			<div className="rounded-md border bg-background/35 px-3 py-6 text-center text-xs text-muted-foreground">
+				No scheduled checks recorded yet.
+			</div>
+		)
+	}
+
+	return (
+		<div className="overflow-hidden rounded-md border bg-background/35">
+			<div className="grid grid-cols-[minmax(100px,1fr)_64px_70px_72px] gap-2 border-b px-3 py-2 text-[0.65rem] uppercase text-muted-foreground">
+				<span>Time</span>
+				<span>State</span>
+				<span>Duration</span>
+				<span>Samples</span>
+			</div>
+			<div className="divide-y">
+				{checks.map((check) => (
+					<div
+						key={`${check.timestamp}-${check.up}`}
+						className="grid grid-cols-[minmax(100px,1fr)_64px_70px_72px] items-center gap-2 px-3 py-2 text-xs"
+					>
+						<div className="min-w-0">
+							<div className="truncate font-mono">{formatDateTime(check.timestamp)}</div>
+							{check.message && (
+								<div className="text-muted-foreground mt-0.5 truncate">{check.message}</div>
+							)}
+						</div>
+						<div className="flex items-center gap-1.5">
+							{check.success ? (
+								<CircleCheckIcon size={12} className="text-success-foreground" />
+							) : (
+								<CircleXmarkIcon size={12} className="text-destructive" />
+							)}
+							<span>{check.success ? "up" : "down"}</span>
+						</div>
+						<span className="font-mono">{formatDurationSeconds(check.durationSeconds)}</span>
+						<span className="font-mono">{formatOptionalCount(check.samplesScraped)}</span>
+					</div>
+				))}
+			</div>
+		</div>
 	)
 }

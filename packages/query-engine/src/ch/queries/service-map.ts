@@ -9,8 +9,16 @@
 // service-detail page builders go fully through `CH.compile()`.
 // ---------------------------------------------------------------------------
 
+import {
+	DB_QUERY_KEY_SQL,
+	DB_QUERY_LABEL_SQL,
+	DB_STATEMENT_SQL,
+	DB_SYSTEM_ATTR_SQL,
+	presentableStatementSql,
+} from "@maple/domain/tinybird/db-query-shape-sql"
+import { Schema } from "effect"
 import { escapeClickHouseString } from "../../sql/sql-fragment"
-import { compileCH, type CompiledQuery } from "../compile"
+import { compileCH, unsafeCompiledQuery, type CompiledQuery, type CompiledQueryRowSchema } from "../compile"
 import { defineCondFn, defineFn } from "../define-fn"
 import * as CH from "../expr"
 import { param } from "../param"
@@ -30,6 +38,7 @@ import { unionAll } from "../union"
 // they're niche and only this builder uses them; promote later if reused.
 const _toFloat64 = defineFn<[CH.Expr<unknown>], number>("toFloat64")
 const _matchRegex = defineCondFn<[CH.Expr<string>, string]>("match")
+const CHNumber = Schema.Union([Schema.Finite, Schema.FiniteFromString])
 
 // ---------------------------------------------------------------------------
 // Service dependencies
@@ -48,6 +57,16 @@ export interface ServiceDependenciesOutput {
 	readonly p95DurationMs: number
 	readonly estimatedSpanCount: number
 }
+
+const ServiceDependenciesOutputSchema: CompiledQueryRowSchema<ServiceDependenciesOutput> = Schema.Struct({
+	sourceService: Schema.String,
+	targetService: Schema.String,
+	callCount: CHNumber,
+	errorCount: CHNumber,
+	avgDurationMs: CHNumber,
+	p95DurationMs: CHNumber,
+	estimatedSpanCount: CHNumber,
+})
 
 /**
  * Topology-join SQL that derives service-to-service edges for the half-open
@@ -217,10 +236,10 @@ ORDER BY callCount DESC
 LIMIT 200
 FORMAT JSON`
 
-	return {
+	return unsafeCompiledQuery({
 		sql,
-		castRows: (rows) => rows as unknown as ReadonlyArray<ServiceDependenciesOutput>,
-	}
+		rowSchema: ServiceDependenciesOutputSchema,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +419,16 @@ export interface ServiceDbEdgesOutput {
 	readonly estimatedSpanCount: number
 }
 
+const ServiceDbEdgesOutputSchema: CompiledQueryRowSchema<ServiceDbEdgesOutput> = Schema.Struct({
+	sourceService: Schema.String,
+	dbSystem: Schema.String,
+	callCount: CHNumber,
+	errorCount: CHNumber,
+	avgDurationMs: CHNumber,
+	p95DurationMs: CHNumber,
+	estimatedSpanCount: CHNumber,
+})
+
 export function serviceDbEdgesSQL(
 	opts: ServiceDbEdgesOpts,
 	params: { orgId: string; startTime: string; endTime: string },
@@ -474,10 +503,10 @@ ORDER BY callCount DESC
 LIMIT 200
 FORMAT JSON`
 
-	return {
+	return unsafeCompiledQuery({
 		sql,
-		castRows: (rows) => rows as unknown as ReadonlyArray<ServiceDbEdgesOutput>,
-	}
+		rowSchema: ServiceDbEdgesOutputSchema,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -574,6 +603,400 @@ export function serviceDbEdgesForServiceQuery(opts: ServiceDbEdgesForServiceOpts
 }
 
 // ---------------------------------------------------------------------------
+// Service-map database query summaries
+//
+// Selected database drill-down ("Query Activity" + "Top Query Shapes"). Reads
+// the `service_map_db_query_shapes_hourly` rollup for sealed hours and UNIONs
+// raw `traces` for the in-progress hour — same dual-source pattern as
+// `serviceDbEdgesSQL` — so the panel keeps true sample-weighted P50/P95 (via a
+// t-digest state) without scanning raw spans + fingerprinting over the whole
+// window. The query SHAPE (label + normalized key) is derived by the SQL
+// fragments in `@maple/domain/tinybird/db-query-shape-sql`, shared byte-for-byte
+// with the rollup MV so a shape's key is stable across the sealed/live boundary.
+// ---------------------------------------------------------------------------
+
+export interface ServiceDbQuerySummaryParams {
+	readonly orgId: string
+	readonly dbSystem: string
+	readonly startTime: string
+	readonly endTime: string
+	readonly sourceService?: string
+	readonly deploymentEnv?: string
+	readonly bucketSeconds?: number
+	readonly topN?: number
+}
+
+export interface ServiceDbQuerySummaryOutput {
+	readonly queryCount: number
+	readonly estimatedQueryCount: number
+	readonly errorCount: number
+	readonly estimatedErrorCount: number
+	readonly errorRate: number
+	readonly avgDurationMs: number
+	readonly p50DurationMs: number
+	readonly p95DurationMs: number
+	readonly activeServiceCount: number
+}
+
+const ServiceDbQuerySummaryOutputSchema: CompiledQueryRowSchema<ServiceDbQuerySummaryOutput> =
+	Schema.Struct({
+		queryCount: CHNumber,
+		estimatedQueryCount: CHNumber,
+		errorCount: CHNumber,
+		estimatedErrorCount: CHNumber,
+		errorRate: CHNumber,
+		avgDurationMs: CHNumber,
+		p50DurationMs: CHNumber,
+		p95DurationMs: CHNumber,
+		activeServiceCount: CHNumber,
+	})
+
+export interface ServiceDbQueryTimeseriesOutput {
+	readonly bucket: string
+	readonly queryCount: number
+	readonly estimatedQueryCount: number
+	readonly errorCount: number
+	readonly errorRate: number
+	readonly avgDurationMs: number
+	readonly p50DurationMs: number
+	readonly p95DurationMs: number
+}
+
+const ServiceDbQueryTimeseriesOutputSchema: CompiledQueryRowSchema<ServiceDbQueryTimeseriesOutput> =
+	Schema.Struct({
+		bucket: Schema.String,
+		queryCount: CHNumber,
+		estimatedQueryCount: CHNumber,
+		errorCount: CHNumber,
+		errorRate: CHNumber,
+		avgDurationMs: CHNumber,
+		p50DurationMs: CHNumber,
+		p95DurationMs: CHNumber,
+	})
+
+export interface ServiceDbTopQueryOutput {
+	readonly queryKey: string
+	readonly queryLabel: string
+	readonly sampleStatement: string
+	readonly sampleService: string
+	readonly serviceCount: number
+	readonly queryCount: number
+	readonly estimatedQueryCount: number
+	readonly errorCount: number
+	readonly errorRate: number
+	readonly avgDurationMs: number
+	readonly p50DurationMs: number
+	readonly p95DurationMs: number
+	readonly lastSeen: string
+}
+
+const ServiceDbTopQueryOutputSchema: CompiledQueryRowSchema<ServiceDbTopQueryOutput> = Schema.Struct({
+	queryKey: Schema.String,
+	queryLabel: Schema.String,
+	sampleStatement: Schema.String,
+	sampleService: Schema.String,
+	serviceCount: CHNumber,
+	queryCount: CHNumber,
+	estimatedQueryCount: CHNumber,
+	errorCount: CHNumber,
+	errorRate: CHNumber,
+	avgDurationMs: CHNumber,
+	p50DurationMs: CHNumber,
+	p95DurationMs: CHNumber,
+	lastSeen: Schema.String,
+})
+
+// Finalized sample-weighted quantiles over raw rows — used by the sub-hour
+// timeseries path (which can't be served by the hourly rollup).
+const DB_DURATION_QUANTILES_EXPR =
+	"quantilesTDigestWeighted(0.5, 0.95)(Duration, toUInt32(greatest(SampleRate, 1.0)))"
+// The matching t-digest STATE over raw rows — its output type is identical to
+// the rollup's stored `DurationQuantiles`, so the two UNION-merge cleanly.
+const DB_DURATION_TDIGEST_STATE_EXPR =
+	"quantilesTDigestWeightedState(0.5, 0.95)(Duration, toUInt32(greatest(SampleRate, 1.0)))"
+
+const clampBucketSeconds = (value: number | undefined): number => {
+	if (!Number.isFinite(value)) return 3600
+	const rounded = Math.round(value ?? 3600)
+	return Math.min(24 * 60 * 60, Math.max(60, rounded))
+}
+
+const clampTopN = (value: number | undefined): number => {
+	if (!Number.isFinite(value)) return 10
+	const rounded = Math.round(value ?? 10)
+	return Math.min(50, Math.max(1, rounded))
+}
+
+// WHERE for the sealed hourly-rollup branch (service_map_db_query_shapes_hourly).
+// Covers only complete hours: [startHour, endHour) — the in-progress hour comes
+// from the raw branch below.
+function shapesHourlyWhere(params: ServiceDbQuerySummaryParams): string {
+	const esc = escapeClickHouseString
+	const sourceServiceFilter = params.sourceService
+		? `AND ServiceName = '${esc(params.sourceService)}'`
+		: ""
+	const envFilter = params.deploymentEnv ? `AND DeploymentEnv = '${esc(params.deploymentEnv)}'` : ""
+
+	return `OrgId = '${esc(params.orgId)}'
+      AND Hour >= toStartOfHour(toDateTime('${esc(params.startTime)}'))
+      AND Hour < toStartOfHour(toDateTime('${esc(params.endTime)}'))
+      AND DbSystem = '${esc(params.dbSystem)}'
+      ${sourceServiceFilter}
+      ${envFilter}`
+}
+
+// WHERE for the raw `traces` branch. `scope` selects the time window:
+//  - "currentHour": only the in-progress hour the rollup hasn't sealed yet
+//    (UNION-ed with the sealed rollup branch)
+//  - "fullWindow":  the whole [start, end] window (sub-hour timeseries, which
+//    the hourly rollup can't express)
+function serviceDbRawWhere(
+	params: ServiceDbQuerySummaryParams,
+	scope: "currentHour" | "fullWindow",
+): string {
+	const esc = escapeClickHouseString
+	const sourceServiceFilter = params.sourceService
+		? `AND ServiceName = '${esc(params.sourceService)}'`
+		: ""
+	const envFilter = params.deploymentEnv
+		? `AND ResourceAttributes['deployment.environment'] = '${esc(params.deploymentEnv)}'`
+		: ""
+	const since =
+		scope === "currentHour"
+			? `Timestamp >= toStartOfHour(toDateTime('${esc(params.endTime)}'))`
+			: `Timestamp >= toDateTime('${esc(params.startTime)}')`
+
+	return `OrgId = '${esc(params.orgId)}'
+      AND ${since}
+      AND Timestamp <= toDateTime('${esc(params.endTime)}')
+      AND SpanKind IN ('Client', 'Producer')
+      AND ServiceName != ''
+      AND ${DB_SYSTEM_ATTR_SQL} = '${esc(params.dbSystem)}'
+      ${sourceServiceFilter}
+      ${envFilter}`
+}
+
+export function serviceDbQuerySummarySQL(
+	params: ServiceDbQuerySummaryParams,
+): CompiledQuery<ServiceDbQuerySummaryOutput> {
+	// Sealed hours from the rollup; ServiceName/DurationQuantiles re-aggregated at
+	// read time (the table is queried without FINAL).
+	const sealed = `SELECT
+      sum(CallCount) AS bCount,
+      sum(EstimatedCount) AS bEst,
+      sum(ErrorCount) AS bErr,
+      sum(EstimatedErrorCount) AS bEstErr,
+      sum(WeightedDurationSumMs) AS bWDur,
+      uniqState(toString(ServiceName)) AS bSvc,
+      quantilesTDigestWeightedMergeState(0.5, 0.95)(DurationQuantiles) AS bQ
+    FROM service_map_db_query_shapes_hourly
+    WHERE ${shapesHourlyWhere(params)}`
+	const recent = `SELECT
+      count() AS bCount,
+      sum(SampleRate) AS bEst,
+      countIf(StatusCode = 'Error') AS bErr,
+      sumIf(SampleRate, StatusCode = 'Error') AS bEstErr,
+      sum(toFloat64(Duration) * SampleRate / 1000000) AS bWDur,
+      uniqState(toString(ServiceName)) AS bSvc,
+      ${DB_DURATION_TDIGEST_STATE_EXPR} AS bQ
+    FROM traces
+    WHERE ${serviceDbRawWhere(params, "currentHour")}`
+	const sql = `SELECT
+  sum(bCount) AS queryCount,
+  sum(bEst) AS estimatedQueryCount,
+  sum(bErr) AS errorCount,
+  sum(bEstErr) AS estimatedErrorCount,
+  if(sum(bEst) > 0, sum(bEstErr) / sum(bEst), 0) AS errorRate,
+  if(sum(bEst) > 0, sum(bWDur) / sum(bEst), 0) AS avgDurationMs,
+  if(sum(bCount) > 0, arrayElement(quantilesTDigestWeightedMerge(0.5, 0.95)(bQ), 1) / 1000000, 0) AS p50DurationMs,
+  if(sum(bCount) > 0, arrayElement(quantilesTDigestWeightedMerge(0.5, 0.95)(bQ), 2) / 1000000, 0) AS p95DurationMs,
+  uniqMerge(bSvc) AS activeServiceCount
+FROM (
+  ${sealed}
+  UNION ALL
+  ${recent}
+)
+FORMAT JSON`
+
+	return unsafeCompiledQuery({
+		sql,
+		rowSchema: ServiceDbQuerySummaryOutputSchema,
+	})
+}
+
+export function serviceDbQueryTimeseriesSQL(
+	params: ServiceDbQuerySummaryParams,
+): CompiledQuery<ServiceDbQueryTimeseriesOutput> {
+	const bucketSeconds = clampBucketSeconds(params.bucketSeconds)
+
+	// Sub-hour buckets (short windows — pickDbSummaryBucketSeconds gives 5/15 min
+	// for ≤24h) can't be served by the hourly rollup, but those scans are cheap;
+	// read raw `traces` directly for the full window.
+	if (bucketSeconds < 3600) {
+		const sql = `SELECT
+  toStartOfInterval(toDateTime(Timestamp), INTERVAL ${bucketSeconds} SECOND) AS bucket,
+  count() AS queryCount,
+  sum(SampleRate) AS estimatedQueryCount,
+  countIf(StatusCode = 'Error') AS errorCount,
+  if(sum(SampleRate) > 0, sumIf(SampleRate, StatusCode = 'Error') / sum(SampleRate), 0) AS errorRate,
+  if(sum(SampleRate) > 0, sum(toFloat64(Duration) * SampleRate) / sum(SampleRate) / 1000000, 0) AS avgDurationMs,
+  if(count() > 0, arrayElement(${DB_DURATION_QUANTILES_EXPR}, 1) / 1000000, 0) AS p50DurationMs,
+  if(count() > 0, arrayElement(${DB_DURATION_QUANTILES_EXPR}, 2) / 1000000, 0) AS p95DurationMs
+FROM traces
+WHERE ${serviceDbRawWhere(params, "fullWindow")}
+GROUP BY bucket
+ORDER BY bucket ASC
+LIMIT 2000
+FORMAT JSON`
+		return unsafeCompiledQuery({
+			sql,
+			rowSchema: ServiceDbQueryTimeseriesOutputSchema,
+		})
+	}
+
+	// Hour-aligned buckets (≥1h — pickDbSummaryBucketSeconds gives 1h/6h for >24h):
+	// sealed rollup hours UNION the in-progress hour from raw traces.
+	const sealed = `SELECT
+      toStartOfInterval(Hour, INTERVAL ${bucketSeconds} SECOND) AS bucket,
+      sum(CallCount) AS bCount,
+      sum(EstimatedCount) AS bEst,
+      sum(ErrorCount) AS bErr,
+      sum(EstimatedErrorCount) AS bEstErr,
+      sum(WeightedDurationSumMs) AS bWDur,
+      quantilesTDigestWeightedMergeState(0.5, 0.95)(DurationQuantiles) AS bQ
+    FROM service_map_db_query_shapes_hourly
+    WHERE ${shapesHourlyWhere(params)}
+    GROUP BY bucket`
+	const recent = `SELECT
+      toStartOfInterval(toDateTime(Timestamp), INTERVAL ${bucketSeconds} SECOND) AS bucket,
+      count() AS bCount,
+      sum(SampleRate) AS bEst,
+      countIf(StatusCode = 'Error') AS bErr,
+      sumIf(SampleRate, StatusCode = 'Error') AS bEstErr,
+      sum(toFloat64(Duration) * SampleRate / 1000000) AS bWDur,
+      ${DB_DURATION_TDIGEST_STATE_EXPR} AS bQ
+    FROM traces
+    WHERE ${serviceDbRawWhere(params, "currentHour")}
+    GROUP BY bucket`
+	const sql = `SELECT
+  bucket,
+  sum(bCount) AS queryCount,
+  sum(bEst) AS estimatedQueryCount,
+  sum(bErr) AS errorCount,
+  if(sum(bEst) > 0, sum(bEstErr) / sum(bEst), 0) AS errorRate,
+  if(sum(bEst) > 0, sum(bWDur) / sum(bEst), 0) AS avgDurationMs,
+  if(sum(bCount) > 0, arrayElement(quantilesTDigestWeightedMerge(0.5, 0.95)(bQ), 1) / 1000000, 0) AS p50DurationMs,
+  if(sum(bCount) > 0, arrayElement(quantilesTDigestWeightedMerge(0.5, 0.95)(bQ), 2) / 1000000, 0) AS p95DurationMs
+FROM (
+  ${sealed}
+  UNION ALL
+  ${recent}
+)
+GROUP BY bucket
+ORDER BY bucket ASC
+LIMIT 2000
+FORMAT JSON`
+
+	return unsafeCompiledQuery({
+		sql,
+		rowSchema: ServiceDbQueryTimeseriesOutputSchema,
+	})
+}
+
+export function serviceDbTopQueriesSQL(
+	params: ServiceDbQuerySummaryParams,
+): CompiledQuery<ServiceDbTopQueryOutput> {
+	const topN = clampTopN(params.topN)
+	// Sealed rollup shapes — pre-computed QueryKey/QueryLabel, so no per-row
+	// fingerprinting on this branch.
+	const sealed = `SELECT
+      QueryKey AS queryKey,
+      any(QueryLabel) AS bLabel,
+      any(SampleStatement) AS bStatement,
+      any(toString(ServiceName)) AS bSampleService,
+      uniqState(toString(ServiceName)) AS bServices,
+      sum(CallCount) AS bCount,
+      sum(EstimatedCount) AS bEst,
+      sum(ErrorCount) AS bErr,
+      sum(EstimatedErrorCount) AS bEstErr,
+      sum(WeightedDurationSumMs) AS bWDur,
+      quantilesTDigestWeightedMergeState(0.5, 0.95)(DurationQuantiles) AS bQ,
+      max(Hour) AS bLastSeen
+    FROM service_map_db_query_shapes_hourly
+    WHERE ${shapesHourlyWhere(params)}
+    GROUP BY queryKey`
+	// In-progress hour — derives QueryKey/QueryLabel from the SAME shared SQL the
+	// rollup MV uses, so a shape's key matches across the sealed/live boundary.
+	const recent = `SELECT
+      ${DB_QUERY_KEY_SQL} AS queryKey,
+      any(substring(${DB_QUERY_LABEL_SQL}, 1, 220)) AS bLabel,
+      any(substring(${DB_STATEMENT_SQL}, 1, 1000)) AS bStatement,
+      any(toString(ServiceName)) AS bSampleService,
+      uniqState(toString(ServiceName)) AS bServices,
+      count() AS bCount,
+      sum(SampleRate) AS bEst,
+      countIf(StatusCode = 'Error') AS bErr,
+      sumIf(SampleRate, StatusCode = 'Error') AS bEstErr,
+      sum(toFloat64(Duration) * SampleRate / 1000000) AS bWDur,
+      ${DB_DURATION_TDIGEST_STATE_EXPR} AS bQ,
+      max(toDateTime(Timestamp)) AS bLastSeen
+    FROM traces
+    WHERE ${serviceDbRawWhere(params, "currentHour")}
+    GROUP BY queryKey`
+	// Outer wrapper derives the display label from the (literal-stripped) sample
+	// statement when present, so co-located shapes — e.g. several different
+	// queries that all carry the generic db.operation.name="execute" +
+	// db.collection.name="subscriptions" — show their distinct SQL instead of one
+	// indistinct "execute subscriptions" row. Falls back to the derived label for
+	// shapes that carry no statement text (Redis ops, connection spans). Done at
+	// read time off the rollup's stored SampleStatement, so this needs no MV change.
+	const sql = `SELECT
+  queryKey,
+  if(sampleStatement != '', substring(${presentableStatementSql("sampleStatement")}, 1, 220), fallbackLabel) AS queryLabel,
+  sampleStatement,
+  sampleService,
+  serviceCount,
+  queryCount,
+  estimatedQueryCount,
+  errorCount,
+  errorRate,
+  avgDurationMs,
+  p50DurationMs,
+  p95DurationMs,
+  lastSeen
+FROM (
+  SELECT
+    queryKey,
+    any(bLabel) AS fallbackLabel,
+    anyIf(bStatement, bStatement != '') AS sampleStatement,
+    any(bSampleService) AS sampleService,
+    uniqMerge(bServices) AS serviceCount,
+    sum(bCount) AS queryCount,
+    sum(bEst) AS estimatedQueryCount,
+    sum(bErr) AS errorCount,
+    if(sum(bEst) > 0, sum(bEstErr) / sum(bEst), 0) AS errorRate,
+    if(sum(bEst) > 0, sum(bWDur) / sum(bEst), 0) AS avgDurationMs,
+    if(sum(bCount) > 0, arrayElement(quantilesTDigestWeightedMerge(0.5, 0.95)(bQ), 1) / 1000000, 0) AS p50DurationMs,
+    if(sum(bCount) > 0, arrayElement(quantilesTDigestWeightedMerge(0.5, 0.95)(bQ), 2) / 1000000, 0) AS p95DurationMs,
+    max(bLastSeen) AS lastSeen
+  FROM (
+    ${sealed}
+    UNION ALL
+    ${recent}
+  )
+  GROUP BY queryKey
+)
+ORDER BY estimatedQueryCount DESC
+LIMIT ${topN}
+FORMAT JSON`
+
+	return unsafeCompiledQuery({
+		sql,
+		rowSchema: ServiceDbTopQueryOutputSchema,
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Service ↔ external target edges (http / messaging / rpc)
 //
 // Surfaces non-DB Client/Producer outbound calls — HTTP endpoints, message
@@ -601,6 +1024,19 @@ export interface ServiceExternalEdgesOutput {
 	readonly p95DurationMs: number
 	readonly estimatedSpanCount: number
 }
+
+const ServiceExternalEdgesOutputSchema: CompiledQueryRowSchema<ServiceExternalEdgesOutput> =
+	Schema.Struct({
+		sourceService: Schema.String,
+		targetType: Schema.Literals(["http", "messaging", "rpc"]),
+		targetSystem: Schema.String,
+		targetName: Schema.String,
+		callCount: CHNumber,
+		errorCount: CHNumber,
+		avgDurationMs: CHNumber,
+		p95DurationMs: CHNumber,
+		estimatedSpanCount: CHNumber,
+	})
 
 export function serviceExternalEdgesSQL(
 	opts: ServiceExternalEdgesOpts,
@@ -728,10 +1164,10 @@ ORDER BY callCount DESC
 LIMIT 200
 FORMAT JSON`
 
-	return {
+	return unsafeCompiledQuery({
 		sql,
-		castRows: (rows) => rows as unknown as ReadonlyArray<ServiceExternalEdgesOutput>,
-	}
+		rowSchema: ServiceExternalEdgesOutputSchema,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -765,6 +1201,18 @@ export interface ServicePlatformsOutput {
 	readonly mapleSdkType: string
 	readonly processRuntimeName: string
 }
+
+const ServicePlatformsOutputSchema: CompiledQueryRowSchema<ServicePlatformsOutput> = Schema.Struct({
+	serviceName: Schema.String,
+	k8sCluster: Schema.String,
+	k8sPodName: Schema.String,
+	k8sDeploymentName: Schema.String,
+	cloudPlatform: Schema.String,
+	cloudProvider: Schema.String,
+	faasName: Schema.String,
+	mapleSdkType: Schema.String,
+	processRuntimeName: Schema.String,
+})
 
 export function servicePlatformsSQL(
 	opts: ServicePlatformsOpts,
@@ -803,8 +1251,8 @@ export function servicePlatformsSQL(
 		endTime: params.endTime,
 	})
 
-	return {
+	return unsafeCompiledQuery({
 		sql,
-		castRows: (rows) => rows as unknown as ReadonlyArray<ServicePlatformsOutput>,
-	}
+		rowSchema: ServicePlatformsOutputSchema,
+	})
 }

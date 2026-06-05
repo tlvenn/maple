@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { cacheTtlForQueryKind, snapToWindow, snapWindowForQueryKind } from "./QueryEngineService"
+import { cacheTtlForQueryKind, snapToWindow, snapWindowForQueryKind } from "@maple/query-engine/runtime"
 
 describe("snapToWindow", () => {
 	it("snaps within a single minute when window is 15s", () => {
@@ -22,6 +22,14 @@ describe("snapToWindow", () => {
 	it("returns input unchanged for malformed dates", () => {
 		expect(snapToWindow("not-a-date", 15)).toBe("not-a-date")
 		expect(snapToWindow("2026-04-27T12:34:42", 15)).toBe("2026-04-27T12:34:42")
+	})
+
+	it("does not throw on a nullish timestamp (cache-key path must degrade, not crash)", () => {
+		// A request with an optional/undefined start or end time must not crash
+		// EdgeCacheService.getOrCompute with an opaque TypeError; pass it through.
+		expect(() => snapToWindow(undefined as unknown as string, 15)).not.toThrow()
+		expect(snapToWindow(undefined as unknown as string, 15)).toBeUndefined()
+		expect(snapToWindow(null as unknown as string, 15)).toBeNull()
 	})
 
 	it("returns input unchanged for invalid windows", () => {

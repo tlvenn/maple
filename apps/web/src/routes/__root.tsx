@@ -8,14 +8,21 @@ import {
 	redirect,
 	useRouterState,
 } from "@tanstack/react-router"
-import { hasSelectedPlan } from "@/lib/billing/plan-gating"
+import { toast } from "sonner"
+import { hasSelectedPlan, isUsableCustomer } from "@/lib/billing/plan-gating"
 import { parseRedirectUrl } from "@/lib/redirect-utils"
 import { Toaster } from "@maple/ui/components/ui/sonner"
+import { AttributesProvider } from "@maple/ui/components/attributes"
+import { highlightCode } from "@/lib/sugar-high"
 import { isClerkAuthEnabled } from "@/lib/services/common/auth-mode"
 import type { RouterAuthContext } from "@/router"
 import { captureChatReferrer } from "@/components/chat/auto-contexts"
 
-const PUBLIC_PATHS = new Set(["/sign-in", "/sign-up", "/org-required"])
+const PUBLIC_PATHS = new Set(["/sign-in", "/sign-up", "/org-required", "/service-map-bench"])
+
+// Stable references so the AttributesProvider context value never changes
+// identity across renders (avoids re-rendering every CopyableValue consumer).
+const notifyCopied = (message?: string) => toast.success(message ?? "Copied to clipboard")
 
 export const Route = createRootRouteWithContext<{ auth: RouterAuthContext }>()({
 	beforeLoad: ({ context, location }) => {
@@ -46,10 +53,10 @@ function AppFrame() {
 		captureChatReferrer(pathname)
 	}, [pathname])
 	return (
-		<>
+		<AttributesProvider notifyCopied={notifyCopied} highlightJson={highlightCode}>
 			<Outlet />
 			<Toaster />
-		</>
+		</AttributesProvider>
 	)
 }
 
@@ -76,7 +83,14 @@ function ClerkReverseRedirects() {
 		}),
 	})
 	const { isSignedIn, orgId } = useAuth()
-	const { data: customer, isLoading: isCustomerLoading, error: customerError } = useCustomer()
+	// Autumn customers are keyed by orgId, so getOrCreateCustomer can only
+	// succeed once an org is active. Skip the fetch for signed-out/org-less
+	// onboarding sessions (e.g. /sign-up, /org-required) to avoid guaranteed 401s.
+	const {
+		data: customer,
+		isLoading: isCustomerLoading,
+		error: customerError,
+	} = useCustomer({ queryOptions: { enabled: Boolean(isSignedIn && orgId) } })
 
 	const redirectUrl = pathname + (searchStr ?? "")
 	const selectedPlan = hasSelectedPlan(customer)
@@ -97,15 +111,23 @@ function ClerkReverseRedirects() {
 	}
 
 	if (isSignedIn && orgId) {
-		// If Autumn is down, let users through rather than blocking them
-		if (customerError) {
+		// If Autumn is down — or returns an error-shaped `200` payload that isn't
+		// a usable customer — let users through rather than blocking them. Without
+		// this, a malformed customer falls through as "no plan" and bounces the
+		// user into /quick-start onboarding.
+		if (customerError || (customer && !isUsableCustomer(customer))) {
 			return <AppFrame />
 		}
-		if (isCustomerLoading) {
+		// Dev-only: `?quota_preview=` forces the usage-alert banner for visual
+		// review; render the shell without waiting on the customer query (which
+		// may stall when Autumn isn't configured locally).
+		const quotaPreview =
+			import.meta.env.DEV && typeof window !== "undefined" && window.location.search.includes("quota_preview")
+		if (isCustomerLoading && !quotaPreview) {
 			return null
 		}
 		const ALLOWED_WITHOUT_PLAN = ["/select-plan", "/quick-start"]
-		if (!selectedPlan && !ALLOWED_WITHOUT_PLAN.includes(pathname)) {
+		if (!selectedPlan && !quotaPreview && !ALLOWED_WITHOUT_PLAN.includes(pathname)) {
 			return <Navigate to="/quick-start" search={{ redirect_url: redirectUrl }} replace />
 		}
 		if (selectedPlan && pathname === "/select-plan") {

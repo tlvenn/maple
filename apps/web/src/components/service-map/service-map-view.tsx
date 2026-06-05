@@ -19,17 +19,26 @@ import { Result, useAtom } from "@/lib/effect-atom"
 import { serviceMapLayoutAtomFamily } from "@/atoms/service-map-layout-atoms"
 import { Link } from "@tanstack/react-router"
 import { formatBackendError } from "@/lib/error-messages"
+import { Bar, BarChart, CartesianGrid, Line, XAxis, YAxis } from "recharts"
 
 import { cn } from "@maple/ui/utils"
 import { getServiceLegendColor } from "@maple/ui/colors"
+import {
+	ChartContainer,
+	ChartTooltip,
+	ChartTooltipContent,
+	type ChartConfig,
+} from "@maple/ui/components/ui/chart"
 import { Popover, PopoverTrigger, PopoverContent } from "@maple/ui/components/ui/popover"
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@maple/ui/components/ui/resizable"
 import { ScrollArea } from "@maple/ui/components/ui/scroll-area"
 import { Button } from "@maple/ui/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@maple/ui/components/ui/tabs"
+import { formatBucketLabel } from "@/lib/format"
 import { ArrowRightIcon, CubeIcon, NetworkNodesIcon, XmarkIcon } from "@/components/icons"
 import {
+	getServiceDbQuerySummaryResultAtom,
 	getServiceMapDbEdgesResultAtom,
 	getServiceMapResultAtom,
 	getServiceOverviewResultAtom,
@@ -39,6 +48,7 @@ import {
 import type {
 	GetServiceMapInput,
 	ServiceDbEdge,
+	ServiceDbQuerySummaryResponse,
 	ServiceEdge,
 	ServicePlatform,
 } from "@/api/warehouse/service-map"
@@ -47,13 +57,20 @@ import type { ServiceWorkload } from "@/api/warehouse/service-infra"
 import { useInfraEnabled } from "@/hooks/use-infra-enabled"
 import { ServiceMapNode } from "./service-map-node"
 import { ServiceMapEdge } from "./service-map-edge"
+import {
+	createParticleRegistry,
+	ParticleRegistryProvider,
+	ServiceMapParticleCanvas,
+	type ParticleRegistry,
+} from "./service-map-particles"
 import { getDbDescriptor } from "./service-map-db"
 import {
 	buildFlowElements,
+	computeNodePositions,
 	DB_NODE_PREFIX,
 	getPlatformColor,
 	getServiceMapNodeColor,
-	layoutNodes,
+	topologyKey,
 	DEFAULT_LAYOUT_CONFIG,
 	type LayoutConfig,
 	type ServiceMapColorMode,
@@ -529,7 +546,169 @@ interface DatabaseDetailPanelProps {
 	dbEdges: ServiceDbEdge[]
 	services: string[]
 	durationSeconds: number
+	startTime: string
+	endTime: string
 	onClose: () => void
+}
+
+const DB_QUERY_CHART_CONFIG = {
+	queryCount: {
+		label: "Queries",
+		color: "var(--chart-2)",
+	},
+	p50DurationMs: {
+		label: "P50",
+		color: "var(--chart-p50)",
+	},
+	p95DurationMs: {
+		label: "P95",
+		color: "var(--chart-p95)",
+	},
+} satisfies ChartConfig
+
+function pickDbSummaryBucketSeconds(durationSeconds: number): number {
+	if (durationSeconds <= 6 * 60 * 60) return 5 * 60
+	if (durationSeconds <= 24 * 60 * 60) return 15 * 60
+	if (durationSeconds <= 7 * 24 * 60 * 60) return 60 * 60
+	return 6 * 60 * 60
+}
+
+function formatCompactCount(value: number): string {
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+	if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+	return value.toLocaleString()
+}
+
+function formatQueryLabel(value: string): string {
+	const collapsed = value.replace(/\s+/g, " ").trim()
+	if (collapsed.length <= 96) return collapsed || "unknown query"
+	return `${collapsed.slice(0, 78)}…${collapsed.slice(-16)}`
+}
+
+function DbQueryActivityChart({
+	response,
+	waiting,
+}: {
+	response: ServiceDbQuerySummaryResponse | null
+	waiting: boolean
+}) {
+	const data = useMemo(
+		() =>
+			(response?.timeseries ?? []).map((point) => ({
+				...point,
+				queryCount: Math.round(point.estimatedQueryCount || point.queryCount),
+			})),
+		[response],
+	)
+	const axisContext = useMemo(() => {
+		if (data.length < 2) return { rangeMs: 0, bucketSeconds: undefined }
+		const first = new Date(data[0]!.bucket).getTime()
+		const second = new Date(data[1]!.bucket).getTime()
+		const last = new Date(data[data.length - 1]!.bucket).getTime()
+		const bucketMs = second - first
+		return {
+			rangeMs: Number.isFinite(last - first) ? last - first : 0,
+			bucketSeconds: bucketMs > 0 && Number.isFinite(bucketMs) ? bucketMs / 1000 : undefined,
+		}
+	}, [data])
+
+	if (!response && waiting) {
+		return (
+			<div className="flex h-44 items-center justify-center rounded-md border border-border/70 bg-muted/20 text-xs text-muted-foreground">
+				Loading query activity…
+			</div>
+		)
+	}
+
+	if (data.length === 0) {
+		return (
+			<div className="flex h-44 items-center justify-center rounded-md border border-dashed border-border/60 bg-muted/10 text-xs text-muted-foreground">
+				No database query spans in this window
+			</div>
+		)
+	}
+
+	return (
+		<ChartContainer config={DB_QUERY_CHART_CONFIG} className="h-44 w-full">
+			<BarChart data={data} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
+				<CartesianGrid vertical={false} strokeDasharray="3 3" />
+				<XAxis
+					dataKey="bucket"
+					axisLine={false}
+					tickLine={false}
+					tickMargin={8}
+					minTickGap={20}
+					fontSize={10}
+					tickFormatter={(value) => formatBucketLabel(value, axisContext, "tick")}
+				/>
+				<YAxis
+					yAxisId="count"
+					axisLine={false}
+					tickLine={false}
+					tickMargin={8}
+					width={34}
+					fontSize={10}
+					tickFormatter={(value) => formatCompactCount(Number(value))}
+				/>
+				<YAxis
+					yAxisId="latency"
+					orientation="right"
+					axisLine={false}
+					tickLine={false}
+					tickMargin={8}
+					width={42}
+					fontSize={10}
+					tickFormatter={(value) => formatLatency(Number(value))}
+				/>
+				<ChartTooltip
+					cursor={{ fill: "var(--muted)", opacity: 0.3 }}
+					content={
+						<ChartTooltipContent
+							labelFormatter={(value) => formatBucketLabel(value, axisContext, "tooltip")}
+							formatter={(value, name) => {
+								const label = name === "queryCount" ? "Queries" : String(name)
+								const formatted =
+									name === "queryCount"
+										? formatCompactCount(Number(value))
+										: formatLatency(Number(value))
+								return (
+									<span className="flex items-center gap-2">
+										<span className="text-muted-foreground">{label}</span>
+										<span className="font-mono font-medium tabular-nums">{formatted}</span>
+									</span>
+								)
+							}}
+						/>
+					}
+				/>
+				<Bar
+					yAxisId="count"
+					dataKey="queryCount"
+					fill="var(--color-queryCount)"
+					radius={[2, 2, 0, 0]}
+					isAnimationActive={false}
+				/>
+				<Line
+					yAxisId="latency"
+					type="monotone"
+					dataKey="p50DurationMs"
+					stroke="var(--color-p50DurationMs)"
+					strokeWidth={1.5}
+					dot={false}
+					isAnimationActive={false}
+				/>
+				<Line
+					yAxisId="latency"
+					type="monotone"
+					dataKey="p95DurationMs"
+					stroke="var(--color-p95DurationMs)"
+					strokeWidth={1.5}
+					dot={false}
+					isAnimationActive={false}
+				/>
+			</BarChart>
+		</ChartContainer>
+	)
 }
 
 function DatabaseDetailPanel({
@@ -537,16 +716,41 @@ function DatabaseDetailPanel({
 	dbEdges,
 	services,
 	durationSeconds,
+	startTime,
+	endTime,
 	onClose,
 }: DatabaseDetailPanelProps) {
 	const callers = dbEdges.filter((e) => e.dbSystem === dbSystem)
 	const totalCalls = callers.reduce((sum, e) => sum + e.callCount, 0)
 	const totalErrors = callers.reduce((sum, e) => sum + e.errorCount, 0)
 	const errorRate = totalCalls > 0 ? totalErrors / totalCalls : 0
-	const callsPerSecond = totalCalls / Math.max(durationSeconds, 1)
 	const avgLatencyMs =
 		totalCalls > 0 ? callers.reduce((sum, e) => sum + e.avgDurationMs * e.callCount, 0) / totalCalls : 0
 	const p95LatencyMs = callers.reduce((max, e) => Math.max(max, e.p95DurationMs), 0)
+	const bucketSeconds = pickDbSummaryBucketSeconds(durationSeconds)
+	const summaryResult = useRefreshableAtomValue(
+		getServiceDbQuerySummaryResultAtom({
+			data: {
+				dbSystem,
+				startTime,
+				endTime,
+				bucketSeconds,
+				topN: 8,
+			},
+		}),
+	)
+	const summaryResponse = Result.isSuccess(summaryResult) ? summaryResult.value : null
+	const summary = summaryResponse?.summary ?? null
+	const metricQueryCount = summary?.estimatedQueryCount ?? totalCalls
+	const metricCallsPerSecond = metricQueryCount / Math.max(durationSeconds, 1)
+	const metricErrorRate = summary?.errorRate ?? errorRate
+	const metricAvgLatencyMs = summary?.avgDurationMs ?? avgLatencyMs
+	const metricP50LatencyMs = summary?.p50DurationMs ?? avgLatencyMs
+	const metricP95LatencyMs = summary?.p95DurationMs ?? p95LatencyMs
+	const metricHasSampling = summary
+		? summary.estimatedQueryCount > summary.queryCount + 1
+		: callers.some((caller) => caller.hasSampling)
+	const summaryWaiting = Boolean(summaryResult.waiting)
 
 	const { category, Icon: DbIcon, color: dbColor, branded: dbBranded } = getDbDescriptor(dbSystem)
 
@@ -582,9 +786,17 @@ function DatabaseDetailPanel({
 						</h4>
 						<div className="grid grid-cols-2 gap-x-6 gap-y-4">
 							<div className="space-y-0.5">
+								<span className="text-[10px] text-muted-foreground">Queries</span>
+								<p className="text-xl font-semibold text-foreground tabular-nums font-mono">
+									{metricHasSampling ? "~" : ""}
+									{formatCompactCount(metricQueryCount)}
+								</p>
+							</div>
+							<div className="space-y-0.5">
 								<span className="text-[10px] text-muted-foreground">Throughput</span>
 								<p className="text-xl font-semibold text-foreground tabular-nums font-mono">
-									{formatRate(callsPerSecond)}
+									{metricHasSampling ? "~" : ""}
+									{formatRate(metricCallsPerSecond)}
 								</p>
 								<span className="text-[10px] text-muted-foreground">calls/s</span>
 							</div>
@@ -593,20 +805,20 @@ function DatabaseDetailPanel({
 								<p
 									className={cn(
 										"text-xl font-semibold tabular-nums font-mono",
-										errorRate > 0.05
+										metricErrorRate > 0.05
 											? "text-severity-error"
-											: errorRate > 0.01
+											: metricErrorRate > 0.01
 												? "text-severity-warn"
 												: "text-foreground",
 									)}
 								>
-									{(errorRate * 100).toFixed(1)}%
+									{(metricErrorRate * 100).toFixed(1)}%
 								</p>
 							</div>
 							<div className="space-y-0.5">
-								<span className="text-[10px] text-muted-foreground">Avg Latency</span>
+								<span className="text-[10px] text-muted-foreground">P50 Latency</span>
 								<p className="text-xl font-semibold text-foreground tabular-nums font-mono">
-									{formatLatency(avgLatencyMs)}
+									{formatLatency(metricP50LatencyMs)}
 								</p>
 							</div>
 							<div className="space-y-0.5">
@@ -614,16 +826,98 @@ function DatabaseDetailPanel({
 								<p
 									className={cn(
 										"text-xl font-semibold tabular-nums font-mono",
-										p95LatencyMs > avgLatencyMs * 3
+										metricP95LatencyMs > metricP50LatencyMs * 3
 											? "text-severity-warn"
 											: "text-foreground",
 									)}
 								>
-									{formatLatency(p95LatencyMs)}
+									{formatLatency(metricP95LatencyMs)}
+								</p>
+							</div>
+							<div className="space-y-0.5">
+								<span className="text-[10px] text-muted-foreground">Avg Latency</span>
+								<p className="text-xl font-semibold text-foreground tabular-nums font-mono">
+									{formatLatency(metricAvgLatencyMs)}
 								</p>
 							</div>
 						</div>
 					</div>
+
+					<div className="space-y-3">
+						<div className="h-px bg-border" />
+						<div className="flex items-center justify-between gap-2">
+							<h4 className="text-[10px] font-medium tracking-widest text-muted-foreground/60 uppercase">
+								Query Activity
+							</h4>
+							{summaryWaiting && summaryResponse && (
+								<span className="text-[10px] text-muted-foreground">Refreshing</span>
+							)}
+						</div>
+						{Result.builder(summaryResult)
+							.onError((error) => {
+								const formatted = formatBackendError(error)
+								return (
+									<div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs">
+										<p className="font-medium text-destructive">{formatted.title}</p>
+										<p className="mt-1 text-muted-foreground">{formatted.description}</p>
+									</div>
+								)
+							})
+							.orElse(() => null)}
+						<DbQueryActivityChart response={summaryResponse} waiting={summaryWaiting} />
+					</div>
+
+					{summaryResponse?.topQueries.length ? (
+						<div className="space-y-3">
+							<div className="h-px bg-border" />
+							<h4 className="text-[10px] font-medium tracking-widest text-muted-foreground/60 uppercase">
+								Top Query Shapes
+							</h4>
+							<div className="space-y-1.5">
+								{summaryResponse.topQueries.map((query) => (
+									<div
+										key={query.queryKey}
+										className="rounded-md border border-border bg-card px-2.5 py-2"
+									>
+										<div className="flex items-start justify-between gap-2">
+											<p className="min-w-0 flex-1 truncate font-mono text-[11px] font-medium text-foreground">
+												{formatQueryLabel(query.queryLabel)}
+											</p>
+											<span
+												className={cn(
+													"shrink-0 font-mono text-[10px] tabular-nums",
+													query.errorRate > 0.05
+														? "text-severity-error"
+														: query.errorRate > 0.01
+															? "text-severity-warn"
+															: "text-muted-foreground",
+												)}
+											>
+												{(query.errorRate * 100).toFixed(1)}%
+											</span>
+										</div>
+										<div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+											<span className="font-mono tabular-nums">
+												{query.estimatedQueryCount > query.queryCount + 1 ? "~" : ""}
+												{formatCompactCount(query.estimatedQueryCount)} calls
+											</span>
+											<span className="font-mono tabular-nums">
+												p50 {formatLatency(query.p50DurationMs)}
+											</span>
+											<span className="font-mono tabular-nums">
+												p95 {formatLatency(query.p95DurationMs)}
+											</span>
+											<span className="truncate">
+												{query.serviceCount > 1
+													? `${query.serviceCount} services`
+													: query.sampleService}
+											</span>
+										</div>
+									</div>
+								))}
+							</div>
+						</div>
+					) : null}
 
 					{callers.length > 0 && (
 						<div className="space-y-3">
@@ -764,7 +1058,7 @@ function LayoutDebugPanel({
 	)
 }
 
-function ServiceMapCanvas({
+export function ServiceMapCanvas({
 	edges: serviceEdges,
 	dbEdges,
 	platforms,
@@ -773,6 +1067,9 @@ function ServiceMapCanvas({
 	workloads,
 	showInfraTab,
 	durationSeconds,
+	startTime,
+	endTime,
+	layoutKey,
 }: {
 	edges: ServiceEdge[]
 	dbEdges: ServiceDbEdge[]
@@ -782,16 +1079,28 @@ function ServiceMapCanvas({
 	workloads: ServiceWorkload[]
 	showInfraTab: boolean
 	durationSeconds: number
+	startTime: string
+	endTime: string
+	// Namespaces persisted drag positions / viewport. Lifted to a prop so the
+	// component renders without a Clerk session (e.g. the /service-map-bench
+	// perf harness, which runs in self-hosted mode with no ClerkProvider).
+	layoutKey: string
 }) {
 	const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
 	const [layoutConfig, setLayoutConfig] = useState<LayoutConfig>({ ...DEFAULT_LAYOUT_CONFIG })
 	const [colorMode, setColorMode] = useState<ServiceMapColorMode>("service")
 
-	const { orgId } = useAuth()
-	const [layout, setLayout] = useAtom(serviceMapLayoutAtomFamily(orgId ?? "default"))
+	const [layout, setLayout] = useAtom(serviceMapLayoutAtomFamily(layoutKey))
 
-	const { layoutedNodes, flowEdges, services } = useMemo(() => {
-		const { nodes: rawNodes, edges: rawEdges } = buildFlowElements({
+	// Stable registry that edges publish their geometry into and the single
+	// particle canvas reads each frame. Created once per canvas instance.
+	const registryRef = useRef<ParticleRegistry | null>(null)
+	if (registryRef.current === null) registryRef.current = createParticleRegistry()
+	const registry = registryRef.current
+
+	// Build nodes/edges (carrying live metrics) every render — cheap object work.
+	const { rawNodes, flowEdges, services } = useMemo(() => {
+		const { nodes, edges } = buildFlowElements({
 			edges: serviceEdges,
 			dbEdges,
 			serviceOverviews: overviews,
@@ -800,13 +1109,29 @@ function ServiceMapCanvas({
 			platforms,
 			runtimes,
 		})
-		const positioned = layoutNodes(rawNodes, rawEdges, layoutConfig)
 		// Service legend should only include real services, not synthetic db: nodes
 		const allServices = Array.from(
-			new Set(positioned.filter((n) => !n.id.startsWith(DB_NODE_PREFIX)).map((n) => n.id)),
+			new Set(nodes.filter((n) => !n.id.startsWith(DB_NODE_PREFIX)).map((n) => n.id)),
 		).toSorted()
-		return { layoutedNodes: positioned, flowEdges: rawEdges, services: allServices }
-	}, [serviceEdges, dbEdges, platforms, runtimes, overviews, workloads, durationSeconds, layoutConfig])
+		return { rawNodes: nodes, flowEdges: edges, services: allServices }
+	}, [serviceEdges, dbEdges, platforms, runtimes, overviews, workloads, durationSeconds])
+
+	// Positions depend ONLY on topology + layout config. Memoize the expensive
+	// hierarchical layout on a topology key so metric refreshes (new array
+	// identities, same shape) don't re-run barycenter sweeps. The memo body runs
+	// each render but short-circuits on an unchanged key.
+	const topoKey = useMemo(() => topologyKey(rawNodes, flowEdges), [rawNodes, flowEdges])
+	const layoutCacheRef = useRef<{ key: string; positions: Map<string, { x: number; y: number }> } | null>(
+		null,
+	)
+	const layoutedNodes = useMemo(() => {
+		const key = `${topoKey}|${JSON.stringify(layoutConfig)}`
+		if (layoutCacheRef.current?.key !== key) {
+			layoutCacheRef.current = { key, positions: computeNodePositions(rawNodes, flowEdges, layoutConfig) }
+		}
+		const positions = layoutCacheRef.current.positions
+		return rawNodes.map((node) => ({ ...node, position: positions.get(node.id) ?? node.position }))
+	}, [rawNodes, flowEdges, layoutConfig, topoKey])
 
 	// Merge layout positions with selection + color-mode state. Persisted drag
 	// positions (keyed by node id) override the deterministic auto-layout.
@@ -945,28 +1270,30 @@ function ServiceMapCanvas({
 									</SelectContent>
 								</Select>
 							</div>
-							<ReactFlow
-								nodes={nodes}
-								edges={flowEdges}
-								onNodesChange={onNodesChange}
-								onNodeClick={handleNodeClick}
-								onPaneClick={handlePaneClick}
-								onMoveEnd={onMoveEnd}
-								defaultViewport={layout.viewport ?? undefined}
-								onInit={(instance) => {
-									rfInstance.current = instance as unknown as ReactFlowInstance
-								}}
-								nodeTypes={nodeTypes}
-								edgeTypes={edgeTypes}
-								nodesDraggable
-								nodesConnectable={false}
-								connectOnClick={false}
-								elementsSelectable={false}
-								minZoom={0.1}
-								maxZoom={2}
-								proOptions={{ hideAttribution: true }}
-							>
-								<Controls showInteractive={false} />
+							<ParticleRegistryProvider value={registry}>
+								<ReactFlow
+									nodes={nodes}
+									edges={flowEdges}
+									onNodesChange={onNodesChange}
+									onNodeClick={handleNodeClick}
+									onPaneClick={handlePaneClick}
+									onMoveEnd={onMoveEnd}
+									defaultViewport={layout.viewport ?? undefined}
+									onInit={(instance) => {
+										rfInstance.current = instance as unknown as ReactFlowInstance
+									}}
+									nodeTypes={nodeTypes}
+									edgeTypes={edgeTypes}
+									nodesDraggable
+									nodesConnectable={false}
+									connectOnClick={false}
+									elementsSelectable={false}
+									minZoom={0.1}
+									maxZoom={2}
+									proOptions={{ hideAttribution: true }}
+								>
+									<ServiceMapParticleCanvas />
+									<Controls showInteractive={false} />
 								<MiniMap
 									nodeColor={(node: Node) => {
 										const data = node.data as ServiceNodeData
@@ -981,6 +1308,7 @@ function ServiceMapCanvas({
 								/>
 								<Background variant={BackgroundVariant.Dots} gap={16} size={1} />
 							</ReactFlow>
+							</ParticleRegistryProvider>
 						</div>
 
 						{/* Legend */}
@@ -1088,10 +1416,12 @@ function ServiceMapCanvas({
 							<ResizableHandle withHandle />
 							<ResizablePanel defaultSize={35} minSize={25}>
 								<DatabaseDetailPanel
-									dbSystem={selectedServiceId.slice(DB_NODE_PREFIX.length)}
+									dbSystem={decodeURIComponent(selectedServiceId.slice(DB_NODE_PREFIX.length))}
 									dbEdges={dbEdges}
 									services={services}
 									durationSeconds={durationSeconds}
+									startTime={startTime}
+									endTime={endTime}
 									onClose={() => setSelectedServiceId(null)}
 								/>
 							</ResizablePanel>
@@ -1121,6 +1451,7 @@ function ServiceMapCanvas({
 }
 
 export function ServiceMapView({ startTime, endTime }: ServiceMapViewProps) {
+	const { orgId } = useAuth()
 	const infraEnabled = useInfraEnabled()
 	const durationSeconds = useMemo(() => {
 		const ms = new Date(endTime).getTime() - new Date(startTime).getTime()
@@ -1213,6 +1544,9 @@ export function ServiceMapView({ startTime, endTime }: ServiceMapViewProps) {
 				workloads={workloads}
 				showInfraTab={infraEnabled}
 				durationSeconds={durationSeconds}
+				startTime={startTime}
+				endTime={endTime}
+				layoutKey={orgId ?? "default"}
 			/>
 		))
 		.render()

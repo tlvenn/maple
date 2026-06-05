@@ -1,48 +1,47 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
+import { WarehouseUpstreamError } from "@maple/domain/http"
 import { findSlowTraces } from "./find-slow-traces"
-import { ObservabilityError, WarehouseExecutor } from "./WarehouseExecutor"
+import { WarehouseExecutor } from "./WarehouseExecutor"
 import type { WarehouseExecutorShape } from "./WarehouseExecutor"
 
 interface CapturedCalls {
-	sqlQueries: string[]
 	pipeCalls: Array<{ pipe: string; params: Record<string, unknown> }>
 }
 
 const makeMockExecutor = (
 	captured: CapturedCalls,
-	sqlRows: ReadonlyArray<Record<string, unknown>> = [],
-	pipeData: ReadonlyArray<Record<string, unknown>> = [],
+	slowRows: ReadonlyArray<Record<string, unknown>> = [],
+	statsRows: ReadonlyArray<Record<string, unknown>> = [],
 ): WarehouseExecutorShape => ({
 	orgId: "org_test",
-	sqlQuery: (sql: string) => {
-		captured.sqlQueries.push(sql)
-		return Effect.succeed(sqlRows as ReadonlyArray<never>)
-	},
+	sqlQuery: () => Effect.succeed([] as ReadonlyArray<never>),
+	compiledQuery: (compiled) => compiled.decodeRows([]).pipe(Effect.orDie),
+	compiledQueryFirst: (compiled) => compiled.decodeFirstRow([]).pipe(Effect.orDie),
 	query: (pipe: string, params: Record<string, unknown>) => {
 		captured.pipeCalls.push({ pipe, params })
-		return Effect.succeed({ data: pipeData as ReadonlyArray<never> })
+		const data = pipe === "slow_traces" ? slowRows : pipe === "traces_duration_stats" ? statsRows : []
+		return Effect.succeed({ data: data as ReadonlyArray<never> })
 	},
 })
 
 const makeLayer = (executor: WarehouseExecutorShape) => Layer.succeed(WarehouseExecutor, executor)
 
 describe("findSlowTraces", () => {
-	it.effect("issues ORDER BY Duration DESC at the DB (not in JS) with the requested limit", () =>
+	it.effect("queries the slow_traces pipe (not list_traces) with the requested limit", () =>
 		Effect.gen(function* () {
-			const captured: CapturedCalls = { sqlQueries: [], pipeCalls: [] }
+			const captured: CapturedCalls = { pipeCalls: [] }
 
 			yield* findSlowTraces({
 				timeRange: { startTime: "2026-04-01 00:00:00", endTime: "2026-04-02 00:00:00" },
 				limit: 25,
 			}).pipe(Effect.provide(makeLayer(makeMockExecutor(captured))))
 
-			assert.strictEqual(captured.sqlQueries.length, 1)
-			const sql = captured.sqlQueries[0]!
-			assert.match(sql, /ORDER BY Duration DESC/)
-			assert.match(sql, /LIMIT 25/)
-			assert.include(sql, "ParentSpanId = ''")
-			assert.include(sql, "OrgId = 'org_test'")
+			const slow = captured.pipeCalls.find((c) => c.pipe === "slow_traces")
+			assert.isDefined(slow)
+			assert.strictEqual(slow!.params.limit, 25)
+			assert.strictEqual(slow!.params.start_time, "2026-04-01 00:00:00")
+			assert.strictEqual(slow!.params.end_time, "2026-04-02 00:00:00")
 			// Confirm we are NOT calling the list_traces pipe (old behavior)
 			assert.isUndefined(captured.pipeCalls.find((c) => c.pipe === "list_traces"))
 			// Stats pipe is still called
@@ -50,9 +49,9 @@ describe("findSlowTraces", () => {
 		}),
 	)
 
-	it.effect("adds service and environment filters when provided", () =>
+	it.effect("adds service and environment params when provided", () =>
 		Effect.gen(function* () {
-			const captured: CapturedCalls = { sqlQueries: [], pipeCalls: [] }
+			const captured: CapturedCalls = { pipeCalls: [] }
 
 			yield* findSlowTraces({
 				timeRange: { startTime: "2026-04-01 00:00:00", endTime: "2026-04-02 00:00:00" },
@@ -60,27 +59,28 @@ describe("findSlowTraces", () => {
 				environment: "production",
 			}).pipe(Effect.provide(makeLayer(makeMockExecutor(captured))))
 
-			const sql = captured.sqlQueries[0]!
-			assert.include(sql, "ServiceName = 'api'")
-			assert.include(sql, "ResourceAttributes['deployment.environment'] = 'production'")
+			const slow = captured.pipeCalls.find((c) => c.pipe === "slow_traces")!
+			assert.strictEqual(slow.params.service, "api")
+			assert.strictEqual(slow.params.deployment_env, "production")
 		}),
 	)
 
 	it.effect("defaults limit to 10 when not supplied", () =>
 		Effect.gen(function* () {
-			const captured: CapturedCalls = { sqlQueries: [], pipeCalls: [] }
+			const captured: CapturedCalls = { pipeCalls: [] }
 
 			yield* findSlowTraces({
 				timeRange: { startTime: "2026-04-01 00:00:00", endTime: "2026-04-02 00:00:00" },
 			}).pipe(Effect.provide(makeLayer(makeMockExecutor(captured))))
 
-			assert.match(captured.sqlQueries[0]!, /LIMIT 10/)
+			const slow = captured.pipeCalls.find((c) => c.pipe === "slow_traces")!
+			assert.strictEqual(slow.params.limit, 10)
 		}),
 	)
 
 	it.effect("maps non-empty rows and stats into the FindSlowTracesOutput shape", () =>
 		Effect.gen(function* () {
-			const captured: CapturedCalls = { sqlQueries: [], pipeCalls: [] }
+			const captured: CapturedCalls = { pipeCalls: [] }
 			const executor = makeMockExecutor(
 				captured,
 				[
@@ -90,7 +90,6 @@ describe("findSlowTraces", () => {
 						serviceName: "api",
 						durationMs: 1234,
 						statusCode: "Ok",
-						resourceAttributesStr: "{}",
 						timestamp: "2026-04-01 12:00:00",
 					},
 				],
@@ -125,27 +124,29 @@ describe("findSlowTraces", () => {
 		}),
 	)
 
-	it.effect("propagates ObservabilityError from the executor", () =>
+	it.effect("propagates warehouse errors from the executor", () =>
 		Effect.gen(function* () {
 			const failingExecutor: WarehouseExecutorShape = {
 				orgId: "org_test",
-				sqlQuery: () =>
+				sqlQuery: () => Effect.succeed([]),
+				compiledQuery: (compiled) => compiled.decodeRows([]).pipe(Effect.orDie),
+				compiledQueryFirst: (compiled) => compiled.decodeFirstRow([]).pipe(Effect.orDie),
+				query: () =>
 					Effect.fail(
-						new ObservabilityError({
+						new WarehouseUpstreamError({
+							pipe: "find_slow_traces",
 							message: "ClickHouse exploded",
-							category: "upstream",
+							upstreamStatus: 503,
 						}),
 					),
-				query: () => Effect.succeed({ data: [] }),
 			}
 
 			const error = yield* findSlowTraces({
 				timeRange: { startTime: "2026-04-01 00:00:00", endTime: "2026-04-02 00:00:00" },
 			}).pipe(Effect.provide(makeLayer(failingExecutor)), Effect.flip)
 
-			assert.instanceOf(error, ObservabilityError)
+			assert.instanceOf(error, WarehouseUpstreamError)
 			assert.strictEqual(error.message, "ClickHouse exploded")
-			assert.strictEqual(error.category, "upstream")
 		}),
 	)
 })

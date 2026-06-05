@@ -1,13 +1,13 @@
 import {
 	optionalNumberParam,
 	optionalStringParam,
-	McpQueryError,
 	type McpToolRegistrar,
 } from "./types"
+import { warehouseToMcpHandlers } from "../lib/map-warehouse-error"
 import { withTenantExecutor, resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { clampLimit, clampOffset } from "../lib/limits"
-import { formatTable } from "../lib/format"
+import { formatTable, truncate } from "../lib/format"
 import { formatNextSteps } from "../lib/next-steps"
 import { Array as Arr, Effect, Schema, pipe } from "effect"
 import { createDualContent } from "../lib/structured-output"
@@ -59,11 +59,7 @@ export function registerSearchSessionsTool(server: McpToolRegistrar) {
 					offset: off,
 				}),
 			).pipe(
-				Effect.catchTag("@maple/query-engine/errors/ObservabilityError", (e) =>
-					Effect.fail(
-						new McpQueryError({ message: e.message, pipe: e.pipe ?? "search_sessions", cause: e }),
-					),
-				),
+				Effect.catchTags(warehouseToMcpHandlers("search_sessions")),
 			)
 
 			yield* Effect.annotateCurrentSpan("resultCount", sessions.length)
@@ -80,12 +76,13 @@ export function registerSearchSessionsTool(server: McpToolRegistrar) {
 				`Time range: ${st} — ${et}${formatClampNote(range)}`,
 				``,
 				formatTable(
-					["Session ID", "Matches", "First", "Last"],
+					["Session ID", "Matches", "First", "Last", "First URL"],
 					sessions.map((s) => [
 						s.sessionId,
 						String(s.matchCount),
 						s.firstTimestamp,
 						s.lastTimestamp,
+						truncate(s.firstUrl, 80),
 					]),
 				),
 			]
@@ -109,6 +106,7 @@ export function registerSearchSessionsTool(server: McpToolRegistrar) {
 								matchCount: s.matchCount,
 								firstTimestamp: s.firstTimestamp,
 								lastTimestamp: s.lastTimestamp,
+								firstUrl: s.firstUrl,
 							})),
 						),
 					},

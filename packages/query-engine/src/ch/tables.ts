@@ -137,6 +137,31 @@ export const ErrorEvents = table("error_events", {
 	ErrorLabel: T.string,
 })
 
+/**
+ * Time-ordered sibling of `error_events` (same rows, sorted by Timestamp instead of
+ * FingerprintHash). Use for recent-window scans that filter a Timestamp range and
+ * group across fingerprints (e.g. the errorIssuesScan tick); use `ErrorEvents` for
+ * per-fingerprint occurrence lookups. See `errorEventsByTime` in
+ * `packages/domain/src/tinybird/datasources.ts`.
+ */
+export const ErrorEventsByTime = table("error_events_by_time", {
+	OrgId: T.string,
+	Timestamp: T.dateTime,
+	TraceId: T.string,
+	SpanId: T.string,
+	ParentSpanId: T.string,
+	ServiceName: T.string,
+	DeploymentEnv: T.string,
+	ExceptionType: T.string,
+	ExceptionMessage: T.string,
+	ExceptionStacktrace: T.string,
+	TopFrame: T.string,
+	FingerprintHash: T.uint64,
+	StatusMessage: T.string,
+	Duration: T.uint64,
+	ErrorLabel: T.string,
+})
+
 export const MetricsSum = table("metrics_sum", {
 	OrgId: T.string,
 	ResourceAttributes: T.map(T.string, T.string),
@@ -330,6 +355,9 @@ export const ServicePlatformsHourly = table("service_platforms_hourly", {
 	K8sCluster: T.string,
 	K8sPodName: T.string,
 	K8sDeploymentName: T.string,
+	K8sStatefulSetName: T.string,
+	K8sDaemonSetName: T.string,
+	K8sNamespaceName: T.string,
 	CloudPlatform: T.string,
 	CloudProvider: T.string,
 	FaasName: T.string,

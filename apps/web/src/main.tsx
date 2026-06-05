@@ -133,7 +133,7 @@ class AutumnErrorBoundary extends Component<{ children: React.ReactNode }, { has
 }
 
 const AUTH_SETTLE_TIMEOUT_MS = 2000
-const PUBLIC_PATHS = ["/sign-in", "/sign-up", "/org-required"]
+const PUBLIC_PATHS = ["/sign-in", "/sign-up", "/org-required", "/service-map-bench"]
 
 /**
  * Wait for Clerk's auth state to settle before rendering the router.

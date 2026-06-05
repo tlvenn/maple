@@ -5,6 +5,7 @@ import { createAlertingWorker } from "./apps/alerting/alchemy.run.ts"
 import { createMapleApi } from "./apps/api/alchemy.run.ts"
 import { createChatAgentWorker } from "./apps/chat-agent/alchemy.run.ts"
 import { createLandingWorker } from "./apps/landing/alchemy.run.ts"
+import { createLocalUiWorker } from "./apps/local-ui/alchemy.run.ts"
 import { createMapleWeb } from "./apps/web/alchemy.run.ts"
 
 const requireEnv = (key: string): string => {
@@ -58,6 +59,8 @@ const web = await createMapleWeb({
 
 const landing = await createLandingWorker({ stage, domains })
 
+const localUi = await createLocalUiWorker({ stage, domains })
+
 const alerting = await createAlertingWorker({ stage, domains, mapleDb })
 
 console.log({
@@ -67,6 +70,7 @@ console.log({
 	ingestUrl: resolvedIngestUrl,
 	webUrl: domains.web ? `https://${domains.web}` : web.url,
 	landingUrl: domains.landing ? `https://${domains.landing}` : landing.url,
+	localUiUrl: domains.local ? `https://${domains.local}` : localUi.url,
 	alertingWorker: alerting.name,
 })
 

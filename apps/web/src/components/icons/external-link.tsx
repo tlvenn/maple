@@ -1,9 +1,17 @@
 import type { IconProps } from "./icon"
 
+// Nucleo Pixel Essential "share-up-right": pixel-dotted diagonal arrow exiting
+// a box that's open at the top-right corner.
 const paths: ReadonlyArray<string> = [
-	"M10 14L20 4",
-	"M15 4H20V9",
-	"M20 13V19C20 19.5523 19.5523 20 19 20H5C4.44772 20 4 19.5523 4 19V5C4 4.44772 4.44772 4 5 4H11",
+	"M14 3L21 3L21 10",
+	"M19 21L5 21",
+	"M3 19L3 5",
+	"M21 19L21 15",
+	"M9 3L5 3",
+	"M13 11L13 11.01",
+	"M15 9L15 9.01",
+	"M17 7L17 7.01",
+	"M19 5L19 5.01",
 ]
 
 function ExternalLinkIcon({ size = 24, className, ...props }: IconProps) {

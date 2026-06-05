@@ -1,9 +1,11 @@
-import { assert, describe, it } from "@effect/vitest"
+import { describe, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
+import { strict as assert } from "node:assert"
 import { beforeEach, expect, vi } from "vitest"
 
 const executeQueryEngineMock = vi.fn()
 const runWarehouseQueryMock = vi.fn()
+const listMetricsMock = vi.fn()
 
 vi.mock("@/api/warehouse/effect-utils", () => ({
 	WarehouseDateTimeString: Schema.String,
@@ -14,6 +16,10 @@ vi.mock("@/api/warehouse/effect-utils", () => ({
 	invalidWarehouseInput: () => Effect.fail(new Error("invalid")),
 	executeQueryEngine: (...args: unknown[]) => executeQueryEngineMock(...args),
 	runWarehouseQuery: (...args: unknown[]) => runWarehouseQueryMock(...args),
+}))
+
+vi.mock("@/api/warehouse/metrics", () => ({
+	listMetrics: (...args: unknown[]) => listMetricsMock(...args),
 }))
 
 import {
@@ -33,6 +39,8 @@ describe("timeseries adapters", () => {
 	beforeEach(() => {
 		executeQueryEngineMock.mockReset()
 		runWarehouseQueryMock.mockReset()
+		listMetricsMock.mockReset()
+		listMetricsMock.mockReturnValue(Effect.succeed({ data: [] }))
 	})
 
 	it.effect("fills overview/detail buckets without flattening existing points", () =>
@@ -48,12 +56,13 @@ describe("timeseries adapters", () => {
 							series: {
 								count: 10,
 								error_rate: 2,
-								p50_duration: 11,
-								p95_duration: 20,
-								p99_duration: 30,
-							},
+							p50_duration: 11,
+							p95_duration: 20,
+							p99_duration: 30,
+							apdex: 0.92,
 						},
-					])
+					},
+				])
 				}
 				return emptyTs()
 			})
@@ -88,6 +97,8 @@ describe("timeseries adapters", () => {
 				bucket: "2026-01-01T00:00:00.000Z",
 				throughput: 10,
 				p95LatencyMs: 20,
+				apdexScore: 0.92,
+				totalCount: 10,
 			})
 		}),
 	)
@@ -96,16 +107,22 @@ describe("timeseries adapters", () => {
 		Effect.gen(function* () {
 			executeQueryEngineMock.mockImplementation((operation: string) => {
 				if (operation.includes("spanMetricsCalls")) return emptyTs()
-				if (operation.includes("count")) {
+				if (operation.includes("sparklines.allMetrics")) {
 					return tsResponse([
-						{ bucket: "2026-01-01T00:00:00.000Z", series: { checkout: 3 } },
-						{ bucket: "2026-01-01T00:10:00.000Z", series: { checkout: 5 } },
-					])
-				}
-				if (operation.includes("error")) {
-					return tsResponse([
-						{ bucket: "2026-01-01T00:00:00.000Z", series: { checkout: 1 } },
-						{ bucket: "2026-01-01T00:10:00.000Z", series: { checkout: 0 } },
+						{
+							bucket: "2026-01-01T00:00:00.000Z",
+							series: {
+								"count::checkout": 3,
+								"error_rate::checkout": 1,
+							},
+						},
+						{
+							bucket: "2026-01-01T00:10:00.000Z",
+							series: {
+								"count::checkout": 5,
+								"error_rate::checkout": 0,
+							},
+						},
 					])
 				}
 				return emptyTs()
@@ -134,6 +151,11 @@ describe("timeseries adapters", () => {
 				throughput: 5,
 				errorRate: 0,
 			})
+
+			const operations = executeQueryEngineMock.mock.calls.map((call) => String(call[0]))
+			expect(operations).toContain("queryEngine.sparklines.allMetrics")
+			expect(operations).not.toContain("queryEngine.sparklines.count")
+			expect(operations).not.toContain("queryEngine.sparklines.errorRate")
 		}),
 	)
 

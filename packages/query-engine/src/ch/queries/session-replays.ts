@@ -21,7 +21,8 @@
 import * as CH from "../expr"
 import { compileFnCall, compileFnCallCond } from "../define-fn"
 import { param } from "../param"
-import { from } from "../query"
+import { from, type ColumnAccessor } from "../query"
+import { unionAll, type CHUnionQuery } from "../union"
 import { SessionReplays, SessionReplayEvents, TraceDetailSpans } from "../tables"
 
 // argMax(value, ordering) — finalize a ReplacingMergeTree column to its latest
@@ -118,6 +119,93 @@ export function sessionReplaysListQuery(opts: SessionReplaysListOpts) {
 		.limit(limit)
 		.offset(opts.offset ?? 0)
 		.format("JSON")
+}
+
+// ---------------------------------------------------------------------------
+// List facets (UNION ALL — browser / device / country / service + error count)
+//
+// Populates the replays filter sidebar. Counts use uniq(SessionId) so the two
+// ReplacingMergeTree rows per session (Version 1 + 2) don't double-count. Each
+// dimension's own equality filter is excluded from its branch so the currently
+// selected value doesn't collapse the facet to a single option.
+// ---------------------------------------------------------------------------
+
+export interface SessionReplaysFacetsOpts {
+	serviceName?: string
+	browser?: string
+	country?: string
+	deviceType?: string
+	hasErrors?: boolean
+	search?: string
+}
+
+export interface SessionReplaysFacetsOutput {
+	readonly name: string
+	readonly count: number
+	readonly facetType: string
+}
+
+type SessionFacetKey = "service" | "browser" | "country" | "device"
+
+export function sessionReplaysFacetsQuery(
+	opts: SessionReplaysFacetsOpts,
+): CHUnionQuery<SessionReplaysFacetsOutput> {
+	const baseWhere = (
+		$: ColumnAccessor<typeof SessionReplays.columns>,
+		exclude?: SessionFacetKey,
+	): Array<CH.Condition | undefined> => [
+		$.OrgId.eq(param.string("orgId")),
+		$.StartTime.gte(param.dateTime("startTime")),
+		$.StartTime.lte(param.dateTime("endTime")),
+		exclude === "service" ? undefined : CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
+		exclude === "browser" ? undefined : CH.when(opts.browser, (v: string) => $.BrowserName.eq(v)),
+		exclude === "country" ? undefined : CH.when(opts.country, (v: string) => $.Country.eq(v)),
+		exclude === "device" ? undefined : CH.when(opts.deviceType, (v: string) => $.DeviceType.eq(v)),
+		CH.whenTrue(opts.hasErrors, () => $.ErrorCount.gt(0)),
+		CH.when(opts.search, (v: string) => $.UrlInitial.ilike(`%${v}%`)),
+	]
+
+	const makeFacet = (
+		facetType: SessionFacetKey,
+		column: ($: ColumnAccessor<typeof SessionReplays.columns>) => CH.Expr<string>,
+		limit = 50,
+	) =>
+		from(SessionReplays)
+			.select(($) => ({
+				name: column($),
+				count: CH.uniq($.SessionId),
+				facetType: CH.lit(facetType),
+			}))
+			.where(($) => [...baseWhere($, facetType), column($).neq("")])
+			.groupBy("name")
+			.orderBy(["count", "desc"])
+			.limit(limit)
+
+	return unionAll(
+		makeFacet("service", ($) => $.ServiceName),
+		makeFacet("browser", ($) => $.BrowserName),
+		makeFacet("country", ($) => $.Country),
+		makeFacet("device", ($) => $.DeviceType),
+		// Distinct sessions with at least one recorded error (drives the "Has
+		// errors" toggle count). Its own hasErrors filter is omitted here.
+		from(SessionReplays)
+			.select(($) => ({
+				name: CH.lit("error"),
+				count: CH.uniq($.SessionId),
+				facetType: CH.lit("error"),
+			}))
+			.where(($) => [
+				$.OrgId.eq(param.string("orgId")),
+				$.StartTime.gte(param.dateTime("startTime")),
+				$.StartTime.lte(param.dateTime("endTime")),
+				CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
+				CH.when(opts.browser, (v: string) => $.BrowserName.eq(v)),
+				CH.when(opts.country, (v: string) => $.Country.eq(v)),
+				CH.when(opts.deviceType, (v: string) => $.DeviceType.eq(v)),
+				CH.when(opts.search, (v: string) => $.UrlInitial.ilike(`%${v}%`)),
+				$.ErrorCount.gt(0),
+			]),
+	).format("JSON")
 }
 
 // ---------------------------------------------------------------------------

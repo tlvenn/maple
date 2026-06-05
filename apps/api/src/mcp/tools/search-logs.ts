@@ -1,4 +1,5 @@
-import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
+import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
+import { toMcpQueryError } from "../lib/map-warehouse-error"
 import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { clampLimit, clampOffset } from "../lib/limits"
@@ -7,7 +8,7 @@ import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { searchLogs } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
 
 export function registerSearchLogsTool(server: McpToolRegistrar) {
 	server.tool(
@@ -58,16 +59,15 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 				severity: severity ?? undefined,
 				search: search ?? undefined,
 				traceId: trace_id ?? undefined,
+				spanId: span_id ?? undefined,
 				limit: lim,
 				offset: off,
 			}).pipe(
 				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
-				Effect.catchTag("@maple/query-engine/errors/ObservabilityError", (e) =>
-					Effect.fail(new McpQueryError({ message: e.message, pipe: "search_logs", cause: e })),
-				),
+				Effect.mapError(toMcpQueryError("search_logs")),
 			)
 
-			yield* Effect.annotateCurrentSpan("resultCount", result.logs.length)
+			yield* Effect.annotateCurrentSpan({ resultCount: result.logs.length, "result.count": result.logs.length })
 
 			if (result.logs.length === 0) {
 				return { content: [{ type: "text", text: `No logs found matching filters (${st} — ${et})` }] }
@@ -88,9 +88,18 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 
 			for (const log of result.logs) {
 				const time = log.timestamp.split(" ")[1] ?? log.timestamp
+				const sevUpper = log.severityText.toUpperCase()
+				const marker = sevUpper === "ERROR" || sevUpper === "FATAL" ? "●" : " "
 				const sev = log.severityText.padEnd(5)
-				const traceRef = log.traceId ? ` [trace:${log.traceId.slice(0, 8)}]` : ""
-				lines.push(`${time} [${sev}] ${log.serviceName}: ${truncate(log.body, 120)}${traceRef}`)
+				let ref = ""
+				if (log.traceId) {
+					// Span ref is only useful once scoped to a trace; otherwise it's noise.
+					const span = trace_id && log.spanId ? ` span:${log.spanId.slice(0, 8)}` : ""
+					ref = ` [trace:${log.traceId.slice(0, 8)}${span}]`
+				}
+				lines.push(
+					`${marker} ${time} [${sev}] ${log.serviceName}: ${truncate(log.body, 120)}${ref}`,
+				)
 			}
 
 			const hasMore = result.pagination.hasMore
@@ -107,6 +116,12 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 				3,
 			)
 			const nextSteps = traceIds.map((tid) => `\`inspect_trace trace_id="${tid}"\` — see full trace`)
+			const spanPivot = result.logs.find((l) => l.spanId && l.traceId)
+			if (spanPivot) {
+				nextSteps.push(
+					`\`inspect_span trace_id="${spanPivot.traceId}" span_id="${spanPivot.spanId}"\` — full attributes for a span`,
+				)
+			}
 			lines.push(formatNextSteps(nextSteps))
 
 			return {

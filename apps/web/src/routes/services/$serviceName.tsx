@@ -16,7 +16,6 @@ import type {
 import { Tabs, TabsList, TabsTrigger } from "@maple/ui/components/ui/tabs"
 import {
 	getCustomChartServiceDetailResultAtom,
-	getServiceApdexTimeSeriesResultAtom,
 	getServiceReleasesTimelineResultAtom,
 } from "@/lib/services/atoms/warehouse-query-atoms"
 import { detectReleaseMarkers } from "@/lib/services/release-markers"
@@ -207,16 +206,6 @@ function OverviewTab({ serviceName, effectiveStartTime, effectiveEndTime }: Over
 		}),
 	)
 
-	const apdexResult = useRetainedRefreshableResultValue(
-		getServiceApdexTimeSeriesResultAtom({
-			data: {
-				serviceName,
-				startTime: effectiveStartTime,
-				endTime: effectiveEndTime,
-			},
-		}),
-	)
-
 	const releasesResult = useRetainedRefreshableResultValue(
 		getServiceReleasesTimelineResultAtom({
 			data: {
@@ -239,17 +228,12 @@ function OverviewTab({ serviceName, effectiveStartTime, effectiveEndTime }: Over
 		}))
 	}, [releasesResult])
 
-	const isWaiting =
-		(Result.isSuccess(detailResult) && detailResult.waiting) ||
-		(Result.isSuccess(apdexResult) && apdexResult.waiting)
+	const isWaiting = Result.isSuccess(detailResult) && detailResult.waiting
 
-	// ServiceDetail/Apdex points are typed structs; the chart grid consumes a
+	// ServiceDetail points are typed structs; the chart grid consumes a
 	// generic `Record<string, unknown>[]`. Each point's fields are all primitive,
 	// so this is a safe widening (no `as unknown` round-trip needed).
 	const detailPoints: Record<string, unknown>[] = Result.builder(detailResult)
-		.onSuccess((response) => response.data.map((point) => ({ ...point })))
-		.orElse(() => [])
-	const apdexPoints: Record<string, unknown>[] = Result.builder(apdexResult)
 		.onSuccess((response) => response.data.map((point) => ({ ...point })))
 		.orElse(() => [])
 
@@ -257,7 +241,7 @@ function OverviewTab({ serviceName, effectiveStartTime, effectiveEndTime }: Over
 		latency: detailPoints,
 		throughput: detailPoints,
 		"error-rate": detailPoints,
-		apdex: apdexPoints,
+		apdex: detailPoints,
 	}
 
 	const metrics = SERVICE_CHARTS.map((chart) => ({

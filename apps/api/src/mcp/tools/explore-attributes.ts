@@ -1,4 +1,5 @@
-import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
+import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
+import { toMcpQueryError } from "../lib/map-warehouse-error"
 import { resolveTenant } from "../lib/query-warehouse"
 import { queryWarehouse } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
@@ -8,8 +9,7 @@ import { Array as Arr, Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { formatNextSteps } from "../lib/next-steps"
 import { exploreAttributeKeys, exploreAttributeValues } from "@maple/query-engine/observability"
-import { ObservabilityError } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
 
 export function registerExploreAttributesTool(server: McpToolRegistrar) {
 	server.tool(
@@ -41,8 +41,7 @@ export function registerExploreAttributesTool(server: McpToolRegistrar) {
 			const scope = (params.scope ?? "span") as "span" | "resource"
 			const tenant = yield* resolveTenant
 			const executorLayer = makeWarehouseExecutorFromTenant(tenant)
-			const mapError = (e: ObservabilityError) =>
-				new McpQueryError({ message: e.message, pipe: e.pipe ?? "explore_attributes", cause: e })
+			const mapError = toMcpQueryError("explore_attributes")
 
 			const baseInput = {
 				source: params.source as "traces" | "metrics" | "services",

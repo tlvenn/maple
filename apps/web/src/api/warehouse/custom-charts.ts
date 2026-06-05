@@ -5,7 +5,7 @@ import {
 	type QuerySpec,
 	type TracesMetric,
 } from "@maple/query-engine"
-import { Effect, Schema } from "effect"
+import { Clock, Effect, Schema } from "effect"
 
 import {
 	buildBucketTimeline,
@@ -20,64 +20,137 @@ import {
 	executeQueryEngine,
 	invalidWarehouseInput,
 } from "@/api/warehouse/effect-utils"
+import { listMetrics } from "@/api/warehouse/metrics"
+import { getActiveOrgId } from "@/lib/services/common/auth-headers"
 import type { ServiceDetailTimeSeriesPoint, ServiceTimeSeriesPoint } from "@/api/warehouse/services"
 const dateTimeString = WarehouseDateTimeString
 
 // SpanMetrics connector metric names — try namespaced first, then default
-const SPANMETRICS_CALLS_CANDIDATES = ["span.metrics.calls", "calls"]
+const SPANMETRICS_CALLS_CANDIDATES = ["span.metrics.calls", "calls"] as const
+type SpanMetricsCallsMetricName = (typeof SPANMETRICS_CALLS_CANDIDATES)[number]
 
-function querySpanMetricsCalls(params: {
+const SPANMETRICS_AVAILABILITY_CACHE_TTL_MS = 60_000
+const spanMetricsAvailabilityCache = new Map<
+	string,
+	{ readonly expiresAt: number; readonly metricName: SpanMetricsCallsMetricName | null }
+>()
+
+function spanMetricsAvailabilityCacheKey(service?: string): string {
+	// Partition by active org. This cache is module-level (shared across every
+	// org an isolate/tab serves), and an org switch invalidates the router but
+	// not module state — without the org prefix, org A's calls-metric
+	// availability would be served to org B for up to the TTL.
+	const org = getActiveOrgId() ?? "unknown-org"
+	const scope = service && service.length > 0 ? `service:${service}` : "all-services"
+	return `${org}::${scope}`
+}
+
+function pickSpanMetricsCallsMetric(
+	rows: ReadonlyArray<{ metricName: string; metricType: string }>,
+): SpanMetricsCallsMetricName | null {
+	const available = new Set(
+		rows
+			.filter((row) => row.metricType === "sum")
+			.map((row) => row.metricName),
+	)
+	for (const candidate of SPANMETRICS_CALLS_CANDIDATES) {
+		if (available.has(candidate)) return candidate
+	}
+	return null
+}
+
+function resolveSpanMetricsCallsMetric(params: {
+	service?: string
+	start_time?: string
+	end_time?: string
+}): Effect.Effect<SpanMetricsCallsMetricName | null, never> {
+	return Effect.gen(function* () {
+		const now = yield* Clock.currentTimeMillis
+		const cacheKey = spanMetricsAvailabilityCacheKey(params.service)
+		const cached = spanMetricsAvailabilityCache.get(cacheKey)
+		if (cached && cached.expiresAt > now) {
+			return cached.metricName
+		}
+
+		const resolved = yield* listMetrics({
+			data: {
+				limit: 100,
+				service: params.service,
+				metricType: "sum",
+				search: "calls",
+				startTime: params.start_time,
+				endTime: params.end_time,
+			},
+		}).pipe(
+			Effect.map((response) => ({
+				cacheable: true,
+				metricName: pickSpanMetricsCallsMetric(response.data),
+			})),
+			// If the catalog route is unavailable, preserve the old behavior's
+			// canonical-name attempt instead of silently hiding SpanMetrics data.
+			Effect.orElseSucceed(() => ({
+				cacheable: false,
+				metricName: "span.metrics.calls" as const,
+			})),
+		)
+
+		if (resolved.cacheable) {
+			spanMetricsAvailabilityCache.set(cacheKey, {
+				expiresAt: now + SPANMETRICS_AVAILABILITY_CACHE_TTL_MS,
+				metricName: resolved.metricName,
+			})
+		}
+		return resolved.metricName
+	})
+}
+
+export function querySpanMetricsCalls(params: {
 	service?: string
 	start_time?: string
 	end_time?: string
 	bucket_seconds: number
 }) {
 	return Effect.gen(function* () {
-		// Most orgs have neither metric name. The old sequential `for` loop paid
-		// full wall time for two empty round-trips; running them concurrently caps
-		// the worst case at `max(t1, t2)`. Preserve the canonical-name priority by
-		// preferring the first candidate's non-empty result when both succeed.
-		const responses = yield* Effect.forEach(
-			SPANMETRICS_CALLS_CANDIDATES,
-			(metricName) =>
-				executeQueryEngine(
-					"queryEngine.spanMetricsCalls",
-					new QueryEngineExecuteRequest({
-						startTime: params.start_time ?? "2020-01-01 00:00:00",
-						endTime: params.end_time ?? "2099-12-31 23:59:59",
-						query: {
-							kind: "timeseries",
-							source: "metrics",
-							// `calls` is a monotonic cumulative counter — aggregate it as a
-							// per-bucket `increase` (counter-reset safe), not raw `sum`, which
-							// would plot the accumulated total as a linear ramp.
-							metric: "increase",
-							groupBy: ["service"],
-							filters: {
-								metricName,
-								metricType: "sum",
-								serviceName: params.service,
-								attributeFilters: [
-									{ key: "span.kind", value: "SPAN_KIND_SERVER", mode: "equals" },
-								],
-							},
-							bucketSeconds: params.bucket_seconds,
-						},
-					}),
-				).pipe(Effect.orElseSucceed(() => null)),
-			{ concurrency: SPANMETRICS_CALLS_CANDIDATES.length },
-		)
+		const metricName = yield* resolveSpanMetricsCallsMetric({
+			service: params.service,
+			start_time: params.start_time,
+			end_time: params.end_time,
+		})
+		if (!metricName) {
+			return { data: [] as never[] }
+		}
 
-		const hit = responses.find(
-			(r) => r && r.result.kind === "timeseries" && r.result.data.length > 0,
-		)
-		if (!hit || hit.result.kind !== "timeseries") {
+		const response = yield* executeQueryEngine(
+			"queryEngine.spanMetricsCalls",
+			new QueryEngineExecuteRequest({
+				startTime: params.start_time ?? "2020-01-01 00:00:00",
+				endTime: params.end_time ?? "2099-12-31 23:59:59",
+				query: {
+					kind: "timeseries",
+					source: "metrics",
+					// `calls` is a monotonic cumulative counter — aggregate it as a
+					// per-bucket `increase` (counter-reset safe), not raw `sum`, which
+					// would plot the accumulated total as a linear ramp.
+					metric: "increase",
+					groupBy: ["service"],
+					filters: {
+						metricName,
+						metricType: "sum",
+						serviceName: params.service,
+						attributeFilters: [{ key: "span.kind", value: "SPAN_KIND_SERVER", mode: "equals" }],
+					},
+					bucketSeconds: params.bucket_seconds,
+				},
+			}),
+		).pipe(Effect.orElseSucceed(() => null))
+
+		if (!response || response.result.kind !== "timeseries" || response.result.data.length === 0) {
 			return { data: [] as never[] }
 		}
 
 		// Transform grouped timeseries back to flat rows for compatibility
 		const data: Array<Record<string, unknown>> = []
-		for (const point of hit.result.data) {
+		for (const point of response.result.data) {
 			for (const [serviceName, value] of Object.entries(point.series)) {
 				data.push({
 					bucket: point.bucket,
@@ -126,6 +199,8 @@ function fillServiceDetailPoints(
 			p50LatencyMs: 0,
 			p95LatencyMs: 0,
 			p99LatencyMs: 0,
+			apdexScore: 0,
+			totalCount: 0,
 		}
 	})
 
@@ -533,38 +608,6 @@ export function getCustomChartServiceDetail({ data }: { data: GetCustomChartServ
 	return getCustomChartServiceDetailEffect({ data })
 }
 
-function makeTracesTimeseriesRequest(
-	metric: TracesMetric,
-	opts: {
-		startTime?: string
-		endTime?: string
-		bucketSeconds: number
-		serviceName?: string
-		rootSpansOnly?: boolean
-		environments?: string[]
-		commitShas?: string[]
-		groupBy?: string[]
-	},
-) {
-	return new QueryEngineExecuteRequest({
-		startTime: opts.startTime ?? "2020-01-01 00:00:00",
-		endTime: opts.endTime ?? "2099-12-31 23:59:59",
-		query: {
-			kind: "timeseries" as const,
-			source: "traces" as const,
-			metric,
-			groupBy: opts.groupBy as any,
-			filters: {
-				serviceName: opts.serviceName,
-				rootSpansOnly: opts.rootSpansOnly ?? true,
-				environments: opts.environments,
-				commitShas: opts.commitShas,
-			},
-			bucketSeconds: opts.bucketSeconds,
-		},
-	})
-}
-
 function makeAllMetricsTimeseriesRequest(opts: {
 	startTime?: string
 	endTime?: string
@@ -573,6 +616,7 @@ function makeAllMetricsTimeseriesRequest(opts: {
 	rootSpansOnly?: boolean
 	environments?: string[]
 	commitShas?: string[]
+	groupBy?: string[]
 }) {
 	return new QueryEngineExecuteRequest({
 		startTime: opts.startTime ?? "2020-01-01 00:00:00",
@@ -582,6 +626,7 @@ function makeAllMetricsTimeseriesRequest(opts: {
 			source: "traces" as const,
 			metric: "count" as const,
 			allMetrics: true,
+			groupBy: opts.groupBy as any,
 			filters: {
 				serviceName: opts.serviceName,
 				rootSpansOnly: opts.rootSpansOnly ?? true,
@@ -599,6 +644,7 @@ interface AllMetricsPoint {
 	p50: number
 	p95: number
 	p99: number
+	apdexScore: number
 	estimatedSpanCount: number
 }
 
@@ -612,7 +658,7 @@ interface AllMetricsPoint {
  * `?? rawCount` won't work as the fallback because `estimatedSpanCount` is
  * coerced to 0 when the column is missing; treat 0 as "no value" explicitly.
  */
-function resolveThroughput(
+export function resolveThroughput(
 	rawCount: number,
 	estimatedSpanCount: number,
 	metricsThroughput: number | undefined,
@@ -638,10 +684,90 @@ function extractAllMetricsSeries(response: QueryEngineExecuteResponse): Map<stri
 			p50: point.series.p50_duration ?? 0,
 			p95: point.series.p95_duration ?? 0,
 			p99: point.series.p99_duration ?? 0,
+			apdexScore: point.series.apdex ?? 0,
 			estimatedSpanCount: point.series.estimated_span_count ?? 0,
 		})
 	}
 	return map
+}
+
+const GROUPED_ALL_METRICS_KEYS = [
+	"count",
+	"error_rate",
+	"p50_duration",
+	"p95_duration",
+	"p99_duration",
+	"apdex",
+	"estimated_span_count",
+] as const
+
+function emptyAllMetricsPoint(): AllMetricsPoint {
+	return {
+		count: 0,
+		errorRate: 0,
+		p50: 0,
+		p95: 0,
+		p99: 0,
+		apdexScore: 0,
+		estimatedSpanCount: 0,
+	}
+}
+
+function assignAllMetric(point: AllMetricsPoint, metric: string, value: number) {
+	switch (metric) {
+		case "count":
+			point.count = value
+			break
+		case "error_rate":
+			point.errorRate = value
+			break
+		case "p50_duration":
+			point.p50 = value
+			break
+		case "p95_duration":
+			point.p95 = value
+			break
+		case "p99_duration":
+			point.p99 = value
+			break
+		case "apdex":
+			point.apdexScore = value
+			break
+		case "estimated_span_count":
+			point.estimatedSpanCount = value
+			break
+	}
+}
+
+function extractGroupedAllMetricsSeries(
+	response: QueryEngineExecuteResponse,
+): Map<string, Map<string, AllMetricsPoint>> {
+	const services = new Map<string, Map<string, AllMetricsPoint>>()
+	if (response.result.kind !== "timeseries") return services
+
+	for (const bucketPoint of response.result.data) {
+		const bucket = toIsoBucket(bucketPoint.bucket)
+		for (const [seriesKey, rawValue] of Object.entries(bucketPoint.series)) {
+			const metric = GROUPED_ALL_METRICS_KEYS.find((key) => seriesKey.startsWith(`${key}::`))
+			if (!metric) continue
+
+			const service = seriesKey.slice(metric.length + 2)
+			let buckets = services.get(service)
+			if (!buckets) {
+				buckets = new Map()
+				services.set(service, buckets)
+			}
+
+			let point = buckets.get(bucket)
+			if (!point) {
+				point = emptyAllMetricsPoint()
+				buckets.set(bucket, point)
+			}
+			assignAllMetric(point, metric, Number(rawValue))
+		}
+	}
+
+	return services
 }
 
 const getCustomChartServiceDetailEffect = Effect.fn("QueryEngine.getCustomChartServiceDetail")(function* ({
@@ -707,6 +833,8 @@ const getCustomChartServiceDetailEffect = Effect.fn("QueryEngine.getCustomChartS
 			p50LatencyMs: m?.p50 ?? 0,
 			p95LatencyMs: m?.p95 ?? 0,
 			p99LatencyMs: m?.p99 ?? 0,
+			apdexScore: m?.apdexScore ?? 0,
+			totalCount: rawCount,
 		}
 	})
 
@@ -785,6 +913,8 @@ const getOverviewTimeSeriesEffect = Effect.fn("QueryEngine.getOverviewTimeSeries
 			p50LatencyMs: m?.p50 ?? 0,
 			p95LatencyMs: m?.p95 ?? 0,
 			p99LatencyMs: m?.p99 ?? 0,
+			apdexScore: m?.apdexScore ?? 0,
+			totalCount: rawCount,
 		}
 	})
 
@@ -827,15 +957,11 @@ const getCustomChartServiceSparklinesEffect = Effect.fn("QueryEngine.getCustomCh
 			groupBy: ["service"] as string[],
 		}
 
-		const [countRes, errorRateRes, metricsResult] = yield* Effect.all(
+		const [allMetricsRes, metricsResult] = yield* Effect.all(
 			[
 				executeQueryEngine(
-					"queryEngine.sparklines.count",
-					makeTracesTimeseriesRequest("count", reqOpts),
-				),
-				executeQueryEngine(
-					"queryEngine.sparklines.errorRate",
-					makeTracesTimeseriesRequest("error_rate", reqOpts),
+					"queryEngine.sparklines.allMetrics",
+					makeAllMetricsTimeseriesRequest(reqOpts),
 				),
 				querySpanMetricsCalls({
 					start_time: input.startTime,
@@ -843,7 +969,7 @@ const getCustomChartServiceSparklinesEffect = Effect.fn("QueryEngine.getCustomCh
 					bucket_seconds: bucketSeconds,
 				}),
 			],
-			{ concurrency: 3 },
+			{ concurrency: 2 },
 		)
 
 		// SpanMetrics: keyed by "serviceName::bucket"
@@ -853,63 +979,26 @@ const getCustomChartServiceSparklinesEffect = Effect.fn("QueryEngine.getCustomCh
 			metricsMap.set(key, (metricsMap.get(key) ?? 0) + Number(r.sumValue))
 		}
 
-		// Build per-service count and errorRate maps from grouped timeseries
-		const countByService = new Map<string, Map<string, number>>()
-		const errorRateByService = new Map<string, Map<string, number>>()
-
-		const extractGroupedSeries = (
-			response: typeof countRes,
-			target: Map<string, Map<string, number>>,
-		) => {
-			if (response.result.kind !== "timeseries") return
-			for (const point of response.result.data) {
-				// Normalize to ISO so the per-service maps line up with `metricsMap`
-				// (keyed by `service::toIsoBucket(bucket)` above). Without this, the
-				// `${service}::${bucket}` lookup below would miss every time and the
-				// SpanMetrics-derived throughput would never apply.
-				const bucketIso = toIsoBucket(point.bucket)
-				for (const [service, value] of Object.entries(point.series)) {
-					let serviceMap = target.get(service)
-					if (!serviceMap) {
-						serviceMap = new Map()
-						target.set(service, serviceMap)
-					}
-					serviceMap.set(bucketIso, Number(value))
-				}
-			}
-		}
-
-		extractGroupedSeries(countRes, countByService)
-		extractGroupedSeries(errorRateRes, errorRateByService)
+		const allMetricsByService = extractGroupedAllMetricsSeries(allMetricsRes)
 
 		const timeline = buildBucketTimeline(input.startTime, input.endTime, bucketSeconds)
 		const grouped: Record<string, ServiceTimeSeriesPoint[]> = {}
 
-		for (const [service, bucketCountMap] of countByService) {
-			const serviceErrorMap = errorRateByService.get(service) ?? new Map()
+		for (const [service, buckets] of allMetricsByService) {
 			const points: ServiceTimeSeriesPoint[] = []
 
-			for (const [bucket, rawCount] of bucketCountMap) {
+			for (const [bucket, metrics] of buckets) {
+				const rawCount = metrics.count
 				const metricsKey = `${service}::${bucket}`
 				const metricsThroughput = metricsMap.get(metricsKey)
-
-				let throughput: number
-				let hasSampling: boolean
-
-				if (metricsThroughput != null && metricsThroughput > 0) {
-					throughput = metricsThroughput
-					hasSampling = true
-				} else {
-					throughput = rawCount
-					hasSampling = false
-				}
+				const throughput = resolveThroughput(rawCount, metrics.estimatedSpanCount, metricsThroughput)
 
 				points.push({
 					bucket,
 					throughput,
 					tracedThroughput: rawCount,
-					hasSampling,
-					errorRate: serviceErrorMap.get(bucket) ?? 0,
+					hasSampling: throughput > rawCount * 1.01,
+					errorRate: metrics.errorRate,
 				})
 			}
 

@@ -1,20 +1,15 @@
-import { Effect, Schema, Context } from "effect"
+import { Context, type Effect, type Option } from "effect"
+import type { WarehouseError } from "@maple/domain/http/warehouse-errors"
 import type { WarehouseQueryName } from "@maple/domain/warehouse-queries"
+import type { CompiledQuery } from "../ch"
 
-export class ObservabilityError extends Schema.TaggedErrorClass<ObservabilityError>()(
-	"@maple/query-engine/errors/ObservabilityError",
-	{
-		message: Schema.String,
-		pipe: Schema.optionalKey(Schema.String),
-		cause: Schema.optionalKey(Schema.Defect),
-		// Mirrors `WarehouseQueryError.category` from @maple/domain — kept loose
-		// here (Schema.String) so this package doesn't take a dependency on the
-		// HTTP-domain error union. Today: "query" | "upstream" | "auth" |
-		// "config" | "client" | "schema_drift". MCP and HTTP layers branch on
-		// "schema_drift" to surface a remediation hint.
-		category: Schema.optionalKey(Schema.String),
-	},
-) {}
+/**
+ * The error channel of every `WarehouseExecutor` method. This is the warehouse
+ * error union from `@maple/domain/http/warehouse-errors` (the PURE module — no
+ * HttpApi dependency), so this subpath and its CLI consumers stay free of the
+ * HttpApi AST builder.
+ */
+export type WarehouseExecutorError = WarehouseError
 
 /**
  * Subset of ClickHouse settings that Tinybird allows on `/v0/sql`.
@@ -42,13 +37,23 @@ export interface WarehouseExecutorShape {
 		pipe: WarehouseQueryName,
 		params: Record<string, unknown>,
 		options?: ExecutorQueryOptions,
-	) => Effect.Effect<{ data: ReadonlyArray<T> }, ObservabilityError>
+	) => Effect.Effect<{ data: ReadonlyArray<T> }, WarehouseExecutorError>
 
 	/** Execute raw ClickHouse SQL. The SQL MUST include an OrgId filter. */
 	readonly sqlQuery: <T = Record<string, unknown>>(
 		sql: string,
 		options?: ExecutorQueryOptions,
-	) => Effect.Effect<ReadonlyArray<T>, ObservabilityError>
+	) => Effect.Effect<ReadonlyArray<T>, WarehouseExecutorError>
+
+	readonly compiledQuery: <T>(
+		compiled: CompiledQuery<T>,
+		options?: ExecutorQueryOptions,
+	) => Effect.Effect<ReadonlyArray<T>, WarehouseExecutorError>
+
+	readonly compiledQueryFirst: <T>(
+		compiled: CompiledQuery<T>,
+		options?: ExecutorQueryOptions,
+	) => Effect.Effect<Option.Option<T>, WarehouseExecutorError>
 }
 
 export class WarehouseExecutor extends Context.Service<WarehouseExecutor, WarehouseExecutorShape>()(

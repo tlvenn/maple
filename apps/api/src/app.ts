@@ -21,12 +21,16 @@ import { OAuthDiscoveryRouter } from "./routes/oauth-discovery.http"
 import { HttpOrgOpenRouterSettingsLive } from "./routes/org-openrouter-settings.http"
 import { HttpOrgClickHouseSettingsLive } from "./routes/org-clickhouse-settings.http"
 import { HttpOrganizationsLive } from "./routes/organizations.http"
+import { PrometheusScrapeProxyRouter } from "./routes/prometheus-scrape-proxy.http"
 import { HttpQueryEngineLive } from "./routes/query-engine.http"
+import { HttpRecommendationIssuesLive } from "./routes/recommendation-issues.http"
 import { HttpScrapeTargetsLive } from "./routes/scrape-targets.http"
 import { HttpServiceDiscoveryLive } from "./routes/sd.http"
 import { HttpSessionReplaysLive } from "./routes/session-replay.http"
+import { HttpWarehouseLive } from "./routes/warehouse.http"
 import { AlertRuntime, AlertsService } from "./services/AlertsService"
-import { BucketCacheService } from "./lib/BucketCacheService"
+import { BucketCacheService, EdgeCacheService } from "@maple/query-engine/caching"
+import { CacheBackendLive } from "./lib/CacheBackendLive"
 import { ErrorsService } from "./services/ErrorsService"
 import { HazelOAuthService } from "./services/HazelOAuthService"
 import { NotificationDispatcher } from "./services/NotificationDispatcher"
@@ -37,7 +41,6 @@ import { CloudflareLogpushService } from "./services/CloudflareLogpushService"
 import { DashboardPersistenceService } from "./services/DashboardPersistenceService"
 import { DemoService } from "./services/DemoService"
 import { DigestService } from "./services/DigestService"
-import { EdgeCacheService } from "./lib/EdgeCacheService"
 import { OnboardingService } from "./services/OnboardingService"
 import { EmailService } from "./lib/EmailService"
 import { Env } from "./lib/Env"
@@ -47,7 +50,8 @@ import { OrgOpenRouterSettingsService } from "./services/OrgOpenRouterSettingsSe
 import { OrgClickHouseSettingsService } from "./services/OrgClickHouseSettingsService"
 import { OrganizationService } from "./services/OrganizationService"
 import { QueryEngineService } from "./services/QueryEngineService"
-import { RawSqlChartService } from "./services/RawSqlChartService"
+import { RecommendationIssueService } from "./services/RecommendationIssueService"
+import { RawSqlChartService } from "@maple/query-engine/runtime"
 import { ScrapeTargetsService } from "./services/ScrapeTargetsService"
 import { WarehouseQueryService } from "./lib/WarehouseQueryService"
 
@@ -85,19 +89,26 @@ export const CoreServicesLive = Layer.mergeAll(
 	IngestAttributeMappingService.layer,
 ).pipe(Layer.provideMerge(InfraLive))
 
-export const DemoServiceLive = DemoService.layer.pipe(Layer.provideMerge(CoreServicesLive))
-
 export const WarehouseQueryServiceLive = WarehouseQueryService.layer.pipe(
 	Layer.provideMerge(CoreServicesLive),
 )
 
+export const DemoServiceLive = DemoService.layer.pipe(
+	Layer.provideMerge(Layer.mergeAll(CoreServicesLive, WarehouseQueryServiceLive)),
+)
+
+// EdgeCacheService's storage backend (Workers KV / in-memory) is injected via
+// the CacheBackend port. Define the wired layer once so it memoizes to a single
+// instance shared by the bucket cache and the direct edge cache.
+export const EdgeCacheServiceLive = EdgeCacheService.layer.pipe(Layer.provide(CacheBackendLive))
+
 export const BucketCacheServiceLive = BucketCacheService.layer.pipe(
-	Layer.provideMerge(EdgeCacheService.layer),
+	Layer.provideMerge(EdgeCacheServiceLive),
 )
 
 export const QueryEngineServiceLive = QueryEngineService.layer.pipe(
 	Layer.provideMerge(WarehouseQueryServiceLive),
-	Layer.provideMerge(EdgeCacheService.layer),
+	Layer.provideMerge(EdgeCacheServiceLive),
 	Layer.provideMerge(BucketCacheServiceLive),
 )
 
@@ -115,6 +126,10 @@ export const ErrorsServiceLive = ErrorsService.layer.pipe(
 	),
 )
 
+export const RecommendationIssueServiceLive = RecommendationIssueService.layer.pipe(
+	Layer.provideMerge(WarehouseQueryServiceLive),
+)
+
 export const EmailServiceLive = EmailService.layer.pipe(Layer.provide(Env.layer))
 
 export const DigestServiceLive = DigestService.layer.pipe(
@@ -127,6 +142,7 @@ export const MainLive = Layer.mergeAll(
 	QueryEngineServiceLive,
 	AlertsServiceLive,
 	ErrorsServiceLive,
+	RecommendationIssueServiceLive,
 	DigestServiceLive,
 	DemoServiceLive,
 	RawSqlChartService.layer,
@@ -152,7 +168,14 @@ export const ApiRoutes = HttpApiBuilder.layer(MapleApi).pipe(
 	Layer.provide(HttpOrganizationsLive),
 	Layer.provide(HttpScrapeTargetsLive),
 	Layer.provide(HttpServiceDiscoveryLive),
-	Layer.provide(Layer.mergeAll(HttpQueryEngineLive, HttpSessionReplaysLive)),
+	Layer.provide(
+		Layer.mergeAll(
+			HttpQueryEngineLive,
+			HttpRecommendationIssuesLive,
+			HttpSessionReplaysLive,
+			HttpWarehouseLive,
+		),
+	),
 )
 
 export const AllRoutes = Layer.mergeAll(
@@ -160,6 +183,7 @@ export const AllRoutes = Layer.mergeAll(
 	AutumnRouter,
 	IntegrationsCallbackRouter,
 	OAuthDiscoveryRouter,
+	PrometheusScrapeProxyRouter,
 	McpLive,
 	HealthRouter,
 	McpGetFallback,

@@ -369,6 +369,61 @@ export const serviceMapDbEdgesHourly = defineDatasource("service_map_db_edges_ho
 export type ServiceMapDbEdgesHourlyRow = InferRow<typeof serviceMapDbEdgesHourly>
 
 /**
+ * Pre-aggregated hourly database *query shapes* for the service map's database
+ * detail panel ("Query Activity" + "Top Query Shapes"). One row per
+ * (OrgId, Hour, ServiceName, DbSystem, DeploymentEnv, QueryKey) where `QueryKey`
+ * is the normalized query-shape signature (see `db-query-shape-sql.ts`). Lets the
+ * panel read pre-aggregated rows instead of scanning raw span attributes +
+ * computing per-row fingerprints over the whole window.
+ *
+ * `DurationQuantiles` stores a sample-weighted t-digest state so the panel keeps
+ * true p50/p95 (finalize with
+ * `quantilesTDigestWeightedMerge(0.5, 0.95)(DurationQuantiles)` → Array(Float64)
+ * of [p50, p95] in nanoseconds). All `Estimated*`/`Weighted*` columns are
+ * sample-rate corrected; raw `CallCount`/`ErrorCount` stay unweighted.
+ * Populated by `service_map_db_query_shapes_hourly_mv`.
+ */
+export const serviceMapDbQueryShapesHourly = defineDatasource("service_map_db_query_shapes_hourly", {
+	description:
+		"Pre-aggregated hourly database query shapes (one row per service/db.system/query-shape) for the service map's database detail panel. Uses AggregatingMergeTree with a sample-weighted t-digest state for true p50/p95. Populated by materialized view.",
+	jsonPaths: false,
+	schema: {
+		OrgId: t.string().lowCardinality(),
+		Hour: t.dateTime(),
+		ServiceName: t.string().lowCardinality(),
+		DbSystem: t.string().lowCardinality(),
+		DeploymentEnv: t.string().lowCardinality(),
+		// Normalized query-shape signature — NOT LowCardinality: bounded by the
+		// number of distinct shapes per org (hundreds–low thousands), which is
+		// above the LowCardinality sweet spot.
+		QueryKey: t.string(),
+		// Representative shape label / sample statement (SimpleAggregateFunction
+		// `any` — one representative per merged group).
+		QueryLabel: t.simpleAggregateFunction("any", t.string()),
+		SampleStatement: t.simpleAggregateFunction("any", t.string()),
+		CallCount: t.simpleAggregateFunction("sum", t.uint64()),
+		ErrorCount: t.simpleAggregateFunction("sum", t.uint64()),
+		EstimatedCount: t.simpleAggregateFunction("sum", t.float64()),
+		EstimatedErrorCount: t.simpleAggregateFunction("sum", t.float64()),
+		// Sample-weighted duration sum in ms: sum(Duration * SampleRate / 1e6).
+		// Pair with EstimatedCount for a weighted average.
+		WeightedDurationSumMs: t.simpleAggregateFunction("sum", t.float64()),
+		// CH type sig: AggregateFunction(quantilesTDigestWeighted(0.5, 0.95), UInt64, UInt32)
+		// (value type UInt64 smuggled into the func name — same trick as
+		// traces_aggregates_hourly.DurationQuantiles — weight type UInt32 passed
+		// explicitly). Quantiles returned in nanoseconds; divide by 1e6 for ms.
+		DurationQuantiles: t.aggregateFunction("quantilesTDigestWeighted(0.5, 0.95), UInt64", t.uint32()),
+	},
+	engine: engine.aggregatingMergeTree({
+		partitionKey: "toDate(Hour)",
+		sortingKey: ["OrgId", "Hour", "DeploymentEnv", "ServiceName", "DbSystem", "QueryKey"],
+		ttl: "toDate(Hour) + INTERVAL 90 DAY",
+	}),
+})
+
+export type ServiceMapDbQueryShapesHourlyRow = InferRow<typeof serviceMapDbQueryShapesHourly>
+
+/**
  * Pre-aggregated hourly service-to-external-target edges for the service detail
  * page's Dependencies tab (and, eventually, external nodes on the service map).
  *
@@ -492,6 +547,9 @@ export const servicePlatformsHourly = defineDatasource("service_platforms_hourly
 		K8sCluster: t.simpleAggregateFunction("max", t.string()),
 		K8sPodName: t.simpleAggregateFunction("max", t.string()),
 		K8sDeploymentName: t.simpleAggregateFunction("max", t.string()),
+		K8sStatefulSetName: t.simpleAggregateFunction("max", t.string()),
+		K8sDaemonSetName: t.simpleAggregateFunction("max", t.string()),
+		K8sNamespaceName: t.simpleAggregateFunction("max", t.string()),
 		CloudPlatform: t.simpleAggregateFunction("max", t.string()),
 		CloudProvider: t.simpleAggregateFunction("max", t.string()),
 		FaasName: t.simpleAggregateFunction("max", t.string()),
@@ -499,6 +557,19 @@ export const servicePlatformsHourly = defineDatasource("service_platforms_hourly
 		ProcessRuntimeName: t.simpleAggregateFunction("max", t.string()),
 		SpanCount: t.simpleAggregateFunction("sum", t.uint64()),
 	},
+	// The K8sStatefulSetName/K8sDaemonSetName/K8sNamespaceName columns were added
+	// after this datasource already held data. This MV's 90-day TTL outlives the
+	// `traces` source's 30-day TTL, so a re-populate from `traces` can't refill
+	// the 30-90 day window. Forward-migrate existing rows in place instead,
+	// defaulting the new columns to '' (the empty-string sentinel the `max()`
+	// platform classifier already treats as "attribute not present").
+	forwardQuery: `SELECT
+    OrgId, Hour, ServiceName, DeploymentEnv,
+    K8sCluster, K8sPodName, K8sDeploymentName,
+    defaultValueOfTypeName('SimpleAggregateFunction(max, String)') AS K8sStatefulSetName,
+    defaultValueOfTypeName('SimpleAggregateFunction(max, String)') AS K8sDaemonSetName,
+    defaultValueOfTypeName('SimpleAggregateFunction(max, String)') AS K8sNamespaceName,
+    CloudPlatform, CloudProvider, FaasName, MapleSdkType, ProcessRuntimeName, SpanCount`,
 	engine: engine.aggregatingMergeTree({
 		partitionKey: "toDate(Hour)",
 		sortingKey: ["OrgId", "Hour", "ServiceName", "DeploymentEnv"],
@@ -607,6 +678,50 @@ export const errorEvents = defineDatasource("error_events", {
 })
 
 export type ErrorEventsRow = InferRow<typeof errorEvents>
+
+/**
+ * Time-ordered sibling of `error_events`, populated by the same materialized view
+ * logic but sorted `(OrgId, Timestamp, FingerprintHash)`.
+ *
+ * `error_events` leads its sort key with `FingerprintHash`, which is optimal for
+ * per-issue occurrence lookups (filter on a specific FingerprintHash) but pessimal
+ * for the recent-window scans that dominate the workload: the errors/triage tick's
+ * `errorIssuesScan` (and the dashboard error queries) filter a `Timestamp` range and
+ * `GROUP BY FingerprintHash`, which can't prune via the primary index on the original
+ * table and ends up scanning the org's whole day-partition — timing out the 30s
+ * warehouse budget for high-volume orgs. This sibling makes the time range the leading
+ * (post-org) sort dimension so those scans prune to the window. Same schema, same 90d
+ * TTL; the only difference is the sorting key.
+ */
+export const errorEventsByTime = defineDatasource("error_events_by_time", {
+	description:
+		"Time-ordered sibling of error_events (sorted by OrgId, Timestamp, FingerprintHash) for recent-window error scans (errorIssuesScan tick + dashboard error queries). Populated by materialized view.",
+	jsonPaths: false,
+	schema: {
+		OrgId: t.string().lowCardinality(),
+		Timestamp: t.dateTime(),
+		TraceId: t.string(),
+		SpanId: t.string(),
+		ParentSpanId: t.string().default("__unset__"),
+		ServiceName: t.string().lowCardinality(),
+		DeploymentEnv: t.string().lowCardinality(),
+		ExceptionType: t.string().lowCardinality(),
+		ExceptionMessage: t.string(),
+		ExceptionStacktrace: t.string(),
+		TopFrame: t.string(),
+		FingerprintHash: t.uint64(),
+		StatusMessage: t.string(),
+		Duration: t.uint64(),
+		ErrorLabel: t.string(),
+	},
+	engine: engine.mergeTree({
+		partitionKey: "toDate(Timestamp)",
+		sortingKey: ["OrgId", "Timestamp", "FingerprintHash"],
+		ttl: "Timestamp + INTERVAL 90 DAY",
+	}),
+})
+
+export type ErrorEventsByTimeRow = InferRow<typeof errorEventsByTime>
 
 /**
  * Pre-materialized root spans for the trace list view.

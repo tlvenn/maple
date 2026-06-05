@@ -13,7 +13,7 @@ For wiring the service map's Infrastructure tab to your workloads, see [docs/ser
 
 The chart defaults to Maple's hosted ingest gateway (`https://ingest.maple.dev`). Self-hosted users override `maple.ingest.endpoint`.
 
-Once the chart is published to GHCR, the easiest install path is:
+The chart is published to GHCR. The easiest install path is:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Makisuo/maple/main/deploy/k8s-infra/install.sh | \
@@ -128,8 +128,8 @@ helm template maple-k8s-infra deploy/k8s-infra --set maple.ingestKey.value=test 
 The GitHub Actions workflow `.github/workflows/publish-k8s-infra-chart.yml` publishes the chart to GHCR. Run it manually, or push a tag like:
 
 ```bash
-git tag k8s-infra-v0.1.0
-git push origin k8s-infra-v0.1.0
+git tag k8s-infra-v0.5.0
+git push origin k8s-infra-v0.5.0
 ```
 
 Manual publish from a machine with Helm:

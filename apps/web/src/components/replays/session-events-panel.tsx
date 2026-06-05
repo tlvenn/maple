@@ -6,7 +6,7 @@ import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { useReplayPlayer } from "./replay-player-context"
 import { parseChTimestampMs } from "./replay-timeline"
 
-type EventRow = {
+export type EventRow = {
 	readonly timestamp: string
 	readonly type: string
 	readonly url: string
@@ -35,7 +35,14 @@ const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
  * `session_events` stream. Each row seeks the player to its moment; network and
  * error rows with a trace id link through to the backend trace.
  */
-export function SessionEventsPanel({ sessionId }: { sessionId: string }) {
+export function SessionEventsPanel({
+	sessionId,
+	previewEvents,
+}: {
+	sessionId: string
+	/** Placeholder-data preview: render these events instead of fetching them. */
+	previewEvents?: ReadonlyArray<EventRow>
+}) {
 	const result = useAtomValue(getSessionTranscriptResultAtom({ data: { sessionId } }))
 	const [tab, setTab] = React.useState<Tab>("console")
 	const { timeline, recordingStartEpochMs, realTotalMs, seekDisplay } = useReplayPlayer()
@@ -50,59 +57,62 @@ export function SessionEventsPanel({ sessionId }: { sessionId: string }) {
 		[recordingStartEpochMs, realTotalMs, seekDisplay, timeline],
 	)
 
-	return (
-		<section className="rounded-xl border border-border">
-			{Result.builder(result)
-				.onInitial(() => <Skeleton className="m-3 h-40 rounded-lg" />)
-				.onError(() => (
-					<div className="p-6 text-center text-sm text-muted-foreground">
-						Couldn't load session events.
+	const renderBody = (events: ReadonlyArray<EventRow>) => {
+		const counts = {
+			console: events.filter((e) => e.type === "console").length,
+			network: events.filter((e) => e.type === "network").length,
+			error: events.filter((e) => e.type === "error").length,
+		}
+		const rows = events.filter((e) => e.type === tab)
+		return (
+			<>
+				<div className="flex shrink-0 border-b border-border bg-muted/30">
+					{TABS.map((t) => (
+						<button
+							key={t.id}
+							type="button"
+							onClick={() => setTab(t.id)}
+							className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold transition-colors ${
+								tab === t.id
+									? "border-b-2 border-foreground text-foreground"
+									: "text-muted-foreground hover:text-foreground"
+							}`}
+						>
+							{t.label}
+							<span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
+								{counts[t.id]}
+							</span>
+						</button>
+					))}
+				</div>
+				{rows.length === 0 ? (
+					<div className="grid flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
+						No {tab} events in this session.
 					</div>
-				))
-				.onSuccess((data) => {
-					const events = data.data as ReadonlyArray<EventRow>
-					const counts = {
-						console: events.filter((e) => e.type === "console").length,
-						network: events.filter((e) => e.type === "network").length,
-						error: events.filter((e) => e.type === "error").length,
-					}
-					const rows = events.filter((e) => e.type === tab)
-					return (
-						<>
-							<div className="flex border-b border-border">
-								{TABS.map((t) => (
-									<button
-										key={t.id}
-										type="button"
-										onClick={() => setTab(t.id)}
-										className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold transition-colors ${
-											tab === t.id
-												? "border-b-2 border-foreground text-foreground"
-												: "text-muted-foreground hover:text-foreground"
-										}`}
-									>
-										{t.label}
-										<span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
-											{counts[t.id]}
-										</span>
-									</button>
-								))}
+				) : (
+					<ul className="min-h-0 flex-1 divide-y divide-border overflow-y-auto font-mono text-xs">
+						{rows.map((ev, i) => (
+							<EventLine key={i} ev={ev} onSeek={() => seekTo(ev.timestamp)} />
+						))}
+					</ul>
+				)}
+			</>
+		)
+	}
+
+	return (
+		<section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
+			{previewEvents
+				? renderBody(previewEvents)
+				: Result.builder(result)
+						.onInitial(() => <Skeleton className="m-3 min-h-0 flex-1 rounded-lg" />)
+						.onError(() => (
+							<div className="grid flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
+								Couldn't load session events.
 							</div>
-							{rows.length === 0 ? (
-								<div className="p-6 text-center text-sm text-muted-foreground">
-									No {tab} events in this session.
-								</div>
-							) : (
-								<ul className="max-h-80 divide-y divide-border overflow-y-auto font-mono text-xs">
-									{rows.map((ev, i) => (
-										<EventLine key={i} ev={ev} onSeek={() => seekTo(ev.timestamp)} />
-									))}
-								</ul>
-							)}
-						</>
-					)
-				})
-				.orElse(() => <Skeleton className="m-3 h-40 rounded-lg" />)}
+						))
+						.onSuccess((data) => renderBody(data.data as ReadonlyArray<EventRow>))
+						.orElse(() => <Skeleton className="m-3 min-h-0 flex-1 rounded-lg" />)}
 		</section>
 	)
 }
@@ -131,7 +141,11 @@ function EventLine({ ev, onSeek }: { ev: EventRow; onSeek: () => void }) {
 			</button>
 			<div className="min-w-0 flex-1">
 				{ev.type === "console" && (
-					<span className={ev.level === "error" || ev.level === "warn" ? "text-warning-foreground" : ""}>
+					<span
+						className={
+							ev.level === "error" || ev.level === "warn" ? "text-warning-foreground" : ""
+						}
+					>
 						<span className="mr-1.5 uppercase opacity-60">{ev.level || "log"}</span>
 						{ev.message}
 					</span>
@@ -139,7 +153,9 @@ function EventLine({ ev, onSeek }: { ev: EventRow; onSeek: () => void }) {
 				{ev.type === "network" && (
 					<span className="flex items-center gap-2">
 						<span className="opacity-70">{ev.netMethod}</span>
-						<span className={`font-semibold ${statusTone(ev.netStatus)}`}>{ev.netStatus || "ERR"}</span>
+						<span className={`font-semibold ${statusTone(ev.netStatus)}`}>
+							{ev.netStatus || "ERR"}
+						</span>
 						<span className="truncate">{ev.netUrl}</span>
 						<span className="ml-auto shrink-0 opacity-60">{ev.netDurationMs}ms</span>
 					</span>

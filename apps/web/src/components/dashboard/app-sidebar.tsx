@@ -135,7 +135,6 @@ const investigateNavItems = [
 		title: "Alerts",
 		href: "/alerts",
 		icon: BellIcon,
-		badge: "Beta",
 	},
 ]
 
@@ -366,9 +365,6 @@ export function AppSidebar() {
 						<SidebarGroupLabel render={<CollapsibleTrigger />}>
 							<GridSquareCirclePlusIcon size={14} className="mr-1 !size-3.5" />
 							Dashboards
-							<Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 font-medium">
-								Beta
-							</Badge>
 							<ChevronRightIcon
 								size={14}
 								className="ml-auto !size-3.5 transition-transform group-data-[open]/dashboards:rotate-90"
@@ -448,13 +444,14 @@ export function AppSidebar() {
 														href="https://discord.gg/BnXjKuwJqP"
 														target="_blank"
 														rel="noopener noreferrer"
+														aria-label="Community Discord"
 													/>
 												}
 											>
 												<DiscordIcon size={16} />
 												Community Discord
 											</DropdownMenuItem>
-											<DropdownMenuItem render={<a href="mailto:support@maple.dev" />}>
+											<DropdownMenuItem render={<a href="mailto:support@maple.dev" aria-label="Email Support" />}>
 												<EnvelopeIcon size={16} />
 												Email Support
 											</DropdownMenuItem>

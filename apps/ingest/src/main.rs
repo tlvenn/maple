@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use autumn::AutumnTracker;
+use autumn::{AutumnEntitlements, AutumnTracker};
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::Path;
@@ -31,8 +31,8 @@ use hmac::{Hmac, Mac};
 use maple_ingest::metrics;
 use maple_ingest::otel::{build_resource, forward_client_span, ResourceConfig};
 use maple_ingest::telemetry::{
-    AttributeMappingRule, MappingOperation, MappingSourceContext, PipelineError, SamplingPolicy,
-    TelemetryPipeline, TinybirdConfig,
+    AttributeMappingRule, DatasourceNames, MappingOperation, MappingSourceContext, PipelineError,
+    SamplingPolicy, TelemetryPipeline, TinybirdConfig,
 };
 use moka::future::Cache;
 use opentelemetry::trace::TracerProvider as _;
@@ -101,6 +101,8 @@ struct AppConfig {
     autumn_secret_key: Option<String>,
     autumn_api_url: String,
     autumn_flush_interval_secs: u64,
+    autumn_enforce_limits: bool,
+    autumn_check_cache_ttl_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -247,22 +249,7 @@ impl AppConfig {
                 std::env::var("INGEST_EXPORT_MAX_ATTEMPTS").ok(),
                 20,
             )?,
-            datasource_traces: std::env::var("INGEST_TINYBIRD_DATASOURCE_TRACES")
-                .unwrap_or_else(|_| "traces".to_string()),
-            datasource_logs: std::env::var("INGEST_TINYBIRD_DATASOURCE_LOGS")
-                .unwrap_or_else(|_| "logs".to_string()),
-            datasource_metrics_sum: std::env::var("INGEST_TINYBIRD_DATASOURCE_METRICS_SUM")
-                .unwrap_or_else(|_| "metrics_sum".to_string()),
-            datasource_metrics_gauge: std::env::var("INGEST_TINYBIRD_DATASOURCE_METRICS_GAUGE")
-                .unwrap_or_else(|_| "metrics_gauge".to_string()),
-            datasource_metrics_histogram: std::env::var(
-                "INGEST_TINYBIRD_DATASOURCE_METRICS_HISTOGRAM",
-            )
-            .unwrap_or_else(|_| "metrics_histogram".to_string()),
-            datasource_metrics_exponential_histogram: std::env::var(
-                "INGEST_TINYBIRD_DATASOURCE_METRICS_EXPONENTIAL_HISTOGRAM",
-            )
-            .unwrap_or_else(|_| "metrics_exponential_histogram".to_string()),
+            datasources: DatasourceNames::from_env(),
             datasource_session_replays: std::env::var("INGEST_TINYBIRD_DATASOURCE_SESSION_REPLAYS")
                 .unwrap_or_else(|_| "session_replays".to_string()),
             datasource_session_replay_events: std::env::var(
@@ -342,6 +329,22 @@ impl AppConfig {
             1,
         )?;
 
+        // Billing enforcement: when enabled, the gateway rejects ingestion for
+        // orgs that are over their hard-capped base-plan allotment or have no
+        // active subscription (see AutumnEntitlements). Off by default so it can
+        // be deployed dark and flipped on per-environment after verification.
+        let autumn_enforce_limits = parse_bool(
+            "AUTUMN_ENFORCE_LIMITS",
+            std::env::var("AUTUMN_ENFORCE_LIMITS").ok(),
+            false,
+        )?;
+
+        let autumn_check_cache_ttl_secs = parse_u64(
+            "AUTUMN_CHECK_CACHE_TTL_SECS",
+            std::env::var("AUTUMN_CHECK_CACHE_TTL_SECS").ok(),
+            60,
+        )?;
+
         Ok(Self {
             port,
             otlp_grpc_port,
@@ -358,6 +361,8 @@ impl AppConfig {
             autumn_secret_key,
             autumn_api_url,
             autumn_flush_interval_secs,
+            autumn_enforce_limits,
+            autumn_check_cache_ttl_secs,
         })
     }
 }
@@ -534,6 +539,7 @@ struct AppState {
     attribute_mapping_resolver: AttributeMappingResolver,
     cloudflare_resolver: CloudflareConnectorResolver,
     autumn_tracker: Option<AutumnTracker>,
+    autumn_entitlements: Option<AutumnEntitlements>,
 }
 
 #[derive(Clone)]
@@ -741,6 +747,24 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+/// OTEL span status (`otel.status_code`) for a rejected request, by HTTP status.
+///
+/// Per the OpenTelemetry HTTP semantic conventions, a SERVER span is only an
+/// `Error` for 5xx responses; 4xx client rejections (missing/invalid ingest key,
+/// billing limit, throttle, oversized/undecodable payload) are the caller's fault
+/// and must NOT mark the span `Error` — otherwise they flood the error dashboards
+/// (which count `StatusCode='Error'`). The genuine server-side auth failure
+/// (resolver unavailable → 503) is 5xx and stays `Error`. `http.response.status_code`,
+/// `error.type`, and the `request_completed(… "error" …)` metric are recorded
+/// regardless, so 4xx rejections remain fully observable.
+fn otel_status_for_rejection(status: u16) -> &'static str {
+    if status >= 500 {
+        "Error"
+    } else {
+        "Ok"
     }
 }
 
@@ -976,6 +1000,18 @@ async fn main() {
         )
     });
 
+    // Entitlement enforcement is opt-in: requires both a secret key and the
+    // AUTUMN_ENFORCE_LIMITS flag. When absent, ingestion is never billing-gated.
+    let autumn_entitlements = match (&config.autumn_secret_key, config.autumn_enforce_limits) {
+        (Some(key), true) => Some(AutumnEntitlements::new(
+            http_client.clone(),
+            key.clone(),
+            &config.autumn_api_url,
+            config.autumn_check_cache_ttl_secs,
+        )),
+        _ => None,
+    };
+
     let ingest_key_cache = Cache::builder()
         .time_to_live(Duration::from_secs(60))
         .max_capacity(1_000)
@@ -1018,6 +1054,7 @@ async fn main() {
         http_client,
         config: config.clone(),
         autumn_tracker,
+        autumn_entitlements,
     });
 
     let cors = CorsLayer::new()
@@ -1462,7 +1499,16 @@ async fn handle_replay_meta_inner(
 
     // NDJSON: one session-metadata object per line. The org_id is always taken
     // from the authenticated key, never from the client-supplied body.
+    //
+    // Count session-start rows so we can meter one browser session per session to
+    // Autumn. The browser SDK posts a start row (`version: 1` / `status: "active"`)
+    // at session start and an end row (`version: 2`) at unload; counting only starts
+    // avoids double-counting. Caveat: an in-tab reload recreates the SDK session sink
+    // and re-posts a start row for the same SessionId, so reloads can slightly
+    // over-count — consistent with the at-least-once metering used for the
+    // logs/traces/metrics signals.
     let mut rows: Vec<Vec<u8>> = Vec::new();
+    let mut session_starts: u64 = 0;
     for line in body.split(|&b| b == b'\n') {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
@@ -1476,6 +1522,9 @@ async fn handle_replay_meta_inner(
             "org_id".to_string(),
             serde_json::Value::String(org_id.clone()),
         );
+        if obj.get("version").and_then(|v| v.as_u64()) == Some(1) {
+            session_starts += 1;
+        }
         rows.push(
             serde_json::to_vec(&value)
                 .map_err(|e| ApiError::bad_request(format!("failed to re-serialize metadata: {e}")))?,
@@ -1496,6 +1545,16 @@ async fn handle_replay_meta_inner(
         .map_err(|e| {
             ApiError::service_unavailable(format!("failed to enqueue session metadata: {e}"))
         })?;
+
+    // Meter browser sessions to Autumn after the rows are safely enqueued, mirroring
+    // the logs/traces/metrics path (which only tracks on success). Skip the internal
+    // sentinel org so self-observability traffic is not billed.
+    if let Some(tracker) = &state.autumn_tracker {
+        if org_id != SENTINEL_ORG_ID && session_starts > 0 {
+            tracker.track(&org_id, "browser_sessions", session_starts as f64);
+        }
+    }
+
     Ok(count)
 }
 
@@ -1779,9 +1838,10 @@ async fn handle_signal(
             response
         }
         Err((error, error_kind)) => {
-            span_handle.record("http.response.status_code", error.status.as_u16());
+            let status = error.status.as_u16();
+            span_handle.record("http.response.status_code", status);
             span_handle.record("error.type", error_kind);
-            span_handle.record("otel.status_code", "Error");
+            span_handle.record("otel.status_code", otel_status_for_rejection(status));
             metrics::request_completed(signal.path(), "error", error_kind, duration.as_secs_f64());
             error.into_response()
         }
@@ -1848,9 +1908,10 @@ async fn handle_cloudflare_logpush(
             response
         }
         Err((error, error_kind)) => {
-            span_handle.record("http.response.status_code", error.status.as_u16());
+            let status = error.status.as_u16();
+            span_handle.record("http.response.status_code", status);
             span_handle.record("error.type", error_kind);
-            span_handle.record("otel.status_code", "Error");
+            span_handle.record("otel.status_code", otel_status_for_rejection(status));
             metrics::request_completed("logs", "error", error_kind, duration.as_secs_f64());
             if error_kind == "auth" {
                 metrics::cloudflare_auth_failure("http_requests");
@@ -1914,6 +1975,33 @@ async fn handle_signal_inner(
         resolve_ms = key_resolve_start.elapsed().as_millis() as u64,
         "Authenticated"
     );
+
+    // --- Billing entitlement (per-signal) ---
+    // Reject ingestion when the org has no active subscription or has exhausted
+    // its hard-capped base-plan allotment for this signal. Fails open on any
+    // Autumn error (see AutumnEntitlements::is_allowed). Inert unless
+    // AUTUMN_ENFORCE_LIMITS=true and AUTUMN_SECRET_KEY is set.
+    if let Some(entitlements) = &state.autumn_entitlements {
+        let feature_id = signal.path();
+        if !entitlements
+            .is_allowed(&resolved_key.org_id, feature_id)
+            .await
+        {
+            warn!(
+                org_id = %resolved_key.org_id,
+                feature_id,
+                "Ingestion blocked: plan limit reached or no active subscription"
+            );
+            return Err((
+                ApiError::new(
+                    StatusCode::PAYMENT_REQUIRED,
+                    "Plan limit reached or no active subscription",
+                ),
+                "billing_limit",
+            ));
+        }
+    }
+
     let _org_inflight_permit = state
         .org_inflight_limiter
         .try_acquire(&resolved_key.org_id)
@@ -2061,6 +2149,24 @@ async fn handle_cloudflare_logpush_inner(
 
     Span::current().record("maple.org_id", &resolved.org_id.as_str());
     Span::current().record("maple.ingest.self_managed", resolved.self_managed);
+
+    // Logpush bills the `logs` feature — gate it the same way as OTLP logs.
+    if let Some(entitlements) = &state.autumn_entitlements {
+        if !entitlements.is_allowed(&resolved.org_id, "logs").await {
+            warn!(
+                org_id = %resolved.org_id,
+                connector_id,
+                "Cloudflare logpush blocked: plan limit reached or no active subscription"
+            );
+            return Err((
+                ApiError::new(
+                    StatusCode::PAYMENT_REQUIRED,
+                    "Plan limit reached or no active subscription",
+                ),
+                "billing_limit",
+            ));
+        }
+    }
     debug!(
         connector_id = %resolved.connector_id,
         org_id = %resolved.org_id,
@@ -3615,6 +3721,19 @@ mod tests {
         let hash_a = hash_ingest_key("maple_pk_123", "secret").unwrap();
         let hash_b = hash_ingest_key("maple_pk_123", "secret").unwrap();
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn rejection_span_status_is_error_only_for_5xx() {
+        // 4xx client rejections must not mark the SERVER span Error.
+        assert_eq!(otel_status_for_rejection(401), "Ok"); // missing/invalid ingest key
+        assert_eq!(otel_status_for_rejection(402), "Ok"); // billing limit
+        assert_eq!(otel_status_for_rejection(413), "Ok"); // payload too large
+        assert_eq!(otel_status_for_rejection(415), "Ok"); // unsupported media type
+        assert_eq!(otel_status_for_rejection(429), "Ok"); // throttle
+        // 5xx server faults stay Error (e.g. auth resolver unavailable → 503).
+        assert_eq!(otel_status_for_rejection(500), "Error");
+        assert_eq!(otel_status_for_rejection(503), "Error");
     }
 
     #[test]

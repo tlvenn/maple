@@ -1,4 +1,5 @@
-import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
+import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
+import { toMcpQueryError } from "../lib/map-warehouse-error"
 import { resolveTenant } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { truncate, formatNumber } from "../lib/format"
@@ -6,7 +7,7 @@ import { formatNextSteps } from "../lib/next-steps"
 import { Effect, Schema } from "effect"
 import { createDualContent } from "../lib/structured-output"
 import { mineLogPatterns } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
 
 export function registerMineLogPatternsTool(server: McpToolRegistrar) {
 	server.tool(
@@ -59,9 +60,7 @@ export function registerMineLogPatternsTool(server: McpToolRegistrar) {
 				limit: lim,
 			}).pipe(
 				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
-				Effect.catchTag("@maple/query-engine/errors/ObservabilityError", (e) =>
-					Effect.fail(new McpQueryError({ message: e.message, pipe: "mine_log_patterns", cause: e })),
-				),
+				Effect.mapError(toMcpQueryError("mine_log_patterns")),
 			)
 
 			yield* Effect.annotateCurrentSpan("resultCount", result.patterns.length)

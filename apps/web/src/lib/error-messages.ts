@@ -102,15 +102,59 @@ export const formatBackendError = (input: unknown): FormattedError => {
 					description: causeMessage ? `${message}: ${causeMessage}` : message,
 				}
 			}
+			case "@maple/http/errors/WarehouseAuthError": {
+				const upstreamStatus = numberField(error, "upstreamStatus")
+				return {
+					title: "Database rejected our credentials",
+					description:
+						upstreamStatus === 403
+							? "The configured database credentials are missing required permissions."
+							: "The configured database credentials are invalid or expired. Update them in settings.",
+				}
+			}
+			case "@maple/http/errors/WarehouseUpstreamError": {
+				const upstreamStatus = numberField(error, "upstreamStatus")
+				return {
+					title: "Database is temporarily unavailable",
+					description:
+						upstreamStatus !== undefined
+							? `The query backend returned ${upstreamStatus}. Retry in a few seconds.`
+							: "The query backend is unreachable. Retry in a few seconds.",
+				}
+			}
+			case "@maple/http/errors/WarehouseConfigError": {
+				return {
+					title: "Database is not configured correctly",
+					description: stringField(error, "message") ?? "Database is not configured correctly.",
+				}
+			}
+			case "@maple/http/errors/WarehouseClientError": {
+				return {
+					title: "Database response could not be decoded",
+					description: stringField(error, "message") ?? "Database response could not be decoded.",
+				}
+			}
+			case "@maple/http/errors/WarehouseSchemaDriftError": {
+				const message = stringField(error, "message")
+				return {
+					title: "Database schema is out of date",
+					description: `${message ?? "A column Maple expects is missing from the cluster."} Run schema apply from your ClickHouse settings.`,
+				}
+			}
+			case "@maple/http/errors/WarehouseValidationError": {
+				return {
+					title: "Invalid query",
+					description: stringField(error, "message") ?? "The query was rejected before running.",
+				}
+			}
 			case "@maple/http/errors/WarehouseQueryError": {
+				// Generic SQL/query failure. Some transient failures still arrive with
+				// only a status code embedded in the message (e.g. a 5xx HTML body),
+				// so keep the message-sniff fallback to surface those nicely.
 				const message = stringField(error, "message") ?? "Database query failed"
-				const category = stringField(error, "category")
-				const upstreamStatus =
-					numberField(error, "upstreamStatus") ??
-					(message.match(/status[:\s]+(\d{3})/i)?.[1]
-						? Number(message.match(/status[:\s]+(\d{3})/i)?.[1])
-						: undefined)
-				if (category === "auth" || upstreamStatus === 401 || upstreamStatus === 403) {
+				const sniffed = message.match(/status[:\s]+(\d{3})/i)?.[1]
+				const upstreamStatus = sniffed ? Number(sniffed) : undefined
+				if (upstreamStatus === 401 || upstreamStatus === 403) {
 					return {
 						title: "Database rejected our credentials",
 						description:
@@ -119,28 +163,10 @@ export const formatBackendError = (input: unknown): FormattedError => {
 								: "The configured database credentials are invalid or expired. Update them in settings.",
 					}
 				}
-				if (
-					category === "upstream" ||
-					(upstreamStatus !== undefined && upstreamStatus >= 500 && upstreamStatus < 600)
-				) {
+				if (upstreamStatus !== undefined && upstreamStatus >= 500 && upstreamStatus < 600) {
 					return {
 						title: "Database is temporarily unavailable",
-						description:
-							upstreamStatus !== undefined
-								? `The query backend returned ${upstreamStatus}. Retry in a few seconds.`
-								: "The query backend is unreachable. Retry in a few seconds.",
-					}
-				}
-				if (category === "config") {
-					return {
-						title: "Database is not configured correctly",
-						description: message,
-					}
-				}
-				if (category === "client") {
-					return {
-						title: "Database response could not be decoded",
-						description: message,
+						description: `The query backend returned ${upstreamStatus}. Retry in a few seconds.`,
 					}
 				}
 				return {
