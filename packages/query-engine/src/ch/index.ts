@@ -88,8 +88,11 @@ export {
 	greatest_ as greatest,
 	// Date/time
 	toStartOfInterval,
+	toStartOfHour,
+	toUnixTimestamp,
 	intervalSub,
 	formatDateTime,
+	toDateTime,
 	// Conditional
 	if_,
 	multiIf,
@@ -124,7 +127,20 @@ export {
 } from "./query"
 
 // Compilation
-export { compileCH as compile, compileUnion, type CompiledQuery, QueryBuilderError } from "./compile"
+export {
+	compileCH as compile,
+	compileUnion,
+	unsafeCompiledQuery,
+	type CompiledQuery,
+	type CompiledQueryRowSchema,
+	QueryBuilderError,
+	CompiledQueryDecodeError,
+} from "./compile"
+
+// Pipe dispatch — maps Tinybird-style pipe names + params to compiled CH SQL.
+// Shared by the cloud WarehouseQueryService and the local CLI executor so both
+// resolve a pipe name to identical SQL.
+export { compilePipeQuery, type PipeCompiledQuery } from "./pipe-dispatch"
 
 // Union
 export { unionAll, type CHUnionQuery, type InferUnionOutput } from "./union"
@@ -138,6 +154,8 @@ export {
 	tracesBreakdownQuery,
 	tracesListQuery,
 	tracesRootListQuery,
+	slowTracesQuery,
+	spanSearchQuery,
 	type TracesTimeseriesOpts,
 	type TracesBreakdownOpts,
 	type TracesListOpts,
@@ -146,6 +164,10 @@ export {
 	type TracesBreakdownOutput,
 	type TracesListOutput,
 	type TracesRootListOutput,
+	type SlowTracesOpts,
+	type SlowTracesOutput,
+	type SpanSearchOpts,
+	type SpanSearchOutput,
 } from "./queries/traces"
 
 // Queries — Attribute Keys & Values
@@ -174,10 +196,13 @@ export {
 	type MetricsBreakdownOutput,
 	listMetricsQuery,
 	metricsSummaryQuery,
+	scrapeTargetChecksQuery,
 	type ListMetricsOpts,
 	type ListMetricsOutput,
 	type MetricsSummaryOpts,
 	type MetricsSummaryOutput,
+	type ScrapeTargetChecksOpts,
+	type ScrapeTargetChecksOutput,
 } from "./queries/metrics"
 
 // Queries — Logs
@@ -205,12 +230,15 @@ export {
 // Queries — Session Replays
 export {
 	sessionReplaysListQuery,
+	sessionReplaysFacetsQuery,
 	getSessionReplayQuery,
 	sessionReplayEventsQuery,
 	sessionsForTraceQuery,
 	sessionTraceSummariesQuery,
 	type SessionReplaysListOpts,
 	type SessionReplaysListOutput,
+	type SessionReplaysFacetsOpts,
+	type SessionReplaysFacetsOutput,
 	type SessionReplayDetailOutput,
 	type SessionReplayEventsOutput,
 	type SessionsForTraceOpts,
@@ -290,6 +318,9 @@ export {
 	serviceDependenciesForServiceQuery,
 	serviceDbEdgesSQL,
 	serviceDbEdgesForServiceQuery,
+	serviceDbQuerySummarySQL,
+	serviceDbQueryTimeseriesSQL,
+	serviceDbTopQueriesSQL,
 	servicePlatformsSQL,
 	serviceMapEdgeJoinSQL,
 	type ServiceDependenciesOpts,
@@ -298,6 +329,10 @@ export {
 	type ServiceDbEdgesOpts,
 	type ServiceDbEdgesForServiceOpts,
 	type ServiceDbEdgesOutput,
+	type ServiceDbQuerySummaryParams,
+	type ServiceDbQuerySummaryOutput,
+	type ServiceDbQueryTimeseriesOutput,
+	type ServiceDbTopQueryOutput,
 	type ServicePlatformsOpts,
 	type ServicePlatformsOutput,
 	serviceExternalEdgesSQL,
@@ -326,7 +361,7 @@ export {
 // Queries — Alerts: removed. Alert evaluation now reuses the dashboard
 // timeseries queries (tracesTimeseriesQuery / logsTimeseriesQuery /
 // metricsTimeseriesQuery) so dashboards and alerts share the same grouping
-// and filter semantics. See QueryEngineService.makeQueryEngineEvaluate.
+// and filter semantics. See `makeQueryEngineEvaluate` in @maple/query-engine/runtime.
 
 // Queries — Alert Checks (historical rule evaluations)
 export {
@@ -341,6 +376,9 @@ export {
 	type DbStatementSamplesOpts,
 	type DbStatementSamplesOutput,
 } from "./queries/internal"
+
+// Queries — Local ingest pulse (drives the local-mode header heartbeat)
+export { localIngestPulseQuery, type LocalIngestPulseOutput } from "./queries/ingest"
 
 // Queries — Top Operations (per-service operation ranking by metric)
 export {

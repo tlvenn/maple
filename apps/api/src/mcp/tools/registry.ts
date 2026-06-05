@@ -15,6 +15,7 @@ import { registerGetIncidentTimelineTool } from "./get-incident-timeline"
 import { registerGetServiceTopOperationsTool } from "./get-service-top-operations"
 import { registerInspectChartDataTool } from "./inspect-chart-data"
 import { registerInspectTraceTool } from "./inspect-trace"
+import { registerInspectSpanTool } from "./inspect-span"
 import { registerListAlertChecksTool } from "./list-alert-checks"
 import { registerListAlertIncidentsTool } from "./list-alert-incidents"
 import { registerListAlertRulesTool } from "./list-alert-rules"
@@ -34,12 +35,14 @@ import { registerListMetricsTool } from "./list-metrics"
 import { registerListServicesTool } from "./list-services"
 import { registerQueryDataTool } from "./query-data"
 import { registerRemoveDashboardWidgetTool } from "./remove-dashboard-widget"
+import { registerReplaceDashboardWidgetsTool } from "./replace-dashboard-widgets"
 import { registerReorderDashboardWidgetsTool } from "./reorder-dashboard-widgets"
 import { registerMineLogPatternsTool } from "./mine-log-patterns"
 import { registerSearchLogsTool } from "./search-logs"
 import { registerSearchTracesTool } from "./search-traces"
 import { registerSearchSessionsTool } from "./search-sessions"
 import { registerGetSessionTranscriptTool } from "./get-session-transcript"
+import { registerGetSessionTracesTool } from "./get-session-traces"
 import { registerServiceMapTool } from "./service-map"
 import type { McpToolError, McpToolRegistrar, McpToolResult } from "./types"
 import { registerUpdateDashboardTool } from "./update-dashboard"
@@ -80,11 +83,13 @@ export const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition
 
 	registerFindErrorsTool(registrar)
 	registerInspectTraceTool(registrar)
+	registerInspectSpanTool(registrar)
 	registerSearchLogsTool(registrar)
 	registerMineLogPatternsTool(registrar)
 	registerSearchTracesTool(registrar)
 	registerSearchSessionsTool(registrar)
 	registerGetSessionTranscriptTool(registrar)
+	registerGetSessionTracesTool(registrar)
 	registerDiagnoseServiceTool(registrar)
 	registerFindSlowTracesTool(registrar)
 	registerErrorDetailTool(registrar)
@@ -105,6 +110,7 @@ export const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition
 	registerDescribeWarehouseTablesTool(registrar)
 	registerUpdateDashboardWidgetTool(registrar)
 	registerRemoveDashboardWidgetTool(registrar)
+	registerReplaceDashboardWidgetsTool(registrar)
 	registerReorderDashboardWidgetsTool(registrar)
 	registerInspectChartDataTool(registrar)
 	registerComparePeriodsTool(registrar)

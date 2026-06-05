@@ -1,4 +1,5 @@
-import { optionalNumberParam, optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
+import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
+import { warehouseToMcpHandlers } from "../lib/map-warehouse-error"
 import { withTenantExecutor } from "../lib/query-warehouse"
 import { resolveTimeRange, formatClampNote } from "../lib/time"
 import { clampLimit } from "../lib/limits"
@@ -38,15 +39,7 @@ export function registerFindSlowTracesTool(server: McpToolRegistrar) {
 					limit: lim,
 				}),
 			).pipe(
-				Effect.catchTag("@maple/query-engine/errors/ObservabilityError", (e) =>
-					Effect.fail(
-						new McpQueryError({
-							message: e.message,
-							pipe: e.pipe ?? "find_slow_traces",
-							cause: e,
-						}),
-					),
-				),
+				Effect.catchTags(warehouseToMcpHandlers("find_slow_traces")),
 			)
 
 			if (result.traces.length === 0) {

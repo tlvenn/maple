@@ -584,6 +584,30 @@
 .animate-pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
 
 /* ──────────────────────────────────────────────────────────────
+   Roadmap board.
+   Shipment-meter segments wipe in from the left (scaleX), and
+   lane cards / shipped-ledger rows stagger-reveal via per-element
+   animation-delay set inline. `both` holds the start frame until
+   each element's delay elapses. Reduced-motion freezes both.
+   ────────────────────────────────────────────────────────────── */
+@keyframes roadmap-seg-grow {
+	from { transform: scaleX(0); }
+	to   { transform: scaleX(1); }
+}
+.roadmap-seg {
+	transform-origin: left center;
+	animation: roadmap-seg-grow 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	will-change: transform;
+}
+@keyframes roadmap-reveal {
+	from { opacity: 0; transform: translateY(8px); }
+	to   { opacity: 1; transform: translateY(0); }
+}
+.roadmap-reveal {
+	animation: roadmap-reveal 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ──────────────────────────────────────────────────────────────
    Reduced-motion override.
    Every live artifact freezes at a sensible static frame.
    ────────────────────────────────────────────────────────────── */
@@ -599,6 +623,8 @@
 	}
 	.waterfall-stage { opacity: 1 !important; transition: none !important; }
 	.waterfall-row .span-bar { transform: scaleX(1) !important; }
+	.roadmap-seg { animation: none !important; transform: scaleX(1) !important; }
+	.roadmap-reveal { animation: none !important; opacity: 1 !important; transform: none !important; }
 	.svc-map-flow { stroke-dashoffset: 0 !important; opacity: 0.7 !important; }
 	.mcp-caret { opacity: 0.3 !important; }
 	.trace-cursor { display: none !important; }

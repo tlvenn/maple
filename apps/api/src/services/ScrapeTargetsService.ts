@@ -26,8 +26,18 @@ import { safeFetch, validateExternalUrl } from "../lib/url-validator"
 
 type ScrapeTargetRow = typeof scrapeTargets.$inferSelect
 
+export interface ScrapeTargetProxyResponse {
+	readonly status: number
+	readonly body: string
+	readonly contentType: string
+}
+
 export interface ScrapeTargetsServiceShape {
 	readonly list: (orgId: OrgId) => Effect.Effect<ScrapeTargetsListResponse, ScrapeTargetPersistenceError>
+	readonly get: (
+		orgId: OrgId,
+		targetId: ScrapeTargetId,
+	) => Effect.Effect<ScrapeTargetResponse, ScrapeTargetNotFoundError | ScrapeTargetPersistenceError>
 	readonly create: (
 		orgId: OrgId,
 		request: CreateScrapeTargetRequest,
@@ -50,7 +60,15 @@ export interface ScrapeTargetsServiceShape {
 		orgId: OrgId,
 		targetId: ScrapeTargetId,
 	) => Effect.Effect<ScrapeTargetDeleteResponse, ScrapeTargetNotFoundError | ScrapeTargetPersistenceError>
-	readonly listAllEnabled: () => Effect.Effect<ReadonlyArray<ScrapeTargetRow>, ScrapeTargetPersistenceError>
+	readonly listAllEnabled: (
+		interval?: ScrapeIntervalSeconds,
+	) => Effect.Effect<ReadonlyArray<ScrapeTargetRow>, ScrapeTargetPersistenceError>
+	readonly scrapeForCollector: (
+		targetId: ScrapeTargetId,
+	) => Effect.Effect<
+		ScrapeTargetProxyResponse,
+		ScrapeTargetNotFoundError | ScrapeTargetPersistenceError | ScrapeTargetEncryptionError
+	>
 	readonly probe: (
 		orgId: OrgId,
 		targetId: ScrapeTargetId,
@@ -276,6 +294,72 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 				)
 			})
 
+			const selectByIdForInternalScrape = Effect.fn(
+				"ScrapeTargetsService.selectByIdForInternalScrape",
+			)(function* (targetId: ScrapeTargetId) {
+				const rows = yield* database
+					.execute((db) =>
+						db.select().from(scrapeTargets).where(eq(scrapeTargets.id, targetId)).limit(1),
+					)
+					.pipe(Effect.mapError(toPersistenceError))
+
+				return Option.fromNullishOr(rows[0])
+			})
+
+			const authHeadersForRow = Effect.fn("ScrapeTargetsService.authHeadersForRow")(function* (
+				row: ScrapeTargetRow,
+			) {
+				const headers: Record<string, string> = {}
+				if (
+					row.authType === "none" ||
+					!row.authCredentialsCiphertext ||
+					!row.authCredentialsIv ||
+					!row.authCredentialsTag
+				) {
+					return headers
+				}
+
+				const credentialsJson = yield* decryptCredentials(
+					{
+						authCredentialsCiphertext: row.authCredentialsCiphertext,
+						authCredentialsIv: row.authCredentialsIv,
+						authCredentialsTag: row.authCredentialsTag,
+					},
+					encryptionKey,
+				)
+
+				if (row.authType === "bearer") {
+					const credentials = yield* Schema.decodeUnknownEffect(
+						Schema.fromJsonString(BearerCredentialsSchema),
+					)(credentialsJson).pipe(
+						Effect.mapError(
+							() =>
+								new ScrapeTargetEncryptionError({
+									message: "Failed to decode auth credentials",
+								}),
+						),
+					)
+					headers.Authorization = `Bearer ${credentials.token}`
+				} else if (row.authType === "basic") {
+					const credentials = yield* Schema.decodeUnknownEffect(
+						Schema.fromJsonString(BasicCredentialsSchema),
+					)(credentialsJson).pipe(
+						Effect.mapError(
+							() =>
+								new ScrapeTargetEncryptionError({
+									message: "Failed to decode auth credentials",
+								}),
+						),
+					)
+					const encoded = Buffer.from(`${credentials.username}:${credentials.password}`).toString(
+						"base64",
+					)
+					headers.Authorization = `Basic ${encoded}`
+				}
+
+				return headers
+			})
+
 			const list = Effect.fn("ScrapeTargetsService.list")(function* (orgId: OrgId) {
 				const rows = yield* database
 					.execute((db) => db.select().from(scrapeTargets).where(eq(scrapeTargets.orgId, orgId)))
@@ -284,6 +368,14 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 				return new ScrapeTargetsListResponse({
 					targets: rows.map(rowToResponse),
 				})
+			})
+
+			const get = Effect.fn("ScrapeTargetsService.get")(function* (
+				orgId: OrgId,
+				targetId: ScrapeTargetId,
+			) {
+				const row = yield* requireTarget(orgId, targetId)
+				return rowToResponse(row)
 			})
 
 			const create = Effect.fn("ScrapeTargetsService.create")(function* (
@@ -454,12 +546,70 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 				})
 			})
 
-			const listAllEnabled = Effect.fn("ScrapeTargetsService.listAllEnabled")(function* () {
+			const listAllEnabled = Effect.fn("ScrapeTargetsService.listAllEnabled")(function* (
+				interval?: ScrapeIntervalSeconds,
+			) {
 				const rows = yield* database
-					.execute((db) => db.select().from(scrapeTargets).where(eq(scrapeTargets.enabled, 1)))
+					.execute((db) =>
+						db
+							.select()
+							.from(scrapeTargets)
+							.where(
+								interval === undefined
+									? eq(scrapeTargets.enabled, 1)
+									: and(
+											eq(scrapeTargets.enabled, 1),
+											eq(scrapeTargets.scrapeIntervalSeconds, interval),
+										),
+							),
+					)
 					.pipe(Effect.mapError(toPersistenceError))
 
 				return rows
+			})
+
+			const scrapeForCollector = Effect.fn("ScrapeTargetsService.scrapeForCollector")(function* (
+				targetId: ScrapeTargetId,
+			) {
+				const row = yield* selectByIdForInternalScrape(targetId)
+				if (Option.isNone(row) || row.value.enabled !== 1) {
+					return yield* Effect.fail(
+						new ScrapeTargetNotFoundError({
+							targetId,
+							message: "Scrape target not found",
+						}),
+					)
+				}
+
+				const headers = yield* authHeadersForRow(row.value)
+				const timeoutMs = Math.min(
+					10_000,
+					Math.max(1_000, (row.value.scrapeIntervalSeconds - 1) * 1000),
+				)
+
+				return yield* Effect.tryPromise({
+					try: async () => {
+						const controller = new AbortController()
+						const timeout = setTimeout(() => controller.abort(), timeoutMs)
+						try {
+							const response = await safeFetch(row.value.url, {
+								method: "GET",
+								headers,
+								signal: controller.signal,
+							})
+							return {
+								status: response.status,
+								body: await response.text(),
+								contentType:
+									response.headers.get("content-type") ??
+									"text/plain; version=0.0.4; charset=utf-8",
+							} satisfies ScrapeTargetProxyResponse
+						} finally {
+							clearTimeout(timeout)
+						}
+					},
+					catch: toPersistenceError,
+				})
 			})
 
 			const probe = Effect.fn("ScrapeTargetsService.probe")(function* (
@@ -467,51 +617,7 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 				targetId: ScrapeTargetId,
 			) {
 				const row = yield* requireTarget(orgId, targetId)
-
-				const headers: Record<string, string> = {}
-				if (
-					row.authType !== "none" &&
-					row.authCredentialsCiphertext &&
-					row.authCredentialsIv &&
-					row.authCredentialsTag
-				) {
-					const credentialsJson = yield* decryptCredentials(
-						{
-							authCredentialsCiphertext: row.authCredentialsCiphertext,
-							authCredentialsIv: row.authCredentialsIv,
-							authCredentialsTag: row.authCredentialsTag,
-						},
-						encryptionKey,
-					)
-					if (row.authType === "bearer") {
-						const credentials = yield* Schema.decodeUnknownEffect(
-							Schema.fromJsonString(BearerCredentialsSchema),
-						)(credentialsJson).pipe(
-							Effect.mapError(
-								() =>
-									new ScrapeTargetEncryptionError({
-										message: "Failed to decode auth credentials",
-									}),
-							),
-						)
-						headers.Authorization = `Bearer ${credentials.token}`
-					} else if (row.authType === "basic") {
-						const credentials = yield* Schema.decodeUnknownEffect(
-							Schema.fromJsonString(BasicCredentialsSchema),
-						)(credentialsJson).pipe(
-							Effect.mapError(
-								() =>
-									new ScrapeTargetEncryptionError({
-										message: "Failed to decode auth credentials",
-									}),
-							),
-						)
-						const encoded = Buffer.from(
-							`${credentials.username}:${credentials.password}`,
-						).toString("base64")
-						headers.Authorization = `Basic ${encoded}`
-					}
-				}
+				const headers = yield* authHeadersForRow(row)
 
 				const now = yield* Clock.currentTimeMillis
 				const requestExit = yield* Effect.tryPromise({
@@ -583,10 +689,12 @@ export class ScrapeTargetsService extends Context.Service<ScrapeTargetsService, 
 
 			return {
 				list,
+				get,
 				create,
 				update,
 				delete: remove,
 				listAllEnabled,
+				scrapeForCollector,
 				probe,
 			} satisfies ScrapeTargetsServiceShape
 		}),

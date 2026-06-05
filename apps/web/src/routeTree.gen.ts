@@ -13,6 +13,7 @@ import { Route as WidgetLabRouteImport } from './routes/widget-lab'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as ServiceMapBenchRouteImport } from './routes/service-map-bench'
 import { Route as ServiceMapRouteImport } from './routes/service-map'
 import { Route as SelectPlanRouteImport } from './routes/select-plan'
 import { Route as QuickStartRouteImport } from './routes/quick-start'
@@ -34,7 +35,9 @@ import { Route as DashboardsIndexRouteImport } from './routes/dashboards/index'
 import { Route as AlertsIndexRouteImport } from './routes/alerts/index'
 import { Route as TracesTraceIdRouteImport } from './routes/traces/$traceId'
 import { Route as ServicesServiceNameRouteImport } from './routes/services/$serviceName'
+import { Route as ReplaysPreviewRouteImport } from './routes/replays/preview'
 import { Route as ReplaysSessionIdRouteImport } from './routes/replays/$sessionId'
+import { Route as RecommendationsRecommendationKeyRouteImport } from './routes/recommendations/$recommendationKey'
 import { Route as LogsLogIdRouteImport } from './routes/logs/$logId'
 import { Route as InfraHostNameRouteImport } from './routes/infra/$hostName'
 import { Route as ErrorsErrorTypeRouteImport } from './routes/errors/$errorType'
@@ -70,6 +73,11 @@ const SignInRoute = SignInRouteImport.update({
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ServiceMapBenchRoute = ServiceMapBenchRouteImport.update({
+  id: '/service-map-bench',
+  path: '/service-map-bench',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ServiceMapRoute = ServiceMapRouteImport.update({
@@ -177,11 +185,22 @@ const ServicesServiceNameRoute = ServicesServiceNameRouteImport.update({
   path: '/services/$serviceName',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ReplaysPreviewRoute = ReplaysPreviewRouteImport.update({
+  id: '/replays/preview',
+  path: '/replays/preview',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ReplaysSessionIdRoute = ReplaysSessionIdRouteImport.update({
   id: '/replays/$sessionId',
   path: '/replays/$sessionId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RecommendationsRecommendationKeyRoute =
+  RecommendationsRecommendationKeyRouteImport.update({
+    id: '/recommendations/$recommendationKey',
+    path: '/recommendations/$recommendationKey',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const LogsLogIdRoute = LogsLogIdRouteImport.update({
   id: '/logs/$logId',
   path: '/logs/$logId',
@@ -282,6 +301,7 @@ export interface FileRoutesByFullPath {
   '/quick-start': typeof QuickStartRoute
   '/select-plan': typeof SelectPlanRoute
   '/service-map': typeof ServiceMapRoute
+  '/service-map-bench': typeof ServiceMapBenchRoute
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
@@ -293,7 +313,9 @@ export interface FileRoutesByFullPath {
   '/errors/$errorType': typeof ErrorsErrorTypeRoute
   '/infra/$hostName': typeof InfraHostNameRoute
   '/logs/$logId': typeof LogsLogIdRoute
+  '/recommendations/$recommendationKey': typeof RecommendationsRecommendationKeyRoute
   '/replays/$sessionId': typeof ReplaysSessionIdRoute
+  '/replays/preview': typeof ReplaysPreviewRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
   '/alerts/': typeof AlertsIndexRoute
@@ -326,6 +348,7 @@ export interface FileRoutesByTo {
   '/quick-start': typeof QuickStartRoute
   '/select-plan': typeof SelectPlanRoute
   '/service-map': typeof ServiceMapRoute
+  '/service-map-bench': typeof ServiceMapBenchRoute
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
@@ -337,7 +360,9 @@ export interface FileRoutesByTo {
   '/errors/$errorType': typeof ErrorsErrorTypeRoute
   '/infra/$hostName': typeof InfraHostNameRoute
   '/logs/$logId': typeof LogsLogIdRoute
+  '/recommendations/$recommendationKey': typeof RecommendationsRecommendationKeyRoute
   '/replays/$sessionId': typeof ReplaysSessionIdRoute
+  '/replays/preview': typeof ReplaysPreviewRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
   '/alerts': typeof AlertsIndexRoute
@@ -371,6 +396,7 @@ export interface FileRoutesById {
   '/quick-start': typeof QuickStartRoute
   '/select-plan': typeof SelectPlanRoute
   '/service-map': typeof ServiceMapRoute
+  '/service-map-bench': typeof ServiceMapBenchRoute
   '/settings': typeof SettingsRoute
   '/sign-in': typeof SignInRoute
   '/sign-up': typeof SignUpRoute
@@ -382,7 +408,9 @@ export interface FileRoutesById {
   '/errors/$errorType': typeof ErrorsErrorTypeRoute
   '/infra/$hostName': typeof InfraHostNameRoute
   '/logs/$logId': typeof LogsLogIdRoute
+  '/recommendations/$recommendationKey': typeof RecommendationsRecommendationKeyRoute
   '/replays/$sessionId': typeof ReplaysSessionIdRoute
+  '/replays/preview': typeof ReplaysPreviewRoute
   '/services/$serviceName': typeof ServicesServiceNameRoute
   '/traces/$traceId': typeof TracesTraceIdRoute
   '/alerts/': typeof AlertsIndexRoute
@@ -417,6 +445,7 @@ export interface FileRouteTypes {
     | '/quick-start'
     | '/select-plan'
     | '/service-map'
+    | '/service-map-bench'
     | '/settings'
     | '/sign-in'
     | '/sign-up'
@@ -428,7 +457,9 @@ export interface FileRouteTypes {
     | '/errors/$errorType'
     | '/infra/$hostName'
     | '/logs/$logId'
+    | '/recommendations/$recommendationKey'
     | '/replays/$sessionId'
+    | '/replays/preview'
     | '/services/$serviceName'
     | '/traces/$traceId'
     | '/alerts/'
@@ -461,6 +492,7 @@ export interface FileRouteTypes {
     | '/quick-start'
     | '/select-plan'
     | '/service-map'
+    | '/service-map-bench'
     | '/settings'
     | '/sign-in'
     | '/sign-up'
@@ -472,7 +504,9 @@ export interface FileRouteTypes {
     | '/errors/$errorType'
     | '/infra/$hostName'
     | '/logs/$logId'
+    | '/recommendations/$recommendationKey'
     | '/replays/$sessionId'
+    | '/replays/preview'
     | '/services/$serviceName'
     | '/traces/$traceId'
     | '/alerts'
@@ -505,6 +539,7 @@ export interface FileRouteTypes {
     | '/quick-start'
     | '/select-plan'
     | '/service-map'
+    | '/service-map-bench'
     | '/settings'
     | '/sign-in'
     | '/sign-up'
@@ -516,7 +551,9 @@ export interface FileRouteTypes {
     | '/errors/$errorType'
     | '/infra/$hostName'
     | '/logs/$logId'
+    | '/recommendations/$recommendationKey'
     | '/replays/$sessionId'
+    | '/replays/preview'
     | '/services/$serviceName'
     | '/traces/$traceId'
     | '/alerts/'
@@ -550,6 +587,7 @@ export interface RootRouteChildren {
   QuickStartRoute: typeof QuickStartRoute
   SelectPlanRoute: typeof SelectPlanRoute
   ServiceMapRoute: typeof ServiceMapRoute
+  ServiceMapBenchRoute: typeof ServiceMapBenchRoute
   SettingsRoute: typeof SettingsRoute
   SignInRoute: typeof SignInRoute
   SignUpRoute: typeof SignUpRoute
@@ -561,7 +599,9 @@ export interface RootRouteChildren {
   ErrorsErrorTypeRoute: typeof ErrorsErrorTypeRoute
   InfraHostNameRoute: typeof InfraHostNameRoute
   LogsLogIdRoute: typeof LogsLogIdRoute
+  RecommendationsRecommendationKeyRoute: typeof RecommendationsRecommendationKeyRoute
   ReplaysSessionIdRoute: typeof ReplaysSessionIdRoute
+  ReplaysPreviewRoute: typeof ReplaysPreviewRoute
   ServicesServiceNameRoute: typeof ServicesServiceNameRoute
   TracesTraceIdRoute: typeof TracesTraceIdRoute
   AlertsIndexRoute: typeof AlertsIndexRoute
@@ -611,6 +651,13 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/service-map-bench': {
+      id: '/service-map-bench'
+      path: '/service-map-bench'
+      fullPath: '/service-map-bench'
+      preLoaderRoute: typeof ServiceMapBenchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/service-map': {
@@ -760,11 +807,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServicesServiceNameRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/replays/preview': {
+      id: '/replays/preview'
+      path: '/replays/preview'
+      fullPath: '/replays/preview'
+      preLoaderRoute: typeof ReplaysPreviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/replays/$sessionId': {
       id: '/replays/$sessionId'
       path: '/replays/$sessionId'
       fullPath: '/replays/$sessionId'
       preLoaderRoute: typeof ReplaysSessionIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/recommendations/$recommendationKey': {
+      id: '/recommendations/$recommendationKey'
+      path: '/recommendations/$recommendationKey'
+      fullPath: '/recommendations/$recommendationKey'
+      preLoaderRoute: typeof RecommendationsRecommendationKeyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/logs/$logId': {
@@ -894,6 +955,7 @@ const rootRouteChildren: RootRouteChildren = {
   QuickStartRoute: QuickStartRoute,
   SelectPlanRoute: SelectPlanRoute,
   ServiceMapRoute: ServiceMapRoute,
+  ServiceMapBenchRoute: ServiceMapBenchRoute,
   SettingsRoute: SettingsRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
@@ -905,7 +967,9 @@ const rootRouteChildren: RootRouteChildren = {
   ErrorsErrorTypeRoute: ErrorsErrorTypeRoute,
   InfraHostNameRoute: InfraHostNameRoute,
   LogsLogIdRoute: LogsLogIdRoute,
+  RecommendationsRecommendationKeyRoute: RecommendationsRecommendationKeyRoute,
   ReplaysSessionIdRoute: ReplaysSessionIdRoute,
+  ReplaysPreviewRoute: ReplaysPreviewRoute,
   ServicesServiceNameRoute: ServicesServiceNameRoute,
   TracesTraceIdRoute: TracesTraceIdRoute,
   AlertsIndexRoute: AlertsIndexRoute,

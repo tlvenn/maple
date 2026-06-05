@@ -23,6 +23,7 @@ export interface ServiceNodeData {
 	samplingWeight: number
 	errorRate: number
 	avgLatencyMs: number
+	p95LatencyMs?: number
 	services: string[]
 	selected: boolean
 	infra?: ServiceNodeInfra
@@ -242,6 +243,7 @@ export function buildFlowElements({
 				samplingWeight: 1,
 				errorRate: agg.callCount > 0 ? agg.errorCount / agg.callCount : 0,
 				avgLatencyMs: agg.callCount > 0 ? agg.durationSumMs / agg.callCount : 0,
+				p95LatencyMs: agg.maxP95,
 				services,
 				selected: false,
 				dbSystem,
@@ -474,15 +476,27 @@ function computeLayers(
 }
 
 /**
+ * A stable key over the graph TOPOLOGY only (node id set + edge pairs), ignoring
+ * metric values. Node positions depend solely on topology + layout config, so
+ * callers memoize the (expensive) layout on this key — metric refreshes that
+ * leave the shape unchanged don't trigger a re-layout.
+ */
+export function topologyKey(nodes: Node[], edges: Edge[]): string {
+	const nodeIds = nodes.map((n) => n.id).sort()
+	const edgePairs = edges.map((e) => `${e.source}->${e.target}`).sort()
+	return `${nodeIds.length}:${edgePairs.length}|${nodeIds.join(",")}|${edgePairs.join(",")}`
+}
+
+/**
  * Compute node positions using pure hierarchical layout.
  * Positions are deterministic: same input always produces same output.
  */
-export function layoutNodes(
+export function computeNodePositions(
 	nodes: Node<ServiceNodeData>[],
 	edges: Edge<ServiceEdgeData>[],
 	config: LayoutConfig = DEFAULT_LAYOUT_CONFIG,
-): Node<ServiceNodeData>[] {
-	if (nodes.length === 0) return nodes
+): Map<string, { x: number; y: number }> {
+	if (nodes.length === 0) return new Map<string, { x: number; y: number }>()
 
 	const {
 		nodeWidth,
@@ -573,10 +587,7 @@ export function layoutNodes(
 		}
 	}
 
-	return nodes.map((node) => ({
-		...node,
-		position: positions.get(node.id) ?? { x: 0, y: 0 },
-	}))
+	return positions
 }
 
 /**

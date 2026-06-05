@@ -3723,7 +3723,7 @@ export const page_k8s_install_window = () => `helm install maple-k8s-infra`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const page_k8s_install_step_1 = () => `차트 리포지토리 추가`
+export const page_k8s_install_step_1 = () => `인제스트 키 시크릿 생성`
 
 
 /**
@@ -3731,7 +3731,7 @@ export const page_k8s_install_step_1 = () => `차트 리포지토리 추가`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const page_k8s_install_step_2 = () => `인덱스 업데이트`
+export const page_k8s_install_step_2 = () => `차트 설치`
 
 
 /**
@@ -3739,7 +3739,7 @@ export const page_k8s_install_step_2 = () => `인덱스 업데이트`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const page_k8s_install_step_3 = () => `클러스터에 설치`
+export const page_k8s_install_step_3 = () => `롤아웃 확인`
 
 
 /**

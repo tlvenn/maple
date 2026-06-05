@@ -1,8 +1,9 @@
 ---
-title: "Local Dashboard for Dev Testing"
-status: "planned"
+title: "Maple Local — Single-Binary Observability"
+status: "shipped"
 category: "platform"
 quarter: "Q2 2026"
-description: "Lightweight local Maple instance for development. Inspect traces, logs, and metrics from your local services without deploying to the cloud."
+description: "Run Maple as one `maple start` binary with an embedded ClickHouse (chDB). OTLP ingest, the query API, and the full dashboard on localhost — no cloud, no auth, no deps."
 order: 11
+shipped_date: "2026-05"
 ---

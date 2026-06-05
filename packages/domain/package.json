@@ -7,12 +7,15 @@
 		"./http": "./src/http/index.ts",
 		"./primitives": "./src/primitives.ts",
 		"./query-engine": "./src/query-engine.ts",
+		"./recommendations": "./src/recommendations.ts",
 		"./tinybird-project-sync": "./src/tinybird/project-sync.ts",
 		"./warehouse-queries": "./src/warehouse-queries.ts",
 		"./tinybird": "./src/tinybird/index.ts",
+		"./tinybird/db-query-shape-sql": "./src/tinybird/db-query-shape-sql.ts",
 		"./clickhouse": "./src/clickhouse/index.ts",
 		"./where-clause": "./src/where-clause.ts",
-		"./http/observability": "./src/http/observability.ts"
+		"./http/observability": "./src/http/observability.ts",
+		"./http/warehouse-errors": "./src/http/warehouse-errors.ts"
 	},
 	"scripts": {
 		"test": "vitest run",

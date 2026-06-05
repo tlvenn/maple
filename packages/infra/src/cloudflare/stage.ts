@@ -13,6 +13,8 @@ export interface MapleDomains {
 	api?: string
 	ingest?: string
 	chat?: string
+	/** Auto-updating local-mode dashboard SPA (the `maple` binary points users here by default). */
+	local?: string
 }
 
 const PRD_DOMAINS: MapleDomains = {
@@ -21,6 +23,7 @@ const PRD_DOMAINS: MapleDomains = {
 	ingest: "ingest.maple.dev",
 	chat: "chat.maple.dev",
 	landing: "maple.dev",
+	local: "local.maple.dev",
 }
 
 const STG_DOMAINS: MapleDomains = {
@@ -29,6 +32,7 @@ const STG_DOMAINS: MapleDomains = {
 	ingest: "ingest-staging.maple.dev",
 	chat: "chat-staging.maple.dev",
 	landing: "staging-landing.maple.dev",
+	local: "local-staging.maple.dev",
 }
 
 export function parseMapleStage(stage: string): MapleStage {

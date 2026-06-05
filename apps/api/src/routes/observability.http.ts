@@ -9,11 +9,11 @@ import {
 	findErrors,
 	diagnoseService,
 	searchLogs,
+	type WarehouseExecutorError,
 } from "@maple/query-engine/observability"
-import { ObservabilityError } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "../lib/WarehouseExecutorLive"
+import { makeWarehouseExecutorFromTenant } from "../lib/WarehouseQueryService"
 
-const mapError = (e: ObservabilityError) =>
+const mapError = (e: WarehouseExecutorError) =>
 	new ObservabilityApiError({ message: e.message, pipe: e.pipe, cause: e })
 
 const decodeTraceId = Schema.decodeSync(TraceId)

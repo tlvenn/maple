@@ -31,7 +31,7 @@ Optional:
   MAPLE_CLUSTER_NAME=production
   MAPLE_DEPLOYMENT_ENVIRONMENT=prod
   MAPLE_CHART_REF=oci://ghcr.io/makisuo/charts/maple-k8s-infra
-  MAPLE_CHART_VERSION=0.1.0
+  MAPLE_CHART_VERSION=0.5.0
   MAPLE_INSTALL_YES=1      Skip interactive context confirmation.
 
 Example:

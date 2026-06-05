@@ -3927,7 +3927,7 @@ export const page_k8s_install_window = () => `helm install maple-k8s-infra`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const page_k8s_install_step_1 = () => `Add the chart repo`
+export const page_k8s_install_step_1 = () => `Create the ingest-key secret`
 
 
 /**
@@ -3935,7 +3935,7 @@ export const page_k8s_install_step_1 = () => `Add the chart repo`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const page_k8s_install_step_2 = () => `Refresh the index`
+export const page_k8s_install_step_2 = () => `Install the chart`
 
 
 /**
@@ -3943,7 +3943,7 @@ export const page_k8s_install_step_2 = () => `Refresh the index`
  * @returns {string}
  */
 /* @__NO_SIDE_EFFECTS__ */
-export const page_k8s_install_step_3 = () => `Install on the cluster`
+export const page_k8s_install_step_3 = () => `Watch the rollout`
 
 
 /**

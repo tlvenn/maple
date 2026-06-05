@@ -4,11 +4,13 @@ import {
 	serviceMapSpans,
 	serviceMapChildren,
 	serviceMapDbEdgesHourly,
+	serviceMapDbQueryShapesHourly,
 	serviceExternalEdgesHourly,
 	servicePlatformsHourly,
 	serviceOverviewSpans,
 	errorSpans,
 	errorEvents,
+	errorEventsByTime,
 	traceDetailSpans,
 	traceListMv,
 	attributeKeysHourly,
@@ -17,6 +19,12 @@ import {
 	logsAggregatesHourly,
 	metricCatalog,
 } from "./datasources"
+import {
+	DB_QUERY_KEY_SQL,
+	DB_QUERY_LABEL_SQL,
+	DB_STATEMENT_SQL,
+	DB_SYSTEM_ATTR_SQL,
+} from "./db-query-shape-sql"
 
 /**
  * Materialized view to aggregate log usage statistics per service per hour
@@ -375,6 +383,54 @@ export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_
 })
 
 /**
+ * Materialized view pre-aggregating database *query shapes* per hour for the
+ * service map's database detail panel. For each Client/Producer DB span it
+ * derives a normalized shape key + readable label (see `db-query-shape-sql.ts`,
+ * shared byte-for-byte with the query-engine read path's raw-fallback branch)
+ * and rolls up call/error/sample counts plus a sample-weighted t-digest of
+ * duration.
+ *
+ * NOTE: `DbSystem` uses the `db.system.name` → `db.system` coalesce (unlike the
+ * older `service_map_db_edges_hourly_mv`, which keys on `db.system.name` only
+ * and silently misses spans that set just the legacy `db.system`).
+ */
+export const serviceMapDbQueryShapesHourlyMv = defineMaterializedView(
+	"service_map_db_query_shapes_hourly_mv",
+	{
+		description:
+			"Pre-aggregates Client/Producer DB spans into hourly query-shape buckets (normalized fingerprint + label + sample-weighted t-digest) for the service map's database detail panel.",
+		datasource: serviceMapDbQueryShapesHourly,
+		nodes: [
+			node({
+				name: "service_map_db_query_shapes_hourly_mv_node",
+				sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(Timestamp)) AS Hour,
+          ServiceName,
+          ${DB_SYSTEM_ATTR_SQL} AS DbSystem,
+          ResourceAttributes['deployment.environment'] AS DeploymentEnv,
+          ${DB_QUERY_KEY_SQL} AS QueryKey,
+          any(substring(${DB_QUERY_LABEL_SQL}, 1, 220)) AS QueryLabel,
+          any(substring(${DB_STATEMENT_SQL}, 1, 1000)) AS SampleStatement,
+          count() AS CallCount,
+          countIf(StatusCode = 'Error') AS ErrorCount,
+          sum(SampleRate) AS EstimatedCount,
+          sumIf(SampleRate, StatusCode = 'Error') AS EstimatedErrorCount,
+          sum(toFloat64(Duration) * SampleRate / 1000000) AS WeightedDurationSumMs,
+          quantilesTDigestWeightedState(0.5, 0.95)(Duration, toUInt32(greatest(SampleRate, 1.0))) AS DurationQuantiles
+        FROM traces
+        WHERE SpanKind IN ('Client', 'Producer')
+          AND ${DB_SYSTEM_ATTR_SQL} != ''
+          AND ServiceName != ''
+        GROUP BY OrgId, Hour, ServiceName, DbSystem, DeploymentEnv, QueryKey
+      `,
+			}),
+		],
+	},
+)
+
+/**
  * Materialized view pre-aggregating service-to-external-target edges per hour.
  * Captures Client/Producer spans WITHOUT `db.system.name` set (DB calls go to
  * `service_map_db_edges_hourly_mv`) — i.e. plain HTTP outbound, messaging
@@ -473,6 +529,9 @@ export const servicePlatformsHourlyMv = defineMaterializedView("service_platform
           max(ResourceAttributes['k8s.cluster.name']) AS K8sCluster,
           max(ResourceAttributes['k8s.pod.name']) AS K8sPodName,
           max(ResourceAttributes['k8s.deployment.name']) AS K8sDeploymentName,
+          max(ResourceAttributes['k8s.statefulset.name']) AS K8sStatefulSetName,
+          max(ResourceAttributes['k8s.daemonset.name']) AS K8sDaemonSetName,
+          max(ResourceAttributes['k8s.namespace.name']) AS K8sNamespaceName,
           max(ResourceAttributes['cloud.platform']) AS CloudPlatform,
           max(ResourceAttributes['cloud.provider']) AS CloudProvider,
           max(ResourceAttributes['faas.name']) AS FaasName,
@@ -542,14 +601,14 @@ export const errorSpansMv = defineMaterializedView("error_spans_mv", {
  * The normalization below is mirrored in `./fingerprint.ts` (TS) for unit tests
  * across Node/Python/Java/Go stack shapes. If you change one, change both.
  */
-export const errorEventsMv = defineMaterializedView("error_events_mv", {
-	description:
-		"Materializes per-occurrence error events from traces. Unwraps the first OTel exception event and computes a cityHash64 FingerprintHash for issue grouping.",
-	datasource: errorEvents,
-	nodes: [
-		node({
-			name: "error_events_mv_node",
-			sql: `
+/**
+ * Shared SELECT for the error-events materializations. `error_events` (sorted by
+ * FingerprintHash) and `error_events_by_time` (sorted by Timestamp) are populated
+ * from the SAME projection of `traces WHERE StatusCode='Error'`; only their target
+ * datasource's sort key differs. Keep the fingerprint/label logic in ONE place so the
+ * two tables can never diverge — see the long note above about mirroring `fingerprint.ts`.
+ */
+const errorEventsSelectSql = `
         WITH
           arrayFirstIndex(n -> n = 'exception', EventsName) AS _ei,
           if(_ei > 0, EventsAttributes[_ei]['exception.type'], '') AS _exType,
@@ -639,7 +698,34 @@ export const errorEventsMv = defineMaterializedView("error_events_mv", {
           _errorLabel AS ErrorLabel
         FROM traces
         WHERE StatusCode = 'Error'
-      `,
+      `
+
+export const errorEventsMv = defineMaterializedView("error_events_mv", {
+	description:
+		"Materializes per-occurrence error events from traces. Unwraps the first OTel exception event and computes a cityHash64 FingerprintHash for issue grouping.",
+	datasource: errorEvents,
+	nodes: [
+		node({
+			name: "error_events_mv_node",
+			sql: errorEventsSelectSql,
+		}),
+	],
+})
+
+/**
+ * Same per-occurrence projection as `error_events_mv`, written to the time-ordered
+ * `error_events_by_time` datasource so recent-window scans (errorIssuesScan tick +
+ * dashboard error queries) can prune by Timestamp. See `errorEventsByTime` in
+ * datasources.ts for why both sort orders exist.
+ */
+export const errorEventsByTimeMv = defineMaterializedView("error_events_by_time_mv", {
+	description:
+		"Time-ordered copy of error_events_mv's projection, written to error_events_by_time (sorted by OrgId, Timestamp, FingerprintHash) for recent-window error scans.",
+	datasource: errorEventsByTime,
+	nodes: [
+		node({
+			name: "error_events_by_time_mv_node",
+			sql: errorEventsSelectSql,
 		}),
 	],
 })

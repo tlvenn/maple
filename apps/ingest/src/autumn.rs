@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use maple_ingest::metrics;
+use moka::future::Cache;
 use reqwest::Client;
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -12,7 +13,9 @@ use uuid::Uuid;
 pub struct UsageEvent {
     pub org_id: String,
     pub feature_id: &'static str,
-    pub value_gb: f64,
+    /// Quantity to bill for this event. Unit depends on `feature_id`: GB for
+    /// `logs`/`traces`/`metrics`, a raw count for `browser_sessions`.
+    pub value: f64,
 }
 
 #[derive(Clone)]
@@ -44,11 +47,11 @@ impl AutumnTracker {
         Self { tx }
     }
 
-    pub fn track(&self, org_id: &str, feature_id: &'static str, value_gb: f64) {
+    pub fn track(&self, org_id: &str, feature_id: &'static str, value: f64) {
         let _ = self.tx.send(UsageEvent {
             org_id: org_id.to_string(),
             feature_id,
-            value_gb,
+            value,
         });
     }
 }
@@ -87,11 +90,11 @@ async fn flush_loop(
 
                 let mut flushed_keys: Vec<AccumulatorKey> = Vec::new();
 
-                for ((org_id, feature_id), value_gb) in &entries {
+                for ((org_id, feature_id), value) in &entries {
                     let body = TrackRequest {
                         customer_id: org_id,
                         feature_id,
-                        value: *value_gb,
+                        value: *value,
                         idempotency_key: Uuid::new_v4().to_string(),
                     };
 
@@ -155,7 +158,9 @@ async fn flush_loop(
                     }
                 }
 
-                // Update pending gauge
+                // Update pending gauge. Note: this now sums mixed units across
+                // features (GB for logs/traces/metrics, counts for browser_sessions);
+                // the metric name is kept as-is to avoid breaking existing dashboards.
                 let total_pending: f64 = accumulator.values().sum();
                 metrics::autumn_pending_gb(total_pending);
             }
@@ -165,7 +170,7 @@ async fn flush_loop(
                     Some(event) => {
                         *accumulator
                             .entry((event.org_id, event.feature_id))
-                            .or_insert(0.0) += event.value_gb;
+                            .or_insert(0.0) += event.value;
                     }
                     None => {
                         // Channel closed, do a final flush attempt
@@ -195,11 +200,11 @@ async fn flush_all(
         .map(|(k, v)| (k.clone(), *v))
         .collect();
 
-    for ((org_id, feature_id), value_gb) in &entries {
+    for ((org_id, feature_id), value) in &entries {
         let body = TrackRequest {
             customer_id: org_id,
             feature_id,
-            value: *value_gb,
+            value: *value,
             idempotency_key: Uuid::new_v4().to_string(),
         };
 
@@ -231,5 +236,347 @@ async fn flush_all(
                 );
             }
         }
+    }
+}
+
+/// Synchronous, cached entitlement check against Autumn's `POST /v1/check`.
+///
+/// Unlike [`AutumnTracker`] (fire-and-forget usage metering), this sits in the
+/// ingest hot path and gates a request *before* it is accepted. It is only
+/// constructed when `AUTUMN_ENFORCE_LIMITS=true` and `AUTUMN_SECRET_KEY` is set,
+/// so local dev / self-hosted deployments are unaffected.
+#[derive(Clone)]
+pub struct AutumnEntitlements {
+    client: Client,
+    secret_key: String,
+    api_url: String,
+    // Keyed by `"{org_id}:{feature_id}"`. Holds both confirmed decisions and
+    // fail-open allows; a single TTL keeps it simple and mirrors the other moka
+    // resolver caches in the gateway.
+    cache: Cache<String, bool>,
+}
+
+#[derive(Serialize)]
+struct CheckRequest<'a> {
+    customer_id: &'a str,
+    feature_id: &'a str,
+}
+
+impl AutumnEntitlements {
+    pub fn new(client: Client, secret_key: String, api_url: &str, cache_ttl_secs: u64) -> Self {
+        let api_url = api_url.trim_end_matches('/').to_string();
+        let cache = Cache::builder()
+            .time_to_live(Duration::from_secs(cache_ttl_secs.max(1)))
+            .max_capacity(10_000)
+            .build();
+
+        info!(cache_ttl_secs, "Autumn entitlement enforcement enabled");
+
+        Self {
+            client,
+            secret_key,
+            api_url,
+            cache,
+        }
+    }
+
+    /// Returns whether `org_id` may ingest the given `feature_id`
+    /// (`"logs" | "traces" | "metrics"`). Fails open (`true`) on any
+    /// transport/decode error so a billing-provider outage never drops
+    /// customer data.
+    pub async fn is_allowed(&self, org_id: &str, feature_id: &str) -> bool {
+        let cache_key = format!("{org_id}:{feature_id}");
+        if let Some(allowed) = self.cache.get(&cache_key).await {
+            return allowed;
+        }
+
+        let allowed = self.fetch_allowed(org_id, feature_id).await;
+        self.cache.insert(cache_key, allowed).await;
+        allowed
+    }
+
+    async fn fetch_allowed(&self, org_id: &str, feature_id: &str) -> bool {
+        let body = CheckRequest {
+            customer_id: org_id,
+            feature_id,
+        };
+
+        let result = self
+            .client
+            .post(format!("{}/v1/check", self.api_url))
+            .header("Authorization", format!("Bearer {}", self.secret_key))
+            .timeout(Duration::from_secs(5))
+            .json(&body)
+            .send()
+            .await;
+
+        let response = match result {
+            Ok(resp) if resp.status().is_success() => resp,
+            Ok(resp) => {
+                warn!(
+                    org_id,
+                    feature_id,
+                    status = %resp.status(),
+                    "Autumn check returned non-success; failing open"
+                );
+                return true;
+            }
+            Err(err) => {
+                warn!(
+                    org_id,
+                    feature_id,
+                    error = %err,
+                    "Autumn check request failed; failing open"
+                );
+                return true;
+            }
+        };
+
+        // Parse to an untyped Value rather than a fixed struct: Autumn's
+        // `/v1/check` body has shifted shape across versions (the hosted REST
+        // body is flat with a numeric `balance`; the SDK's typed view nests a
+        // `balance` object with `remaining`). A struct that assumes one shape
+        // fails to decode the other and silently fails us open — which is
+        // exactly the bug this replaces. Value parsing only fails on non-JSON.
+        let text = match response.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                warn!(
+                    org_id,
+                    feature_id,
+                    error = %err,
+                    "Failed to read Autumn check response body; failing open"
+                );
+                return true;
+            }
+        };
+
+        let value = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                warn!(
+                    org_id,
+                    feature_id,
+                    error = %err,
+                    body = %truncate_for_log(&text),
+                    "Autumn check response is not JSON; failing open"
+                );
+                return true;
+            }
+        };
+
+        match decide_allowed(&value) {
+            Some(decision) => decision,
+            None => {
+                // Valid JSON we didn't recognize. Fail open, but log the body so
+                // the real shape is visible and we can adapt decide_allowed.
+                warn!(
+                    org_id,
+                    feature_id,
+                    body = %truncate_for_log(&text),
+                    "Unrecognized Autumn check response shape; failing open"
+                );
+                true
+            }
+        }
+    }
+}
+
+fn truncate_for_log(body: &str) -> String {
+    const MAX: usize = 512;
+    if body.len() <= MAX {
+        return body.to_string();
+    }
+    // Step back to a char boundary so we never slice through a UTF-8 sequence.
+    let mut end = MAX;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &body[..end])
+}
+
+/// Decide whether an org may ingest, from Autumn's `/v1/check` body. Tolerant of
+/// both the flat hosted REST shape (`balance` is a number, `unlimited` /
+/// `overage_allowed` top-level) and the SDK's nested shape (`balance` is an
+/// object carrying `remaining` / `unlimited` / `overage_allowed`).
+///
+/// Returns `None` when the JSON carries none of the fields we understand, so the
+/// caller can log the body and fail open rather than guess.
+///
+/// Block only when the org genuinely has no headroom:
+/// - `unlimited` or `overage_allowed` (usage-based `startup` plan) → allow.
+/// - a numeric remaining balance → allow while `> 0` (hard-capped `starter`
+///   blocks once depleted). We gate on remaining rather than the `allowed` flag
+///   because Autumn's default `required_balance` is 1, which flips `allowed`
+///   false at <1 GB left (~98%) — premature for a GB-denominated meter.
+/// - otherwise → defer to `allowed`. An org with no subscription gets
+///   `allowed:false`, so this blocks.
+fn decide_allowed(value: &serde_json::Value) -> Option<bool> {
+    let as_bool = |v: &serde_json::Value, key: &str| v.get(key).and_then(|x| x.as_bool());
+
+    let mut understood = false;
+    let mut unlimited = as_bool(value, "unlimited").unwrap_or(false);
+    let mut overage = as_bool(value, "overage_allowed").unwrap_or(false);
+    let mut remaining: Option<f64> = None;
+
+    if unlimited || overage || as_bool(value, "allowed").is_some() {
+        understood = true;
+    }
+
+    match value.get("balance") {
+        Some(serde_json::Value::Number(n)) => {
+            understood = true;
+            remaining = n.as_f64();
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            understood = true;
+            if obj.get("unlimited").and_then(|x| x.as_bool()) == Some(true) {
+                unlimited = true;
+            }
+            if obj.get("overage_allowed").and_then(|x| x.as_bool()) == Some(true) {
+                overage = true;
+            }
+            remaining = obj.get("remaining").and_then(|x| x.as_f64());
+        }
+        Some(serde_json::Value::Null) | None => {}
+        Some(_) => {}
+    }
+
+    if !understood {
+        return None;
+    }
+
+    if unlimited || overage {
+        return Some(true);
+    }
+    if let Some(remaining) = remaining {
+        return Some(remaining > 0.0);
+    }
+    // No remaining figure to gate on → defer to Autumn's own decision.
+    Some(as_bool(value, "allowed").unwrap_or(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decide(json: &str) -> Option<bool> {
+        let value = serde_json::from_str::<serde_json::Value>(json).expect("valid json");
+        decide_allowed(&value)
+    }
+
+    // --- Flat hosted REST shape: `balance` is a number; unlimited /
+    // overage_allowed are top-level. This is the shape that broke decode before. ---
+
+    #[test]
+    fn flat_hardcap_with_remaining_allows() {
+        assert_eq!(
+            decide(r#"{"allowed": true, "balance": 12.5, "unlimited": false, "overage_allowed": false}"#),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn flat_hardcap_depleted_blocks() {
+        // allowed:false at remaining 0 — and even if `allowed` lagged, remaining
+        // gates the decision.
+        assert_eq!(
+            decide(r#"{"allowed": false, "balance": 0, "unlimited": false, "overage_allowed": false}"#),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn flat_sub_one_gb_remaining_still_allows() {
+        // Autumn's required_balance:1 makes `allowed:false` here, but 0.5 GB left
+        // is not depleted — we must still allow.
+        assert_eq!(
+            decide(r#"{"allowed": false, "balance": 0.5, "unlimited": false, "overage_allowed": false}"#),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn flat_unlimited_allows() {
+        assert_eq!(
+            decide(r#"{"allowed": true, "balance": 0, "unlimited": true, "overage_allowed": false}"#),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn flat_overage_allows() {
+        // Usage-based `startup` plan: never blocked even when over included.
+        assert_eq!(
+            decide(r#"{"allowed": true, "balance": -5, "unlimited": false, "overage_allowed": true}"#),
+            Some(true)
+        );
+    }
+
+    // --- Nested SDK shape: `balance` is an object carrying `remaining`. ---
+
+    #[test]
+    fn nested_balance_object_with_remaining_allows() {
+        let json = r#"{
+            "allowed": true,
+            "customer_id": "org_123",
+            "balance": {
+                "feature_id": "logs",
+                "granted": 50,
+                "remaining": 12.5,
+                "usage": 37.5,
+                "unlimited": false,
+                "overage_allowed": false,
+                "next_reset_at": 1234567890
+            },
+            "flag": null
+        }"#;
+        assert_eq!(decide(json), Some(true));
+    }
+
+    #[test]
+    fn nested_balance_object_depleted_blocks() {
+        let json = r#"{"allowed": false, "balance": {"remaining": 0, "unlimited": false, "overage_allowed": false}, "flag": null}"#;
+        assert_eq!(decide(json), Some(false));
+    }
+
+    #[test]
+    fn nested_overage_allows() {
+        let json = r#"{"allowed": false, "balance": {"remaining": -5, "unlimited": false, "overage_allowed": true}}"#;
+        assert_eq!(decide(json), Some(true));
+    }
+
+    // --- No balance / no subscription: defer to `allowed`. ---
+
+    #[test]
+    fn null_balance_no_subscription_blocks() {
+        assert_eq!(decide(r#"{"allowed": false, "balance": null, "flag": null}"#), Some(false));
+    }
+
+    #[test]
+    fn allowed_only_no_balance_field() {
+        assert_eq!(decide(r#"{"allowed": true}"#), Some(true));
+        assert_eq!(decide(r#"{"allowed": false}"#), Some(false));
+    }
+
+    // --- Unrecognized shape: None so the caller logs + fails open. ---
+
+    #[test]
+    fn unrecognized_shape_returns_none() {
+        assert_eq!(decide(r#"{"error": "internal", "code": 500}"#), None);
+        assert_eq!(decide(r#"{}"#), None);
+    }
+
+    #[tokio::test]
+    async fn fails_open_on_transport_error() {
+        // Port 1 is closed => connection refused => we must fail open (allow),
+        // never dropping customer data on a billing-provider outage.
+        let entitlements = AutumnEntitlements::new(
+            Client::new(),
+            "sk_test".to_string(),
+            "http://127.0.0.1:1",
+            60,
+        );
+        assert!(entitlements.is_allowed("org_123", "logs").await);
     }
 }

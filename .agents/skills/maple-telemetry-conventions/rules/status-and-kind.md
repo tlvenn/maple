@@ -30,9 +30,11 @@ let span = tracing::info_span!(
 );
 // on success:
 span_handle.record("otel.status_code", "Ok");
-// on error:
-span_handle.record("otel.status_code", "Error");
+// on error — for inbound request handlers, follow the HTTP semconv rule below:
+span_handle.record("otel.status_code", otel_status_for_rejection(status));
 ```
+
+**HTTP SERVER spans — only 5xx is `Error`.** Per OTEL HTTP semconv, an inbound request handler must set `Error` *only* for 5xx responses; **4xx client rejections are `Ok`** (the caller is at fault). The ingest gateway centralizes this in `otel_status_for_rejection(status: u16)` (`apps/ingest/src/main.rs`): `>= 500 → "Error"`, else `"Ok"`. This stops expected rejections — missing/invalid ingest key (401), billing-limit (402), throttle (429), oversized/undecodable payload — from flooding the `WHERE StatusCode = 'Error'` dashboards, while the genuine server fault (auth resolver unavailable → 503) still reads as `Error`. The status code, `error.type`, and request metrics are recorded for all rejections regardless, so 4xx stays observable. Non-HTTP spans (forward `Client` spans, internal effects) are unaffected — they record `Error` on any failure as before.
 
 See `apps/ingest/src/main.rs:874, 895, 949, 978, 1201, 1306`.
 

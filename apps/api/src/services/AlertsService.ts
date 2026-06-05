@@ -42,6 +42,7 @@ import {
 	AlertSignalType as AlertSignalTypeSchema,
 	AlertValidationError,
 	QueryBuilderQueryDraftSchema,
+	AlertNotificationTemplate,
 	type AlertComparator,
 	AlertDestinationType as AlertDestinationTypeSchema,
 	type AlertDestinationCreateRequest,
@@ -60,8 +61,7 @@ import {
 	type AlertDestinationId,
 	type AlertIncidentId,
 	QueryEngineExecutionError,
-	WarehouseQueryError,
-	WarehouseQuotaExceededError,
+	type WarehouseError,
 	QueryEngineTimeoutError,
 	QueryEngineValidationError,
 	RoleName,
@@ -109,7 +109,8 @@ import {
 } from "./AlertDeliveryDispatch"
 import { Env } from "../lib/Env"
 import { HazelOAuthService } from "./HazelOAuthService"
-import { QueryEngineService, type GroupedAlertObservation } from "./QueryEngineService"
+import { QueryEngineService } from "./QueryEngineService"
+import type { GroupedAlertObservation } from "@maple/query-engine/runtime"
 import { WarehouseQueryService } from "../lib/WarehouseQueryService"
 import { validateExternalUrl } from "../lib/url-validator"
 import type { AlertChecksRow } from "@maple/domain/tinybird"
@@ -124,6 +125,7 @@ import {
 interface NormalizedRule {
 	readonly id: AlertRuleId
 	readonly name: string
+	readonly notificationTemplate: AlertNotificationTemplate | null
 	readonly enabled: boolean
 	readonly severity: AlertSeverity
 	readonly serviceName: string | null
@@ -184,6 +186,7 @@ interface DispatchContext {
 	readonly sampleCount: number | null
 	readonly linkUrl: string
 	readonly sentAtMs: number
+	readonly template?: AlertNotificationTemplate | null
 }
 
 interface DispatchResult {
@@ -210,6 +213,7 @@ interface DeliveryPayloadContext {
 	readonly sampleCount: number | null
 	readonly linkUrl: string
 	readonly sentAtMs: number
+	readonly template?: AlertNotificationTemplate | null
 }
 
 interface DeliveryAttemptFailure {
@@ -253,6 +257,7 @@ const StoredDeliveryPayloadSchema = Schema.Struct({
 			sampleCount: Schema.optionalKey(Schema.NullOr(Schema.Number)),
 		}),
 	),
+	template: Schema.optionalKey(Schema.NullOr(AlertNotificationTemplate)),
 })
 
 const StringArraySchema = Schema.Array(Schema.String)
@@ -308,6 +313,14 @@ const QueryBuilderDraftFromJson = Schema.fromJsonString(QueryBuilderQueryDraftSc
 const parseStoredQueryBuilderDraft = (raw: string | null): QueryBuilderQueryDraftPayload | null => {
 	if (raw == null) return null
 	return Option.getOrElse(Schema.decodeUnknownOption(QueryBuilderDraftFromJson)(raw), () => null)
+}
+
+const NotificationTemplateFromJson = Schema.fromJsonString(AlertNotificationTemplate)
+
+/** Parse the stored notification-template JSON; returns null when absent/invalid. */
+const parseStoredNotificationTemplate = (raw: string | null): AlertNotificationTemplate | null => {
+	if (raw == null) return null
+	return Option.getOrElse(Schema.decodeUnknownOption(NotificationTemplateFromJson)(raw), () => null)
 }
 
 type IsoDateTimeValue = Schema.Schema.Type<typeof AlertDestinationDocument.fields.createdAt>
@@ -781,6 +794,7 @@ const rowToRuleDocument = (
 		id: decodeAlertRuleIdSync(row.id),
 		name: row.name,
 		notes: row.notes ?? null,
+		notificationTemplate: parseStoredNotificationTemplate(row.notificationTemplateJson),
 		enabled: row.enabled === 1,
 		severity: decodeAlertSeveritySync(row.severity),
 		serviceNames: [...serviceNames],
@@ -927,8 +941,7 @@ export interface AlertsServiceShape {
 		| AlertPersistenceError
 		| AlertNotFoundError
 		| AlertDeliveryError
-		| WarehouseQueryError
-		| WarehouseQuotaExceededError
+		| WarehouseError
 	>
 	readonly listIncidents: (orgId: OrgId) => Effect.Effect<AlertIncidentsListResponse, AlertPersistenceError>
 	readonly listRuleChecks: (
@@ -1067,6 +1080,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			return {
 				id: decodeAlertRuleIdSync(row.id),
 				name: row.name,
+				notificationTemplate: parseStoredNotificationTemplate(row.notificationTemplateJson),
 				enabled: row.enabled === 1,
 				severity: decodeAlertSeveritySync(row.severity),
 				serviceName: serviceNames.length === 1 ? serviceNames[0] : null,
@@ -1182,6 +1196,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			const normalizedBase = {
 				id: decodeAlertRuleIdSync(makeUuid()),
 				name,
+				notificationTemplate: request.notificationTemplate ?? null,
 				enabled: request.enabled ?? true,
 				severity: request.severity,
 				serviceName,
@@ -1260,8 +1275,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				| QueryEngineValidationError
 				| QueryEngineExecutionError
 				| QueryEngineTimeoutError
-				| WarehouseQueryError
-				| WarehouseQuotaExceededError,
+				| WarehouseError,
 				R
 			>,
 		) =>
@@ -1290,8 +1304,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			ReadonlyArray<{ evaluation: EvaluatedRule; groupKey: string }>,
 			| AlertValidationError
 			| AlertDeliveryError
-			| WarehouseQueryError
-			| WarehouseQuotaExceededError
+			| WarehouseError
 		> {
 			const endMs = yield* now
 			const startMs = endMs - rule.windowMinutes * 60_000
@@ -1530,6 +1543,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 				value: context.value,
 				sampleCount: context.sampleCount,
 			},
+			template: context.template ?? null,
 			linkUrl: context.linkUrl,
 			chatUrl: buildAlertChatUrl(env.MAPLE_APP_BASE_URL, context),
 			sentAt: new Date(context.sentAtMs).toISOString(),
@@ -1629,6 +1643,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 						windowMinutes: rule.windowMinutes,
 						value: evaluation.value,
 						sampleCount: evaluation.sampleCount,
+						template: rule.notificationTemplate,
 						linkUrl: resolveNotificationLinkUrl(rule, incident.groupKey),
 						sentAtMs: scheduledAt,
 					})
@@ -2101,6 +2116,10 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			const ruleFields = {
 				name: normalized.name,
 				notes: normalizeOptionalString(request.notes),
+				notificationTemplateJson:
+					normalized.notificationTemplate != null
+						? JSON.stringify(normalized.notificationTemplate)
+						: null,
 				enabled: normalized.enabled ? 1 : 0,
 				severity: normalized.severity,
 				serviceNamesJson:
@@ -2392,6 +2411,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 							dedupeKey: `${orgId}:${destinationId}:rule-test`,
 							value: evaluation.value,
 							sampleCount: evaluation.sampleCount,
+							template: normalized.notificationTemplate,
 							linkUrl: resolveNotificationLinkUrl(normalized, null),
 							sentAtMs,
 						}),
@@ -2476,8 +2496,8 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 			)
 
 			const tenant = systemTenant(orgId)
-			const rawRows = yield* warehouse
-				.sqlQuery(tenant, compiled.sql, { profile: "list", context: "listAlertChecks" })
+			const rows = yield* warehouse
+				.compiledQuery(tenant, compiled, { profile: "list", context: "listAlertChecks" })
 				.pipe(
 					Effect.mapError(
 						(error) =>
@@ -2486,7 +2506,6 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 							}),
 					),
 				)
-			const rows = compiled.castRows(rawRows)
 
 			const checks = yield* Effect.try({
 				try: () =>
@@ -2783,6 +2802,8 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 						dedupeKey: incidentRow?.dedupeKey ?? String(payload.dedupeKey ?? row.deliveryKey),
 						value: payload.observed?.value ?? null,
 						sampleCount: payload.observed?.sampleCount ?? null,
+						template:
+							payload.template ?? parseStoredNotificationTemplate(ruleRow?.notificationTemplateJson ?? null),
 						linkUrl: resolveNotificationLinkUrl(
 							{ serviceNames: ruleServiceNames, groupBy: ruleGroupBy },
 							groupKey,
@@ -3440,8 +3461,7 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 					| AlertDeliveryError
 					| AlertNotFoundError
 					| AlertPersistenceError
-					| WarehouseQueryError
-					| WarehouseQuotaExceededError,
+					| WarehouseError,
 				failureCategory: string,
 				fields?: {
 					readonly upstreamStatus?: number
@@ -3588,11 +3608,26 @@ export class AlertsService extends Context.Service<AlertsService, AlertsServiceS
 										quotaSetting: error.setting,
 										pipe: error.pipe,
 									}),
-								"@maple/http/errors/WarehouseQueryError": (error) =>
-									recordEvaluationFailure(row, error, `tinybird_${error.category ?? "query"}`, {
+								"@maple/http/errors/WarehouseUpstreamError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_upstream", {
 										upstreamStatus: error.upstreamStatus,
 										pipe: error.pipe,
 									}),
+								"@maple/http/errors/WarehouseAuthError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_auth", {
+										upstreamStatus: error.upstreamStatus,
+										pipe: error.pipe,
+									}),
+								"@maple/http/errors/WarehouseConfigError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_config", { pipe: error.pipe }),
+								"@maple/http/errors/WarehouseClientError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_client", { pipe: error.pipe }),
+								"@maple/http/errors/WarehouseSchemaDriftError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_schema_drift", { pipe: error.pipe }),
+								"@maple/http/errors/WarehouseValidationError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_validation", { pipe: error.pipe }),
+								"@maple/http/errors/WarehouseQueryError": (error) =>
+									recordEvaluationFailure(row, error, "tinybird_query", { pipe: error.pipe }),
 							}),
 						)
 					}),

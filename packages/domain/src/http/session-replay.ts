@@ -4,7 +4,7 @@ import { SessionId, TraceId, UserId } from "../primitives"
 import { TinybirdDateTime } from "../query-engine"
 import { Authorization } from "./current-tenant"
 import { QueryEngineExecutionError, QueryEngineTimeoutError } from "./query-engine"
-import { WarehouseQueryError, WarehouseQuotaExceededError } from "./warehouse"
+import { warehouseHttpErrors } from "./warehouse"
 
 // ---------------------------------------------------------------------------
 // Session replay endpoint schemas
@@ -56,6 +56,34 @@ export const SessionReplayListItem = Schema.Struct({
 
 export class ListReplaysResponse extends Schema.Class<ListReplaysResponse>("ListReplaysResponse")({
 	data: Schema.Array(SessionReplayListItem),
+}) {}
+
+// --- Facets (filter sidebar option counts) ---
+
+export class ReplaysFacetsRequest extends Schema.Class<ReplaysFacetsRequest>("ReplaysFacetsRequest")({
+	startTime: TinybirdDateTime,
+	endTime: TinybirdDateTime,
+	// Same optional-filter contract as ListReplaysRequest — see the note there.
+	serviceName: Schema.optional(Schema.String),
+	browser: Schema.optional(Schema.String),
+	country: Schema.optional(Schema.String),
+	deviceType: Schema.optional(Schema.String),
+	hasErrors: Schema.optional(Schema.Boolean),
+	search: Schema.optional(Schema.String),
+}) {}
+
+export const ReplayFacetItem = Schema.Struct({
+	name: Schema.String,
+	count: Schema.Number,
+})
+
+export class ReplaysFacetsResponse extends Schema.Class<ReplaysFacetsResponse>("ReplaysFacetsResponse")({
+	services: Schema.Array(ReplayFacetItem),
+	browsers: Schema.Array(ReplayFacetItem),
+	countries: Schema.Array(ReplayFacetItem),
+	devices: Schema.Array(ReplayFacetItem),
+	/** Distinct sessions with at least one recorded error, within the current filter. */
+	errorCount: Schema.Number,
 }) {}
 
 // --- Detail ---
@@ -195,8 +223,7 @@ export class SessionTranscriptResponse extends Schema.Class<SessionTranscriptRes
 const sessionReplayEndpointErrors = [
 	QueryEngineExecutionError,
 	QueryEngineTimeoutError,
-	WarehouseQueryError,
-	WarehouseQuotaExceededError,
+	...warehouseHttpErrors,
 ] as const
 
 export class SessionReplaysApiGroup extends HttpApiGroup.make("sessionReplays")
@@ -204,6 +231,13 @@ export class SessionReplaysApiGroup extends HttpApiGroup.make("sessionReplays")
 		HttpApiEndpoint.post("listReplays", "/list", {
 			payload: ListReplaysRequest,
 			success: ListReplaysResponse,
+			error: sessionReplayEndpointErrors,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("facets", "/facets", {
+			payload: ReplaysFacetsRequest,
+			success: ReplaysFacetsResponse,
 			error: sessionReplayEndpointErrors,
 		}),
 	)

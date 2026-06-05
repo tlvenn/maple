@@ -9,7 +9,7 @@ import { compileCH } from "../compile"
 import * as CH from "../expr"
 import { param } from "../param"
 import { from, type CHQuery, type ColumnAccessor } from "../query"
-import { ServiceOverviewSpans, Traces } from "../tables"
+import { ServiceOverviewSpans, Traces, TracesAggregatesHourly } from "../tables"
 import { METRIC_NEEDS } from "../../traces-shared"
 import type { ColumnDefs } from "../types"
 import {
@@ -18,6 +18,7 @@ import {
 	canUseServiceOverviewMv,
 	canUseTracesAggregatesMv,
 	serviceOverviewWhereConditions,
+	tracesAggregatesWhereConditions,
 	tracesBaseWhereConditions,
 	type TracesBaseWhereOpts,
 } from "./query-helpers"
@@ -162,6 +163,35 @@ function buildMvGroupNameExpr(
 	return CH.coalesce(CH.nullIf(CH.arrayStringConcat(filtered, " \u00b7 "), ""), CH.lit("all"))
 }
 
+function buildAggregatesGroupNameExpr(
+	$: ColumnAccessor<typeof TracesAggregatesHourly.columns>,
+	groupBy: readonly string[] | undefined,
+): CH.Expr<string> {
+	if (!groupBy || groupBy.length === 0) return CH.lit("all")
+
+	const parts: CH.Expr<string>[] = []
+	for (const g of groupBy) {
+		switch (g) {
+			case "service":
+				parts.push(CH.toString_($.ServiceName))
+				break
+			case "span_name":
+				parts.push(CH.toString_($.SpanName))
+				break
+			case "status_code":
+				parts.push(CH.toString_($.StatusCode))
+				break
+			case "none":
+				break
+		}
+	}
+
+	if (parts.length === 0) return CH.lit("all")
+	if (parts.length === 1) return CH.coalesce(CH.nullIf(parts[0]!, ""), CH.lit("all"))
+	const filtered = CH.arrayFilter("x -> x != ''", CH.arrayOf(...parts))
+	return CH.coalesce(CH.nullIf(CH.arrayStringConcat(filtered, " \u00b7 "), ""), CH.lit("all"))
+}
+
 function buildBreakdownGroupExpr(
 	$: ColumnAccessor<typeof Traces.columns>,
 	groupBy: string,
@@ -209,6 +239,7 @@ export interface TracesTimeseriesOpts extends TracesQueryOpts {
 	needsSampling: boolean
 	groupBy?: readonly string[]
 	groupByAttributeKeys?: readonly string[]
+	bucketSeconds?: number
 	apdexThresholdMs?: number
 	/** When true, emit all metric columns regardless of the selected metric. Used by custom charts. */
 	allMetrics?: boolean
@@ -234,17 +265,49 @@ export function tracesTimeseriesQuery(
 ): CHQuery<ColumnDefs, TracesTimeseriesOutput, {}> {
 	const apdexThresholdMs = opts.apdexThresholdMs ?? 500
 
-	// FUTURE: when canUseTracesAggregatesMv(opts, opts.groupBy, bucketSeconds)
-	// returns true, route to traces_aggregates_hourly with -Merge combinators
-	// (quantilesTDigestWeightedMerge, sumMerge, minMerge, maxMerge — note the
-	// plural `quantiles*` for multi-level state). This gives
-	// sample-correct quantiles + counts for free and reads thousands of rows
-	// instead of billions over 7d+ ranges. Wiring this requires:
-	//   - bucketSeconds passed as a query opt (currently set inside CH at param-bind time)
-	//   - rawExpr-built SELECT for the merge calls (no DSL helpers for *Merge yet)
-	//   - shadow-mode validation against the raw path
-	// See plan: ~/.claude/plans/research-things-that-hyperdx-indexed-nygaard.md (P2.9 deep-dive).
-	void canUseTracesAggregatesMv
+	if (
+		!opts.allMetrics &&
+		opts.metric !== "apdex" &&
+		canUseTracesAggregatesMv(opts, opts.groupBy, opts.bucketSeconds)
+	) {
+		const needs = new Set(METRIC_NEEDS[opts.metric])
+		const weightedCount = CH.rawExpr<number>("sum(WeightedCount)")
+		const weightedQuantiles = "quantilesTDigestWeightedMerge(0.5, 0.95, 0.99)(DurationQuantiles)"
+		const aggregates = from(TracesAggregatesHourly)
+			.select(($) => ({
+				bucket: CH.toStartOfInterval($.Hour, param.int("bucketSeconds")),
+				groupName: buildAggregatesGroupNameExpr($, opts.groupBy),
+				count: weightedCount,
+				avgDuration: needs.has("avg_duration")
+					? CH.rawExpr<number>(
+							"if(sum(WeightedCount) > 0, sum(WeightedDurationSum) / sum(WeightedCount) / 1000000, 0)",
+						)
+					: CH.lit(0),
+				p50Duration: needs.has("quantiles")
+					? CH.rawExpr<number>(`arrayElement(${weightedQuantiles}, 1) / 1000000`)
+					: CH.lit(0),
+				p95Duration: needs.has("quantiles")
+					? CH.rawExpr<number>(`arrayElement(${weightedQuantiles}, 2) / 1000000`)
+					: CH.lit(0),
+				p99Duration: needs.has("quantiles")
+					? CH.rawExpr<number>(`arrayElement(${weightedQuantiles}, 3) / 1000000`)
+					: CH.lit(0),
+				errorRate: needs.has("error_rate")
+					? CH.rawExpr<number>(
+							"if(sum(WeightedCount) > 0, sum(WeightedErrorCount) / sum(WeightedCount), 0)",
+						)
+					: CH.lit(0),
+				satisfiedCount: CH.lit(0),
+				toleratingCount: CH.lit(0),
+				apdexScore: CH.lit(0),
+				estimatedSpanCount: opts.needsSampling ? weightedCount : CH.lit(0),
+			}))
+			.where(($) => tracesAggregatesWhereConditions($, opts))
+			.groupBy("bucket", "groupName")
+			.orderBy(["bucket", "asc"], ["groupName", "asc"])
+			.format("JSON")
+		return aggregates as unknown as CHQuery<ColumnDefs, TracesTimeseriesOutput, {}>
+	}
 
 	// Fast path: when no filter or groupBy references span-level columns
 	// (span name, attributes, http method), route the query to
@@ -439,6 +502,114 @@ export function tracesListQuery(opts: TracesListOpts) {
 			resourceAttributes: resourceAttrExpr ?? $.ResourceAttributes,
 		}))
 		.where(($) => [...baseWhere($), $.Timestamp.gte(cutoff)])
+		.orderBy(["timestamp", "desc"])
+		.limit(limit)
+		.format("JSON")
+
+	if (offset > 0) {
+		q = q.offset(offset)
+	}
+
+	return q
+}
+
+// ---------------------------------------------------------------------------
+// Slow traces query
+//
+// DSL port of the previously string-interpolated query in
+// `observability/find-slow-traces.ts`. Returns the slowest root spans
+// (`ParentSpanId = ''`) ordered by Duration DESC at the database, so the
+// caller gets the actual slowest traces in the window rather than the most
+// recent. OrgId-scoped per the Warehouse Query Pattern.
+// ---------------------------------------------------------------------------
+
+export interface SlowTracesOpts {
+	service?: string
+	environment?: string
+	limit?: number
+}
+
+export interface SlowTracesOutput {
+	readonly traceId: string
+	readonly spanName: string
+	readonly serviceName: string
+	readonly durationMs: number
+	readonly statusCode: string
+	readonly timestamp: string
+}
+
+export function slowTracesQuery(opts: SlowTracesOpts) {
+	return from(Traces)
+		.select(($) => ({
+			traceId: $.TraceId,
+			spanName: $.SpanName,
+			serviceName: $.ServiceName,
+			durationMs: $.Duration.div(1000000),
+			statusCode: $.StatusCode,
+			timestamp: CH.toString_($.Timestamp),
+		}))
+		.where(($) => [
+			$.OrgId.eq(param.string("orgId")),
+			$.Timestamp.gte(param.dateTime("startTime")),
+			$.Timestamp.lte(param.dateTime("endTime")),
+			$.ParentSpanId.eq(""),
+			CH.when(opts.service, (v: string) => $.ServiceName.eq(v)),
+			CH.when(opts.environment, (v: string) =>
+				$.ResourceAttributes.get("deployment.environment").eq(v),
+			),
+		])
+		.orderBy(["durationMs", "desc"])
+		.limit(opts.limit ?? 10)
+		.format("JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Span-level search query
+//
+// DSL port of the raw `traces` scan in `observability/search-traces.ts`
+// (`spanLevelSearch`). Returns the matched span rows (not root summaries) for
+// flexible span-level filtering: span name (exact or contains), service,
+// error, duration bounds, attribute filters, and trace id. OrgId-scoped via
+// `tracesBaseWhereConditions`.
+// ---------------------------------------------------------------------------
+
+export interface SpanSearchOpts extends TracesQueryOpts {
+	traceId?: string
+	limit?: number
+	offset?: number
+}
+
+export interface SpanSearchOutput {
+	readonly traceId: string
+	readonly spanId: string
+	readonly spanName: string
+	readonly serviceName: string
+	readonly durationMs: number
+	readonly statusCode: string
+	readonly statusMessage: string
+	readonly spanAttributes: Record<string, string>
+	readonly resourceAttributes: Record<string, string>
+	readonly timestamp: string
+}
+
+export function spanSearchQuery(opts: SpanSearchOpts) {
+	const limit = opts.limit ?? 20
+	const offset = opts.offset ?? 0
+
+	let q = from(Traces)
+		.select(($) => ({
+			traceId: $.TraceId,
+			spanId: $.SpanId,
+			spanName: $.SpanName,
+			serviceName: $.ServiceName,
+			durationMs: $.Duration.div(1000000),
+			statusCode: $.StatusCode,
+			statusMessage: $.StatusMessage,
+			spanAttributes: $.SpanAttributes,
+			resourceAttributes: $.ResourceAttributes,
+			timestamp: CH.toString_($.Timestamp),
+		}))
+		.where(($) => [...buildWhereConditions($, opts), CH.when(opts.traceId, (v: string) => $.TraceId.eq(v))])
 		.orderBy(["timestamp", "desc"])
 		.limit(limit)
 		.format("JSON")

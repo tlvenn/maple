@@ -163,7 +163,11 @@ export function executeQueryEngine(
 	operation: string,
 	payload: QueryEngineExecuteRequest,
 ): Effect.Effect<QueryEngineExecuteResponse, WarehouseQueryError | BackendError> {
-	return executeQueryEngineEffect(payload).pipe(
+	return Effect.gen(function* () {
+		yield* Effect.annotateCurrentSpan("query.operation", operation)
+		return yield* executeQueryEngineEffect(payload)
+	}).pipe(
+		Effect.withSpan(operation),
 		Effect.provide(mapleApiClientLayer),
 		Effect.mapError((cause) => {
 			if (isTaggedBackendError(cause)) {

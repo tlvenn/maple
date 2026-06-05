@@ -143,6 +143,15 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 
 						<NavigationMenuItem>
 							<a
+								href={l("/local")}
+								className="inline-flex h-8 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-xs font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
+							>
+								Local
+							</a>
+						</NavigationMenuItem>
+
+						<NavigationMenuItem>
+							<a
 								href="/docs"
 								className="inline-flex h-8 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-xs font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
 							>
@@ -268,6 +277,13 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 								className="text-xs text-fg hover:text-fg transition-colors py-2 font-medium"
 							>
 								{m.nav_roadmap()}
+							</a>
+							<a
+								href={l("/local")}
+								onClick={() => setMenuOpen(false)}
+								className="text-xs text-fg hover:text-fg transition-colors py-2 font-medium"
+							>
+								Local
 							</a>
 							<a
 								href="/docs"

@@ -20,12 +20,12 @@ function widgets(namespace?: string): WidgetDef[] {
 			dataSource: metricsTimeseries({
 				id: "k8s-pod-cpu",
 				name: "Pod CPU",
-				metricName: "k8s.pod.cpu.utilization",
+				metricName: "k8s.pod.cpu.usage",
 				metricType: "gauge",
 				whereClause: where,
 				groupBy,
 			}),
-			display: { title: "Pod CPU Utilization", ...CHART_DISPLAY_LINE, unit: "percent" },
+			display: { title: "Pod CPU Usage (cores)", ...CHART_DISPLAY_LINE, unit: "number" },
 			layout: { x: 0, y: 0, w: 6, h: 4 },
 		},
 		{
@@ -49,13 +49,11 @@ function widgets(namespace?: string): WidgetDef[] {
 				id: "k8s-restarts",
 				name: "Restarts",
 				metricName: "k8s.container.restarts",
-				metricType: "sum",
-				aggregation: "rate",
-				isMonotonic: true,
+				metricType: "gauge",
 				whereClause: where,
 				groupBy,
 			}),
-			display: { title: "Container Restarts / sec", ...CHART_DISPLAY_AREA, unit: "number" },
+			display: { title: "Container Restarts", ...CHART_DISPLAY_AREA, unit: "number" },
 			layout: { x: 0, y: 4, w: 6, h: 4 },
 		},
 		{
@@ -83,7 +81,7 @@ export const kubernetesPodTemplate: TemplateDefinition = {
 	description: "Per-pod CPU, memory, container restarts, and network I/O.",
 	category: "infrastructure",
 	tags: ["kubernetes", "k8s", "pods"],
-	requirements: ["OpenTelemetry kubeletstatsreceiver"],
+	requirements: ["OpenTelemetry kubeletstatsreceiver", "OpenTelemetry k8sclusterreceiver"],
 	parameters: [
 		{
 			key: paramKey("namespace"),

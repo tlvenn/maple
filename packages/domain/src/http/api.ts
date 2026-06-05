@@ -16,9 +16,11 @@ import { OrgOpenrouterSettingsApiGroup } from "./org-openrouter-settings"
 import { OrgClickHouseSettingsApiGroup } from "./org-clickhouse-settings"
 import { OrganizationsApiGroup } from "./organizations"
 import { QueryEngineApiGroup } from "./query-engine"
+import { RecommendationIssuesApiGroup } from "./recommendation-issues"
 import { ScrapeTargetsApiGroup } from "./scrape-targets"
 import { ServiceDiscoveryApiGroup } from "./service-discovery"
 import { SessionReplaysApiGroup } from "./session-replay"
+import { WarehouseApiGroup } from "./warehouse"
 export class MapleApi extends HttpApi.make("MapleApi")
 	.add(AuthPublicApiGroup)
 	.add(AuthApiGroup)
@@ -38,9 +40,11 @@ export class MapleApi extends HttpApi.make("MapleApi")
 	.add(OrgClickHouseSettingsApiGroup)
 	.add(OrganizationsApiGroup)
 	.add(QueryEngineApiGroup)
+	.add(RecommendationIssuesApiGroup)
 	.add(ScrapeTargetsApiGroup)
 	.add(ServiceDiscoveryApiGroup)
 	.add(SessionReplaysApiGroup)
+	.add(WarehouseApiGroup)
 	.annotateMerge(
 		OpenApi.annotations({
 			title: "Maple API",

@@ -1,9 +1,15 @@
 import { useAuth } from "@clerk/clerk-react"
 import { useEffect } from "react"
-import { clearMapleAuthHeaders, setMapleAuthHeadersProvider } from "./auth-headers"
+import { clearMapleAuthHeaders, setActiveOrgId, setMapleAuthHeadersProvider } from "./auth-headers"
 
 export function ClerkAuthBridge() {
-	const { isLoaded, isSignedIn, getToken } = useAuth()
+	const { isLoaded, isSignedIn, getToken, orgId } = useAuth()
+
+	// Publish the active org so org-scoped client caches re-key on org switch
+	// (which invalidates the router but not module-level state).
+	useEffect(() => {
+		setActiveOrgId(isLoaded && isSignedIn ? orgId : null)
+	}, [isLoaded, isSignedIn, orgId])
 
 	useEffect(() => {
 		if (!isLoaded || !isSignedIn) {

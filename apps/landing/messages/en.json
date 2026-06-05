@@ -527,9 +527,9 @@
 	"page_k8s_install_title": "Drop it on your cluster",
 	"page_k8s_install_lede": "Read the chart end-to-end. Three commands and the cluster is reporting kubelet, host, and kube-state metrics over OTLP.",
 	"page_k8s_install_window": "helm install maple-k8s-infra",
-	"page_k8s_install_step_1": "Add the chart repo",
-	"page_k8s_install_step_2": "Refresh the index",
-	"page_k8s_install_step_3": "Install on the cluster",
+	"page_k8s_install_step_1": "Create the ingest-key secret",
+	"page_k8s_install_step_2": "Install the chart",
+	"page_k8s_install_step_3": "Watch the rollout",
 	"page_k8s_install_copy": "Copy",
 
 	"page_compare_label": "Compare",

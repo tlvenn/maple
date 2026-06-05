@@ -1,9 +1,31 @@
 import { describe, expect, it } from "vitest"
 import { useCustomer } from "autumn-js/react"
-import { hasBringYourOwnCloudAddOn, hasSelectedPlan } from "./plan-gating"
+import {
+	getFeatureQuotas,
+	getQuotaStatus,
+	hasBringYourOwnCloudAddOn,
+	hasSelectedPlan,
+	isUsableCustomer,
+	isUsageBasedPlan,
+} from "./plan-gating"
 
 type Customer = NonNullable<ReturnType<typeof useCustomer>["data"]>
 type Subscription = Customer["subscriptions"][number]
+type Balance = NonNullable<Customer["balances"]>[string]
+
+function buildBalance(featureId: string, partial: Partial<Balance> = {}): Balance {
+	return {
+		featureId,
+		granted: 50,
+		remaining: 50,
+		usage: 0,
+		unlimited: false,
+		overageAllowed: false,
+		maxPurchase: null,
+		nextResetAt: null,
+		...partial,
+	} as Balance
+}
 
 function buildCustomer(
 	subscriptions: Subscription[],
@@ -45,6 +67,7 @@ function buildSubscription(partial: Partial<Subscription> = {}): Subscription {
 			env: "sandbox",
 			archived: false,
 			baseVariantId: null,
+			config: { ignorePastDue: false },
 		},
 		autoEnable: false,
 		addOn: false,
@@ -97,6 +120,7 @@ describe("hasSelectedPlan", () => {
 					env: "sandbox",
 					archived: false,
 					baseVariantId: null,
+					config: { ignorePastDue: false },
 				},
 			}),
 		])
@@ -138,5 +162,114 @@ describe("hasBringYourOwnCloudAddOn", () => {
 		const customer = buildCustomer([])
 
 		expect(hasBringYourOwnCloudAddOn(customer)).toBe(false)
+	})
+})
+
+describe("malformed / error-shaped customer payloads", () => {
+	// Autumn's `useCustomer` surfaces an upstream response-validation failure as a
+	// `200` whose body is `{ code: "autumn_api_error" }` — it has no
+	// `subscriptions`/`flags`. The gating helpers must treat it as "no usable
+	// customer" rather than throwing `Cannot read properties of undefined
+	// (reading 'find')`, which previously took down every route.
+	const errorPayload = {
+		message: "Response validation failed",
+		code: "autumn_api_error",
+		statusCode: 200,
+	} as unknown as Customer
+
+	it("isUsableCustomer distinguishes real customers from error payloads", () => {
+		expect(isUsableCustomer(null)).toBe(false)
+		expect(isUsableCustomer(undefined)).toBe(false)
+		expect(isUsableCustomer(errorPayload)).toBe(false)
+		expect(isUsableCustomer(buildCustomer([]))).toBe(true)
+	})
+
+	it("gating helpers never throw on an error payload and fail closed", () => {
+		expect(() => hasSelectedPlan(errorPayload)).not.toThrow()
+		expect(hasSelectedPlan(errorPayload)).toBe(false)
+		expect(hasBringYourOwnCloudAddOn(errorPayload)).toBe(false)
+		expect(isUsageBasedPlan(errorPayload)).toBe(false)
+		expect(getQuotaStatus(errorPayload)).toBe("ok")
+		expect(getFeatureQuotas(errorPayload)).toEqual([])
+	})
+})
+
+describe("isUsageBasedPlan", () => {
+	it("returns false when customer or balances are missing", () => {
+		expect(isUsageBasedPlan(null)).toBe(false)
+		expect(isUsageBasedPlan(buildCustomer([]))).toBe(false)
+	})
+
+	it("returns false for a base plan (no overage allowed)", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs"), traces: buildBalance("traces") },
+		})
+		expect(isUsageBasedPlan(customer)).toBe(false)
+	})
+
+	it("returns true when any metered feature allows overage", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: {
+				logs: buildBalance("logs", { overageAllowed: true }),
+				traces: buildBalance("traces"),
+			},
+		})
+		expect(isUsageBasedPlan(customer)).toBe(true)
+	})
+})
+
+describe("getQuotaStatus / getFeatureQuotas", () => {
+	it("returns ok when under 80% of grant", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs", { granted: 50, usage: 30 }) },
+		})
+		expect(getQuotaStatus(customer)).toBe("ok")
+	})
+
+	it("returns approaching between 80% and 100%", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs", { granted: 50, usage: 45 }) },
+		})
+		expect(getQuotaStatus(customer)).toBe("approaching")
+	})
+
+	it("returns over at or above 100%", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs", { granted: 50, usage: 55 }) },
+		})
+		expect(getQuotaStatus(customer)).toBe("over")
+	})
+
+	it("takes the worst standing across features", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: {
+				logs: buildBalance("logs", { granted: 50, usage: 10 }),
+				traces: buildBalance("traces", { granted: 50, usage: 60 }),
+			},
+		})
+		expect(getQuotaStatus(customer)).toBe("over")
+	})
+
+	it("never flags usage-based features (overage allowed)", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs", { granted: 50, usage: 200, overageAllowed: true }) },
+		})
+		expect(getQuotaStatus(customer)).toBe("ok")
+		expect(getFeatureQuotas(customer)).toHaveLength(0)
+	})
+
+	it("never flags unlimited features", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs", { unlimited: true, usage: 999 }) },
+		})
+		expect(getQuotaStatus(customer)).toBe("ok")
+	})
+
+	it("ignores features with no grant", () => {
+		const customer = buildCustomer([buildSubscription()], {
+			balances: { logs: buildBalance("logs", { granted: 0, usage: 5 }) },
+		})
+		expect(getFeatureQuotas(customer)).toHaveLength(0)
+		expect(getQuotaStatus(customer)).toBe("ok")
 	})
 })

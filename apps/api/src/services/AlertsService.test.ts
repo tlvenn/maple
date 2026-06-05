@@ -13,8 +13,8 @@ import type { WarehouseQueryServiceShape } from "../lib/WarehouseQueryService"
 import { WarehouseQueryService } from "../lib/WarehouseQueryService"
 import { AlertRuntime, type AlertRuntimeShape, AlertsService, type AlertsServiceShape } from "./AlertsService"
 import { DatabaseLibsqlLive } from "../lib/DatabaseLibsqlLive"
-import { BucketCacheService } from "../lib/BucketCacheService"
-import { EdgeCacheService } from "../lib/EdgeCacheService"
+import { BucketCacheService, EdgeCacheService } from "@maple/query-engine/caching"
+import { CacheBackendLive } from "../lib/CacheBackendLive"
 import { Env } from "../lib/Env"
 import { HazelOAuthService } from "./HazelOAuthService"
 import { QueryEngineService } from "./QueryEngineService"
@@ -63,6 +63,7 @@ const makeConfig = (url: string) =>
 			MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY: "lookup-key",
 			MAPLE_INGEST_PUBLIC_URL: "http://127.0.0.1:3474",
 			MAPLE_APP_BASE_URL: "http://127.0.0.1:3471",
+			QE_EVAL_BUCKET_CACHE_ENABLED: "false",
 		}),
 	)
 
@@ -92,6 +93,10 @@ function makeWarehouseStub(state: {
 	return {
 		query: (_tenant, payload) => Effect.fail(new Error(`Unexpected pipe ${payload.pipe}`)) as never,
 		sqlQuery: sqlQueryStub,
+		compiledQuery: (_tenant, compiled) =>
+			sqlQueryStub().pipe(Effect.flatMap((rows) => compiled.decodeRows(rows).pipe(Effect.orDie))),
+		compiledQueryFirst: (_tenant, compiled) =>
+			sqlQueryStub().pipe(Effect.flatMap((rows) => compiled.decodeFirstRow(rows).pipe(Effect.orDie))),
 		ingest: () => Effect.void,
 	}
 }
@@ -145,11 +150,17 @@ const makeLayer = (
 	const envLive = Env.layer.pipe(Layer.provide(configLive))
 	const databaseLive = DatabaseLibsqlLive.pipe(Layer.provide(envLive))
 	const warehouseLive = Layer.succeed(WarehouseQueryService, warehouseStub)
-	const bucketCacheLive = BucketCacheService.layer.pipe(Layer.provide(EdgeCacheService.layer))
+	const edgeCacheLive = EdgeCacheService.layer.pipe(Layer.provide(CacheBackendLive))
+	const bucketCacheLive = BucketCacheService.layer.pipe(Layer.provide(edgeCacheLive))
 	const queryEngineLive = QueryEngineService.layer.pipe(
 		Layer.provide(warehouseLive),
-		Layer.provide(EdgeCacheService.layer),
+		Layer.provide(edgeCacheLive),
 		Layer.provide(bucketCacheLive),
+		// Wire the test config so QE_EVAL_BUCKET_CACHE_ENABLED=false reaches
+		// QueryEngineService. These alert-logic stubs return aggregate-shaped rows
+		// (no per-bucket timestamps), which the bucket-cached evaluate path can't
+		// bucket; keep alerts on the blob path. (Bucket path: QueryEngineEvaluateCache.test.ts.)
+		Layer.provide(configLive),
 	)
 	const runtimeLive = Layer.succeed(AlertRuntime, { ...defaultTestRuntime, ...runtimeOverrides })
 	const hazelOAuthLive = HazelOAuthService.layer.pipe(Layer.provide(Layer.mergeAll(envLive, databaseLive)))
@@ -339,6 +350,83 @@ describe("AlertsService", () => {
 			expect(requests[0]?.headers.get("x-maple-delivery-key")).not.toBe(
 				incidentsAfterSecondTick.incidents[0]?.dedupeKey,
 			)
+		}).pipe(Effect.provide(makeLayer(url, makeWarehouseStub(state), { now: clock.now, fetch: fetchImpl })))
+	})
+
+	itEffect("snapshots a custom notification template into the delivered payload", () => {
+		const { url } = createTempDbUrl()
+		const state = {
+			tracesAggregateRows: [
+				{
+					count: 200,
+					avgDuration: 40,
+					p50Duration: 20,
+					p95Duration: 120,
+					p99Duration: 240,
+					errorRate: 10,
+					satisfiedCount: 180,
+					toleratingCount: 10,
+					apdexScore: 0.925,
+				},
+			],
+		}
+		const bodies: string[] = []
+		const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+			bodies.push(typeof init?.body === "string" ? init.body : "")
+			return new Response("ok", { status: 200 })
+		}) as typeof fetch
+
+		const clock = makeManualClock()
+
+		return Effect.gen(function* () {
+			const alerts = yield* AlertsService
+			const orgId = asOrgId("org_tpl")
+			const userId = asUserId("user_tpl")
+			const destination = yield* createWebhookDestination(alerts, orgId, userId)
+			yield* alerts.createRule(
+				orgId,
+				userId,
+				adminRoles,
+				new AlertRuleUpsertRequest({
+					name: "Checkout error rate",
+					severity: "critical",
+					enabled: true,
+					serviceNames: ["checkout"],
+					signalType: "error_rate",
+					comparator: "gt",
+					threshold: 5,
+					windowMinutes: 5,
+					minimumSampleCount: 10,
+					consecutiveBreachesRequired: 2,
+					consecutiveHealthyRequired: 2,
+					renotifyIntervalMinutes: 30,
+					destinationIds: [destination.id],
+					notificationTemplate: {
+						title: "{{ severity }} on {{ rule.name }}",
+						body: "*Observed:* {{ observed.summary }}",
+					},
+				}),
+			)
+
+			yield* alerts.runSchedulerTick()
+			yield* clock.adjust(Duration.minutes(1))
+			yield* alerts.runSchedulerTick()
+
+			// The custom template is re-read from the rule and surfaces through
+			// get_alert_rule / listRules.
+			const rules = yield* alerts.listRules(orgId)
+			expect(rules.rules[0]?.notificationTemplate?.title).toBe(
+				"{{ severity }} on {{ rule.name }}",
+			)
+
+			// The webhook body is the snapshotted delivery payload — it carries the
+			// template so retries and downstream consumers render the same message.
+			expect(bodies).toHaveLength(1)
+			const payload = JSON.parse(bodies[0]!) as {
+				template?: { title?: string; body?: string }
+			}
+			expect(payload.template?.title).toBe("{{ severity }} on {{ rule.name }}")
+			expect(payload.template?.body).toBe("*Observed:* {{ observed.summary }}")
 		}).pipe(Effect.provide(makeLayer(url, makeWarehouseStub(state), { now: clock.now, fetch: fetchImpl })))
 	})
 
@@ -1364,9 +1452,14 @@ describe("AlertsService", () => {
 			estimatedSpanCount: 200,
 		}
 
+		const alertRows = [breachingRow, healthyRow] as ReadonlyArray<Record<string, unknown>>
 		const stub: WarehouseQueryServiceShape = {
 			...makeWarehouseStub({ tracesAggregateRows: emptyWarehouseRows }),
-			sqlQuery: () => Effect.succeed([breachingRow, healthyRow]) as never,
+			sqlQuery: () => Effect.succeed(alertRows) as never,
+			compiledQuery: (_tenant, compiled) =>
+				compiled.decodeRows(alertRows).pipe(Effect.orDie) as never,
+			compiledQueryFirst: (_tenant, compiled) =>
+				compiled.decodeFirstRow(alertRows).pipe(Effect.orDie) as never,
 		}
 		const clock = makeManualClock()
 

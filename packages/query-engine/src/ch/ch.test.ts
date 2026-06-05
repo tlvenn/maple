@@ -4,6 +4,7 @@ import { compileCH, compileUnion } from "./compile"
 import { tracesTimeseriesQuery, tracesBreakdownQuery, tracesListQuery } from "./queries/traces"
 import { logsFacetsQuery } from "./queries/logs"
 import { servicesFacetsQuery } from "./queries/services"
+import { sessionReplaysFacetsQuery } from "./queries/session-replays"
 import { metricsSummaryQuery } from "./queries/metrics"
 import { tracesDurationStatsQuery, spanHierarchyQuery, spanDetailQuery } from "./queries/errors"
 import { unionAll } from "./union"
@@ -309,6 +310,60 @@ describe("tracesTimeseriesQuery", () => {
 		const q = tracesTimeseriesQuery({ metric: "count", needsSampling: false })
 		const { sql } = compileCH(q, baseParams)
 		expect(sql).toContain("FROM service_overview_spans")
+	})
+
+	it("routes eligible hourly trace timeseries to traces_aggregates_hourly", () => {
+		const q = tracesTimeseriesQuery({
+			metric: "p95_duration",
+			needsSampling: false,
+			rootOnly: true,
+			groupBy: ["service"],
+			bucketSeconds: 3600,
+		})
+		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM traces_aggregates_hourly")
+		expect(sql).toContain("quantilesTDigestWeightedMerge(0.5, 0.95, 0.99)(DurationQuantiles)")
+		expect(sql).toContain("IsEntryPoint = 1")
+		expect(sql).not.toContain("FROM service_overview_spans")
+	})
+
+	it("keeps fine-grained trace timeseries on the existing MV path", () => {
+		const q = tracesTimeseriesQuery({
+			metric: "p95_duration",
+			needsSampling: false,
+			rootOnly: true,
+			bucketSeconds: 300,
+		})
+		const { sql } = compileCH(q, { ...baseParams, bucketSeconds: 300 })
+		expect(sql).toContain("FROM service_overview_spans")
+		expect(sql).not.toContain("FROM traces_aggregates_hourly")
+	})
+
+	it("keeps all-metrics and Apdex timeseries off traces_aggregates_hourly", () => {
+		const allMetrics = compileCH(
+			tracesTimeseriesQuery({
+				metric: "count",
+				needsSampling: true,
+				allMetrics: true,
+				rootOnly: true,
+				bucketSeconds: 3600,
+			}),
+			baseParams,
+		).sql
+		const apdex = compileCH(
+			tracesTimeseriesQuery({
+				metric: "apdex",
+				needsSampling: false,
+				rootOnly: true,
+				bucketSeconds: 3600,
+			}),
+			baseParams,
+		).sql
+
+		expect(allMetrics).toContain("FROM service_overview_spans")
+		expect(allMetrics).not.toContain("FROM traces_aggregates_hourly")
+		expect(apdex).toContain("FROM service_overview_spans")
+		expect(apdex).not.toContain("FROM traces_aggregates_hourly")
 	})
 
 	it("uses pre-extracted CommitSha column when routing to MV", () => {
@@ -1013,6 +1068,32 @@ describe("converted queries", () => {
 		expect(sql).toContain("UNION ALL")
 		expect(sql).toContain("'environment' AS facetType")
 		expect(sql).toContain("'commit_sha' AS facetType")
+	})
+
+	it("sessionReplaysFacetsQuery compiles UNION ALL with uniq(SessionId)", () => {
+		const q = sessionReplaysFacetsQuery({})
+		const { sql } = compileUnion(q, baseParams)
+		expect(sql).toContain("UNION ALL")
+		expect(sql).toContain("uniq(SessionId) AS count")
+		expect(sql).toContain("'service' AS facetType")
+		expect(sql).toContain("'browser' AS facetType")
+		expect(sql).toContain("'country' AS facetType")
+		expect(sql).toContain("'device' AS facetType")
+		expect(sql).toContain("'error' AS facetType")
+		expect(sql).toContain("ORDER BY count DESC")
+	})
+
+	it("sessionReplaysFacetsQuery excludes each facet's own filter", () => {
+		const q = sessionReplaysFacetsQuery({ browser: "Chrome", deviceType: "mobile" })
+		const { sql } = compileUnion(q, baseParams)
+		// The browser branch must still see every browser (no BrowserName = 'Chrome'
+		// constraint), but other branches keep it so their counts respect the filter.
+		const branches = sql.split("UNION ALL")
+		const browserBranch = branches.find((b) => b.includes("'browser' AS facetType"))!
+		const serviceBranch = branches.find((b) => b.includes("'service' AS facetType"))!
+		expect(browserBranch).not.toContain("BrowserName = 'Chrome'")
+		expect(serviceBranch).toContain("BrowserName = 'Chrome'")
+		expect(serviceBranch).toContain("DeviceType = 'mobile'")
 	})
 
 	it("metricsSummaryQuery aggregates the metric_catalog rollup", () => {

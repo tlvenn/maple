@@ -2,11 +2,15 @@
 	"name": "@maple/landing",
 	"version": "0.0.1",
 	"type": "module",
-	"portless": { "name": "landing", "script": "dev:app" },
+	"portless": {
+		"name": "landing",
+		"script": "dev:app"
+	},
 	"scripts": {
 		"dev": "portless",
-		"dev:app": "astro dev --port ${PORT:-3391} --host ${HOST:-127.0.0.1}",
-		"build": "astro build",
+		"sync:cli": "mkdir -p public/cli && cp ../../scripts/install.sh public/cli/install && cp ../../scripts/uninstall.sh public/cli/uninstall",
+		"dev:app": "bun run sync:cli && astro dev --port ${PORT:-3391} --host ${HOST:-127.0.0.1}",
+		"build": "bun run sync:cli && astro build",
 		"preview": "astro preview",
 		"astro": "astro"
 	},
@@ -28,9 +32,10 @@
 		"@xyflow/react": "catalog:ui",
 		"alchemy": "^0.91.2",
 		"astro": "^5.17.1",
-		"autumn-js": "^1.2.5",
+		"autumn-js": "^1.2.27",
 		"class-variance-authority": "catalog:ui",
 		"clsx": "catalog:ui",
+		"fuse.js": "^7.4.1",
 		"motion": "^12.38.0",
 		"react": "catalog:react",
 		"react-dom": "catalog:react",

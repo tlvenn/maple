@@ -27,6 +27,11 @@ function maxExpr<T>(value: CH.Expr<T>): CH.Expr<T> {
 	return compileFnCall<T>("max", value)
 }
 
+/** `argMin(value, ordering)` — the value of `value` at the row with the smallest `ordering`. */
+function argMinExpr<T>(value: CH.Expr<T>, ordering: CH.Expr<unknown>): CH.Expr<T> {
+	return compileFnCall<T>("argMin", value, ordering)
+}
+
 // ---------------------------------------------------------------------------
 // Transcript: every event for one session, in order
 //
@@ -51,7 +56,19 @@ export interface SessionTranscriptOutput {
 	readonly errorStack: string
 }
 
-export function sessionTranscriptQuery() {
+export interface SessionTranscriptOpts {
+	/** Restrict to these event types (navigation/click/input/console/network/error). */
+	types?: readonly string[]
+	/** Only events that occurred under this trace id. */
+	traceId?: string
+	/** Only "things that went wrong": error events, console errors, and failed (>=400) requests. */
+	errorsOnly?: boolean
+	/** Page size. Transcripts are unbounded otherwise — always cap for agents. */
+	limit?: number
+	offset?: number
+}
+
+export function sessionTranscriptQuery(opts: SessionTranscriptOpts = {}) {
 	return from(SessionEvents)
 		.select(($) => ({
 			timestamp: $.Timestamp,
@@ -69,8 +86,20 @@ export function sessionTranscriptQuery() {
 			netDurationMs: $.NetDurationMs,
 			errorStack: $.ErrorStack,
 		}))
-		.where(($) => [$.OrgId.eq(param.string("orgId")), $.SessionId.eq(param.string("sessionId"))])
+		.where(($) => [
+			$.OrgId.eq(param.string("orgId")),
+			$.SessionId.eq(param.string("sessionId")),
+			opts.types && opts.types.length > 0 ? CH.inList($.Type, opts.types) : undefined,
+			CH.when(opts.traceId, (v: string) => $.TraceId.eq(v)),
+			CH.whenTrue(opts.errorsOnly, () =>
+				$.Type.eq("error")
+					.or($.Type.eq("console").and($.Level.eq("error")))
+					.or($.Type.eq("network").and($.NetStatus.gte(400))),
+			),
+		])
 		.orderBy(["timestamp", "asc"], ["seq", "asc"])
+		.limit(opts.limit ?? 100)
+		.offset(opts.offset ?? 0)
 		.format("JSON")
 }
 
@@ -102,6 +131,8 @@ export interface SearchSessionsByEventOutput {
 	readonly matchCount: number
 	readonly firstTimestamp: string
 	readonly lastTimestamp: string
+	/** Page URL of the earliest matching event — helps an agent pick which session to read. */
+	readonly firstUrl: string
 }
 
 export function searchSessionsByEventQuery(opts: SearchSessionsByEventOpts) {
@@ -113,6 +144,7 @@ export function searchSessionsByEventQuery(opts: SearchSessionsByEventOpts) {
 			matchCount: count(),
 			firstTimestamp: minExpr($.Timestamp),
 			lastTimestamp: maxExpr($.Timestamp),
+			firstUrl: argMinExpr($.Url, $.Timestamp),
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),

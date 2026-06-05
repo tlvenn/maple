@@ -1,14 +1,23 @@
-import { Navigate, createFileRoute } from "@tanstack/react-router"
+import { Navigate, createFileRoute, useNavigate } from "@tanstack/react-router"
 import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
-import { SessionsTable } from "@/components/replays/sessions-table"
+import { SessionsList } from "@/components/replays/sessions-list"
+import { ReplaysFilterSidebar } from "@/components/replays/replays-filter-sidebar"
+import { ReplaysToolbar } from "@/components/replays/replays-toolbar"
 import { BooleanFromStringParam } from "@/lib/search-params"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
 import { useSessionReplaysEnabled } from "@/hooks/use-session-replays-enabled"
 import { Result, useAtomValue } from "@/lib/effect-atom"
-import { listReplaysResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
+import {
+	listReplaysResultAtom,
+	replaysFacetsResultAtom,
+} from "@/lib/services/atoms/warehouse-query-atoms"
+import { applyTimeRangeSearch } from "@/components/time-range-picker/search"
+import { TimeRangeHeaderControls } from "@/components/time-range-picker/time-range-header-controls"
+import { PageRefreshProvider } from "@/components/time-range-picker/page-refresh-context"
+import type { TimeRange } from "@/components/time-range-picker/types"
 import { QueryErrorState } from "@/components/common/query-error-state"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Badge } from "@maple/ui/components/ui/badge"
@@ -38,69 +47,95 @@ function ReplaysPage() {
 
 function ReplaysPageContent() {
 	const search = Route.useSearch()
+	const navigate = useNavigate({ from: Route.fullPath })
 	const { startTime, endTime } = useEffectiveTimeRange(
 		search.startTime,
 		search.endTime,
 		search.timePreset ?? "24h",
 	)
 
-	const result = useAtomValue(
-		listReplaysResultAtom({
-			data: {
-				startTime,
-				endTime,
-				serviceName: search.service,
-				browser: search.browser,
-				country: search.country,
-				deviceType: search.deviceType,
-				hasErrors: search.hasErrors,
-				search: search.q,
-			},
-		}),
-	)
+	const filterInputs = {
+		startTime,
+		endTime,
+		serviceName: search.service,
+		browser: search.browser,
+		country: search.country,
+		deviceType: search.deviceType,
+		hasErrors: search.hasErrors,
+		search: search.q,
+	}
 
-	const breadcrumbs = [{ label: "Session Replays" }]
+	const result = useAtomValue(listReplaysResultAtom({ data: filterInputs }))
+	const facetsResult = useAtomValue(replaysFacetsResultAtom({ data: filterInputs }))
+
+	const handleTimeChange = (range: TimeRange, options?: { replace?: boolean }) => {
+		navigate({
+			replace: options?.replace,
+			search: (prev) => applyTimeRangeSearch(prev, range),
+		})
+	}
+
+	const handleSearch = (value: string | undefined) => {
+		navigate({ search: (prev) => ({ ...prev, q: value }) })
+	}
+
+	const sessions = Result.isSuccess(result) ? result.value.data : []
+	const errorSessions = Result.isSuccess(facetsResult) ? facetsResult.value.errorCount : 0
 
 	const titleContent = (
 		<div className="flex items-center gap-2">
-			<h1 className="text-2xl font-semibold tracking-tight truncate">Session Replays</h1>
+			<h1 className="truncate text-2xl font-semibold tracking-tight">Session Replays</h1>
 			<Badge variant="secondary" className="text-xs font-medium">
 				Beta
 			</Badge>
 		</div>
 	)
 
-	return Result.builder(result)
-		.onInitial(() => (
+	const headerActions = (
+		<TimeRangeHeaderControls
+			startTime={search.startTime ?? startTime}
+			endTime={search.endTime ?? endTime}
+			presetValue={search.timePreset ?? "24h"}
+			defaultPreset="24h"
+			onTimeChange={handleTimeChange}
+		/>
+	)
+
+	const toolbar = (
+		<ReplaysToolbar
+			query={search.q ?? ""}
+			onSearch={handleSearch}
+			totalSessions={sessions.length}
+			activeSessions={sessions.filter((s) => s.status === "active").length}
+			errorSessions={errorSessions}
+			waiting={result.waiting}
+		/>
+	)
+
+	return (
+		<PageRefreshProvider timePreset={search.timePreset ?? "24h"}>
 			<DashboardLayout
-				breadcrumbs={breadcrumbs}
+				breadcrumbs={[{ label: "Session Replays" }]}
 				titleContent={titleContent}
 				description="Watch what your users actually saw and did in the browser."
+				headerActions={headerActions}
+				filterSidebar={<ReplaysFilterSidebar facetsResult={facetsResult} />}
+				stickyContent={toolbar}
 			>
-				<div className="space-y-2">
-					{Array.from({ length: 6 }).map((_, i) => (
-						<Skeleton key={i} className="h-12 w-full" />
-					))}
-				</div>
+				{Result.builder(result)
+					.onInitial(() => (
+						<div className="space-y-2">
+							{Array.from({ length: 6 }).map((_, i) => (
+								<Skeleton key={i} className="h-[68px] w-full rounded-xl" />
+							))}
+						</div>
+					))
+					.onError((error) => (
+						<QueryErrorState error={error} titleOverride="Failed to load session replays" />
+					))
+					.onSuccess((data) => <SessionsList sessions={data.data} />)
+					.render()}
 			</DashboardLayout>
-		))
-		.onError((error) => (
-			<DashboardLayout
-				breadcrumbs={breadcrumbs}
-				titleContent={titleContent}
-				description="Watch what your users actually saw and did in the browser."
-			>
-				<QueryErrorState error={error} titleOverride="Failed to load session replays" />
-			</DashboardLayout>
-		))
-		.onSuccess((data) => (
-			<DashboardLayout
-				breadcrumbs={breadcrumbs}
-				titleContent={titleContent}
-				description="Watch what your users actually saw and did in the browser."
-			>
-				<SessionsTable sessions={data.data} />
-			</DashboardLayout>
-		))
-		.render()
+		</PageRefreshProvider>
+	)
 }

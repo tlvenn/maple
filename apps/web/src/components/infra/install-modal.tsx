@@ -17,48 +17,38 @@ import {
 	InputGroupButton,
 	InputGroupTextarea,
 } from "@maple/ui/components/ui/input-group"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@maple/ui/components/ui/tabs"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 
-import { CheckIcon, ComputerIcon, CopyIcon, NetworkNodesIcon, ServerIcon } from "@/components/icons"
+import { CheckIcon, CopyIcon } from "@/components/icons"
 import { ingestUrl } from "@/lib/services/common/ingest-url"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 
-type Platform = "docker" | "kubernetes" | "linux"
+const HOSTED_INGEST_URL = "https://ingest.maple.dev"
+const DOCS_URL = "https://maple.dev/docs/guides/kubernetes-infrastructure"
 
 interface InstallModalProps {
 	open: boolean
 	onOpenChange: (open: boolean) => void
 }
 
-function dockerCommand(url: string, token: string) {
-	return [
-		"docker run -d \\",
-		"  --name maple-agent \\",
-		"  --pid=host --network=host \\",
-		"  -v /proc:/hostfs/proc:ro -v /sys:/hostfs/sys:ro -v /:/hostfs:ro \\",
-		`  -e MAPLE_INGEST_URL=${url} \\`,
-		`  -e MAPLE_INGEST_TOKEN=${token} \\`,
-		"  ghcr.io/maple/collector-agent:latest",
-	].join("\n")
-}
-
-function helmCommand(url: string, token: string) {
-	return [
-		"helm repo add maple https://charts.maple.dev",
-		"helm repo update",
-		"helm install maple-agent maple/collector-agent \\",
-		`  --set maple.ingestUrl=${url} \\`,
-		`  --set maple.ingestToken=${token}`,
-	].join("\n")
-}
-
-function linuxCommand(url: string, token: string) {
-	return `curl -fsSL https://get.maple.dev/agent.sh | MAPLE_INGEST_URL=${url} MAPLE_INGEST_TOKEN=${token} sh`
+function helmCommand(token: string) {
+	const lines = [
+		"helm upgrade --install maple-k8s-infra \\",
+		"  oci://ghcr.io/makisuo/charts/maple-k8s-infra \\",
+		"  --namespace maple --create-namespace \\",
+		`  --set-string maple.ingestKey.value=${token} \\`,
+		"  --set-string global.clusterName=production",
+	]
+	// Self-hosted Maple: tell the collector where to send OTLP. Hosted installs
+	// use the chart's baked-in default, so we omit the flag to keep it clean.
+	if (ingestUrl !== HOSTED_INGEST_URL) {
+		lines[lines.length - 1] += " \\"
+		lines.push(`  --set-string maple.ingest.endpoint=${ingestUrl}`)
+	}
+	return lines.join("\n")
 }
 
 export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
-	const [platform, setPlatform] = useState<Platform>("docker")
 	const [copied, setCopied] = useState(false)
 
 	const keysResult = useAtomValue(MapleApiAtomClient.query("ingestKeys", "get", {}))
@@ -71,17 +61,7 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 		[keysResult],
 	)
 
-	const snippet = useMemo(() => {
-		if (!token) return ""
-		switch (platform) {
-			case "docker":
-				return dockerCommand(ingestUrl, token)
-			case "kubernetes":
-				return helmCommand(ingestUrl, token)
-			case "linux":
-				return linuxCommand(ingestUrl, token)
-		}
-	}, [platform, token])
+	const snippet = useMemo(() => (token ? helmCommand(token) : ""), [token])
 
 	async function handleCopy() {
 		if (!snippet) return
@@ -99,50 +79,15 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="max-w-2xl overflow-hidden">
 				<DialogHeader>
-					<DialogTitle>Install the infrastructure agent</DialogTitle>
+					<DialogTitle>Install the Kubernetes collector</DialogTitle>
 					<DialogDescription>
-						Maple ships host, container, and Kubernetes metrics through the OpenTelemetry
-						collector. Pick a platform and run the command below on your target host. The new
-						host will appear here within about a minute.
+						The Maple Helm chart deploys a DaemonSet for per-node host + kubelet metrics and a
+						single-replica deployment for cluster-wide signals. Run the command below against your
+						cluster — nodes and pods appear here within about a minute.
 					</DialogDescription>
 				</DialogHeader>
 
 				<div className="space-y-4 py-2 min-w-0">
-					<Tabs value={platform} onValueChange={(v) => setPlatform(v as Platform)}>
-						<TabsList>
-							<TabsTrigger value="docker" className="gap-1.5">
-								<ServerIcon size={13} />
-								Docker
-							</TabsTrigger>
-							<TabsTrigger value="kubernetes" className="gap-1.5">
-								<NetworkNodesIcon size={13} />
-								Kubernetes
-							</TabsTrigger>
-							<TabsTrigger value="linux" className="gap-1.5">
-								<ComputerIcon size={13} />
-								Linux
-							</TabsTrigger>
-						</TabsList>
-
-						<TabsContent value="docker" className="pt-4">
-							<p className="text-muted-foreground mb-3 text-xs">
-								Runs the contrib collector with hostmetrics, docker stats, and OTLP receivers.
-								Requires Docker &ge; 20.10.
-							</p>
-						</TabsContent>
-						<TabsContent value="kubernetes" className="pt-4">
-							<p className="text-muted-foreground mb-3 text-xs">
-								Deploys a DaemonSet for per-node hostmetrics + kubeletstats, plus a
-								single-replica deployment for cluster-wide signals.
-							</p>
-						</TabsContent>
-						<TabsContent value="linux" className="pt-4">
-							<p className="text-muted-foreground mb-3 text-xs">
-								Installs the collector binary and a systemd unit. Requires sudo.
-							</p>
-						</TabsContent>
-					</Tabs>
-
 					{Result.isInitial(keysResult) ? (
 						<Skeleton className="h-36 w-full" />
 					) : (
@@ -150,7 +95,7 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 							<InputGroupTextarea
 								readOnly
 								value={snippet}
-								rows={platform === "linux" ? 2 : 7}
+								rows={ingestUrl !== HOSTED_INGEST_URL ? 6 : 5}
 								className="font-mono text-xs tracking-wide select-all whitespace-pre leading-relaxed"
 							/>
 							<InputGroupAddon align="block-end">
@@ -177,9 +122,10 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 					)}
 
 					<p className="text-muted-foreground text-xs">
-						The token above is your org's{" "}
+						The command embeds your org's{" "}
 						<strong className="text-foreground">private ingest key</strong>. Rotate it from
-						Settings → Ingestion if it leaks.
+						Settings → Ingestion if it leaks. For production, prefer an existing Secret over an
+						inline value — see the docs.
 					</p>
 				</div>
 
@@ -190,11 +136,7 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 					<Button
 						variant="outline"
 						render={
-							<a
-								href="https://maple.dev/docs/infrastructure"
-								target="_blank"
-								rel="noopener noreferrer"
-							/>
+							<a href={DOCS_URL} target="_blank" rel="noopener noreferrer" aria-label="View docs" />
 						}
 					>
 						View docs

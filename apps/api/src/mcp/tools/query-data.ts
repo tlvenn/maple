@@ -352,7 +352,19 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 							Effect.succeed(taggedErrorResult(error._tag, error.message)),
 						"@maple/http/errors/WarehouseQueryError": (error) =>
 							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						"@maple/http/errors/WarehouseUpstreamError": (error) =>
+							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						"@maple/http/errors/WarehouseAuthError": (error) =>
+							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						"@maple/http/errors/WarehouseConfigError": (error) =>
+							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						"@maple/http/errors/WarehouseClientError": (error) =>
+							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						"@maple/http/errors/WarehouseSchemaDriftError": (error) =>
+							Effect.succeed(taggedErrorResult(error._tag, error.message)),
 						"@maple/http/errors/WarehouseQuotaExceededError": (error) =>
+							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						"@maple/http/errors/WarehouseValidationError": (error) =>
 							Effect.succeed(taggedErrorResult(error._tag, error.message)),
 					}),
 				)

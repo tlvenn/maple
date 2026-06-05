@@ -2,8 +2,15 @@ import { HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi"
 import { Schema } from "effect"
 import { warehouseQueries } from "../warehouse-queries"
 import { Authorization } from "./current-tenant"
+import { warehouseHttpErrors } from "./warehouse-errors"
 
 export { UnauthorizedError } from "./current-tenant"
+
+// The warehouse error classes live in the pure `./warehouse-errors` module (no
+// HttpApi dependency) so non-HTTP consumers can import them. Re-export them here
+// so `@maple/domain/http`'s barrel keeps surfacing every class and there is a
+// single definition site (keeps `instanceof` identity-safe across import paths).
+export * from "./warehouse-errors"
 
 const WarehouseQueryNameSchema = Schema.Literals(warehouseQueries)
 
@@ -18,52 +25,12 @@ export class WarehouseQueryResponse extends Schema.Class<WarehouseQueryResponse>
 	data: Schema.Array(Schema.Unknown),
 }) {}
 
-// `category` discriminates query failures without inflating the per-endpoint
-// error union: every endpoint already declares WarehouseQueryError, so adding a
-// field is free at deploy-time vs. adding new TaggedError classes (each new
-// class on every endpoint costs measurable script-startup CPU on Cloudflare —
-// hit error 10021 at ~7 errors × 30 endpoints).
-//   - "query"         → ClickHouse/SQL error (default)
-//   - "upstream"      → query backend/CDN/network failure (transient)
-//   - "auth"          → upstream 401/403 or database credentials failure
-//   - "config"        → backend/database configuration is wrong
-//   - "client"        → Maple's query client could not decode/consume the response
-//   - "schema_drift"  → BYO ClickHouse cluster is missing a column or has the
-//                       wrong type for one Maple expects; remediated by running
-//                       schema apply on the cluster
-export class WarehouseQueryError extends Schema.TaggedErrorClass<WarehouseQueryError>()(
-	"@maple/http/errors/WarehouseQueryError",
-	{
-		message: Schema.String,
-		pipe: Schema.String,
-		category: Schema.optional(
-			Schema.Literals(["query", "upstream", "auth", "config", "client", "schema_drift"]),
-		),
-		upstreamStatus: Schema.optional(Schema.Number),
-		clickhouseCode: Schema.optional(Schema.String),
-		clickhouseType: Schema.optional(Schema.String),
-	},
-	{ httpApiStatus: 502 },
-) {}
-
-export class WarehouseQuotaExceededError extends Schema.TaggedErrorClass<WarehouseQuotaExceededError>()(
-	"@maple/http/errors/WarehouseQuotaExceededError",
-	{
-		message: Schema.String,
-		pipe: Schema.String,
-		setting: Schema.Literals(["max_execution_time", "max_memory_usage", "max_threads"]),
-		clickhouseCode: Schema.optional(Schema.String),
-		clickhouseType: Schema.optional(Schema.String),
-	},
-	{ httpApiStatus: 429 },
-) {}
-
 export class WarehouseApiGroup extends HttpApiGroup.make("warehouse")
 	.add(
 		HttpApiEndpoint.post("query", "/query", {
 			payload: WarehouseQueryRequest,
 			success: WarehouseQueryResponse,
-			error: WarehouseQueryError,
+			error: warehouseHttpErrors,
 		}),
 	)
 	.prefix("/api/tinybird")

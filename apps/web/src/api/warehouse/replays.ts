@@ -3,6 +3,7 @@ import {
 	GetReplayEventsRequest,
 	GetReplayRequest,
 	ListReplaysRequest,
+	ReplaysFacetsRequest,
 	ReplaysForTraceRequest,
 	SessionId,
 	SessionTranscriptRequest,
@@ -64,6 +65,55 @@ export const listReplays = Effect.fn("SessionReplays.listReplays")(function* ({
 		}),
 	)
 	return { data: result.data }
+})
+
+// ---------------------------------------------------------------------------
+// List facets (filter sidebar option counts)
+// ---------------------------------------------------------------------------
+
+const ReplaysFacetsInput = Schema.Struct({
+	startTime: Schema.optional(WarehouseDateTimeString),
+	endTime: Schema.optional(WarehouseDateTimeString),
+	serviceName: Schema.optional(Schema.String),
+	browser: Schema.optional(Schema.String),
+	country: Schema.optional(Schema.String),
+	deviceType: Schema.optional(Schema.String),
+	hasErrors: Schema.optional(Schema.Boolean),
+	search: Schema.optional(Schema.String),
+})
+export type ReplaysFacetsInput = Schema.Schema.Type<typeof ReplaysFacetsInput>
+
+export const getReplaysFacets = Effect.fn("SessionReplays.facets")(function* ({
+	data,
+}: {
+	data: ReplaysFacetsInput
+}) {
+	const input = yield* decodeInput(ReplaysFacetsInput, data ?? {}, "replaysFacets")
+	const fallback = defaultTimeRange(yield* Clock.currentTimeMillis)
+	const result = yield* runWarehouseQuery("replaysFacets", () =>
+		Effect.gen(function* () {
+			const client = yield* MapleApiAtomClient
+			return yield* client.sessionReplays.facets({
+				payload: new ReplaysFacetsRequest({
+					startTime: input.startTime ?? fallback.startTime,
+					endTime: input.endTime ?? fallback.endTime,
+					serviceName: input.serviceName,
+					browser: input.browser,
+					country: input.country,
+					deviceType: input.deviceType,
+					hasErrors: input.hasErrors,
+					search: input.search,
+				}),
+			})
+		}),
+	)
+	return {
+		services: result.services,
+		browsers: result.browsers,
+		countries: result.countries,
+		devices: result.devices,
+		errorCount: result.errorCount,
+	}
 })
 
 // ---------------------------------------------------------------------------

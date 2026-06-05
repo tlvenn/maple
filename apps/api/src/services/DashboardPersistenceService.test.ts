@@ -10,7 +10,7 @@ import {
 	PortableDashboardDocument,
 	UserId,
 } from "@maple/domain/http"
-import { Database, DatabaseError } from "../lib/DatabaseLive"
+import { Database, DatabaseError, type DatabaseShape } from "../lib/DatabaseLive"
 import { DatabaseLibsqlLive } from "../lib/DatabaseLibsqlLive"
 import { DashboardPersistenceService } from "./DashboardPersistenceService"
 import { Env } from "../lib/Env"
@@ -25,7 +25,7 @@ const createdTempDirs: string[] = []
 const failingDatabaseLayer = Layer.succeed(
 	Database,
 	Database.of({
-		client: undefined as unknown as Database["client"],
+		client: undefined as unknown as DatabaseShape["client"],
 		execute: () =>
 			Effect.fail(
 				new DatabaseError({ message: "simulated query failure", cause: new Error("boom") }),
@@ -177,6 +177,29 @@ describe("DashboardPersistenceService", () => {
 			assert.deepStrictEqual(created.widgets, [])
 			assert.strictEqual(typeof created.createdAt, "string")
 			assert.strictEqual(typeof created.updatedAt, "string")
+			assert.strictEqual(listed.dashboards.length, 1)
+			assert.strictEqual(listed.dashboards[0]!.id, created.id)
+		}).pipe(Effect.provide(makeLayer(dbUrl)))
+	})
+
+	it.effect("creates a dashboard from a portable payload with no tags or description", () => {
+		const dbUrl = createTempDbUrl()
+
+		// `tags`/`description` are `Schema.optionalKey`; `makePortableDashboard`
+		// omits both here. The create path must not forward their `undefined` values
+		// into `new DashboardDocument(...)`, which the Schema.Class constructor rejects.
+		return Effect.gen(function* () {
+			const created = yield* DashboardPersistenceService.create(
+				asOrgId("org_a"),
+				asUserId("user_a"),
+				makePortableDashboard({ name: "No Tags" }),
+			)
+
+			const listed = yield* DashboardPersistenceService.list(asOrgId("org_a"))
+
+			assert.strictEqual(created.name, "No Tags")
+			assert.strictEqual(created.description, undefined)
+			assert.strictEqual(created.tags, undefined)
 			assert.strictEqual(listed.dashboards.length, 1)
 			assert.strictEqual(listed.dashboards[0]!.id, created.id)
 		}).pipe(Effect.provide(makeLayer(dbUrl)))

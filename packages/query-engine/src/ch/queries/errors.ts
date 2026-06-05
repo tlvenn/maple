@@ -10,7 +10,14 @@ import { from, fromQuery, type CHQuery, type ColumnAccessor } from "../query"
 import type { ColumnDefs } from "../types"
 import { unionAll, type CHUnionQuery } from "../union"
 import { compileCH } from "../compile"
-import { ErrorEvents, ServiceUsage, TraceDetailSpans, TraceListMv, Traces } from "../tables"
+import {
+	ErrorEvents,
+	ErrorEventsByTime,
+	ServiceUsage,
+	TraceDetailSpans,
+	TraceListMv,
+	Traces,
+} from "../tables"
 import { buildProjectedMapExpr } from "./query-helpers"
 
 // ---------------------------------------------------------------------------
@@ -696,7 +703,12 @@ export interface ErrorIssuesOutput {
 }
 
 export function errorIssuesQuery(opts: ErrorIssuesOpts) {
-	return from(ErrorEvents)
+	// Reads the time-ordered sibling (sorted OrgId, Timestamp, FingerprintHash): this is a
+	// recent-window scan grouped across fingerprints, so a Timestamp-leading sort key lets
+	// ClickHouse prune to the window instead of scanning the org's whole day-partition.
+	// Per-fingerprint occurrence lookups use errorIssueTimeseriesQuery / *SampleTracesQuery,
+	// which stay on the FingerprintHash-ordered `error_events`.
+	return from(ErrorEventsByTime)
 		.select(($) => ({
 			fingerprintHash: CH.toString_($.FingerprintHash),
 			serviceName: CH.any_($.ServiceName),

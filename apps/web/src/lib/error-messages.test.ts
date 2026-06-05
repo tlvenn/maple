@@ -65,51 +65,67 @@ describe("formatBackendError", () => {
 		expect(result.description).not.toContain("spanHierarchy")
 	})
 
-	it("formats WarehouseQueryError with upstream category as transient", () => {
+	it("formats WarehouseUpstreamError as transient", () => {
 		const result = formatBackendError({
-			_tag: "@maple/http/errors/WarehouseQueryError",
+			_tag: "@maple/http/errors/WarehouseUpstreamError",
 			message: "Request failed with status 503",
 			pipe: "listLogs",
-			category: "upstream",
 			upstreamStatus: 503,
 		})
 		expect(result.title).toBe("Database is temporarily unavailable")
 		expect(result.description).toContain("503")
 	})
 
-	it("formats WarehouseQueryError with auth category as credentials issue", () => {
+	it("formats WarehouseAuthError as a credentials issue", () => {
 		const result = formatBackendError({
-			_tag: "@maple/http/errors/WarehouseQueryError",
+			_tag: "@maple/http/errors/WarehouseAuthError",
 			message: "Request failed with status 401",
 			pipe: "listLogs",
-			category: "auth",
 			upstreamStatus: 401,
 		})
 		expect(result.title).toBe("Database rejected our credentials")
 		expect(result.description).toContain("invalid or expired")
 	})
 
-	it("formats WarehouseQueryError with config category as configuration issue", () => {
+	it("formats WarehouseConfigError as a configuration issue", () => {
 		const result = formatBackendError({
-			_tag: "@maple/http/errors/WarehouseQueryError",
+			_tag: "@maple/http/errors/WarehouseConfigError",
 			message: "Database default does not exist",
 			pipe: "sqlQuery",
-			category: "config",
 			clickhouseType: "UNKNOWN_DATABASE",
 		})
 		expect(result.title).toBe("Database is not configured correctly")
 		expect(result.description).toContain("Database default does not exist")
 	})
 
-	it("formats WarehouseQueryError with client category as decode issue", () => {
+	it("formats WarehouseClientError as a decode issue", () => {
 		const result = formatBackendError({
-			_tag: "@maple/http/errors/WarehouseQueryError",
+			_tag: "@maple/http/errors/WarehouseClientError",
 			message: "Unexpected token '<'",
 			pipe: "sqlQuery",
-			category: "client",
 		})
 		expect(result.title).toBe("Database response could not be decoded")
 		expect(result.description).toContain("Unexpected token")
+	})
+
+	it("formats WarehouseSchemaDriftError with a schema-apply hint", () => {
+		const result = formatBackendError({
+			_tag: "@maple/http/errors/WarehouseSchemaDriftError",
+			message: "Unknown identifier 'SampleRate'",
+			pipe: "service_overview",
+		})
+		expect(result.title).toBe("Database schema is out of date")
+		expect(result.description).toContain("schema apply")
+	})
+
+	it("formats WarehouseValidationError as an invalid query", () => {
+		const result = formatBackendError({
+			_tag: "@maple/http/errors/WarehouseValidationError",
+			message: "SQL query must contain OrgId filter",
+			pipe: "sqlQuery",
+		})
+		expect(result.title).toBe("Invalid query")
+		expect(result.description).toContain("OrgId")
 	})
 
 	it("rewrites WarehouseQueryError when message leaks a 5xx status", () => {

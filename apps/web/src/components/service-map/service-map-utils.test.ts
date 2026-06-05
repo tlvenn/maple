@@ -5,6 +5,7 @@ import {
 	getHealthColor,
 	getPlatformColor,
 	getServiceMapNodeColor,
+	topologyKey,
 	type ServiceNodeData,
 } from "./service-map-utils"
 import type { ServiceDbEdge, ServiceEdge, ServicePlatform } from "@/api/warehouse/service-map"
@@ -185,5 +186,51 @@ describe("getServiceMapNodeColor", () => {
 		expect(getHealthColor(0.0)).toBe("var(--severity-info)")
 		expect(getHealthColor(0.011)).toBe("var(--severity-warn)")
 		expect(getHealthColor(0.06)).toBe("var(--severity-error)")
+	})
+})
+
+describe("topologyKey", () => {
+	it("is stable when only metric values change (no re-layout on refresh)", () => {
+		const a = buildFlowElements({
+			edges: [baseEdge()],
+			serviceOverviews: [baseOverview()],
+			durationSeconds: 60,
+		})
+		const b = buildFlowElements({
+			edges: [baseEdge({ callCount: 999_999, errorRate: 0.5, avgDurationMs: 1234 })],
+			serviceOverviews: [baseOverview({ throughput: 9999 })],
+			durationSeconds: 60,
+		})
+		expect(topologyKey(a.nodes, a.edges)).toBe(topologyKey(b.nodes, b.edges))
+	})
+
+	it("changes when an edge introduces a new node", () => {
+		const a = buildFlowElements({
+			edges: [baseEdge()],
+			serviceOverviews: [baseOverview()],
+			durationSeconds: 60,
+		})
+		const b = buildFlowElements({
+			edges: [baseEdge(), baseEdge({ sourceService: "api", targetService: "billing" })],
+			serviceOverviews: [baseOverview()],
+			durationSeconds: 60,
+		})
+		expect(topologyKey(a.nodes, a.edges)).not.toBe(topologyKey(b.nodes, b.edges))
+	})
+
+	it("is order-independent for the same topology", () => {
+		const built = buildFlowElements({
+			edges: [
+				baseEdge({ sourceService: "api", targetService: "auth" }),
+				baseEdge({ sourceService: "api", targetService: "billing" }),
+			],
+			serviceOverviews: [baseOverview()],
+			durationSeconds: 60,
+		})
+		const reversed = {
+			nodes: [...built.nodes].reverse(),
+			edges: [...built.edges].reverse(),
+		}
+		expect(topologyKey(built.nodes, built.edges)).toBe(topologyKey(reversed.nodes, reversed.edges))
 	})
 })

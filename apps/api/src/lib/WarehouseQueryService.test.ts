@@ -1,8 +1,16 @@
 import { afterEach, assert, describe, it } from "@effect/vitest"
 import { Cause, ConfigProvider, Effect, Exit, Layer, Option, Schema } from "effect"
-import { WarehouseQueryError, OrgId, UserId } from "@maple/domain/http"
+import {
+	WarehouseQueryError,
+	WarehouseSchemaDriftError,
+	WarehouseUpstreamError,
+	OrgId,
+	UserId,
+} from "@maple/domain/http"
+import { unsafeCompiledQuery } from "@maple/query-engine/ch"
 import { __testables, WarehouseQueryService } from "./WarehouseQueryService"
 import { OrgClickHouseSettingsService } from "../services/OrgClickHouseSettingsService"
+import type { TenantContext } from "../services/AuthService"
 import { DatabaseLibsqlLive } from "./DatabaseLibsqlLive"
 import { Env } from "./Env"
 import { cleanupTempDirs, createTempDbUrl as makeTempDb } from "./test-sqlite"
@@ -57,11 +65,11 @@ const getError = <A, E>(exit: Exit.Exit<A, E>): unknown => {
 const asOrgId = Schema.decodeUnknownSync(OrgId)
 const asUserId = Schema.decodeUnknownSync(UserId)
 
-const makeTenant = () => ({
+const makeTenant = (): TenantContext => ({
 	orgId: asOrgId("org_test"),
 	userId: asUserId("user_test"),
 	roles: [],
-	authMode: "session" as const,
+	authMode: "self_hosted",
 })
 
 const transient503 = () =>
@@ -78,6 +86,7 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 				if (attempts < 3) throw transient503()
 				return { data: [{ ok: 1 }] }
 			},
+			insert: async () => {},
 		}))
 
 		const { url } = createTempDbUrl()
@@ -101,6 +110,7 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 				attempts++
 				throw new Error("HTTP status 401 authentication failed")
 			},
+			insert: async () => {},
 		}))
 
 		const { url } = createTempDbUrl()
@@ -127,6 +137,7 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 				attempts++
 				throw transient503()
 			},
+			insert: async () => {},
 		}))
 
 		const { url } = createTempDbUrl()
@@ -145,22 +156,247 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 			assert.isTrue(Exit.isFailure(exit))
 
 			const failure = getError(exit)
-			assert.instanceOf(failure, WarehouseQueryError)
-			assert.strictEqual((failure as WarehouseQueryError).category, "upstream")
-			assert.strictEqual((failure as WarehouseQueryError).upstreamStatus, 503)
+			assert.instanceOf(failure, WarehouseUpstreamError)
+			assert.strictEqual((failure as WarehouseUpstreamError).upstreamStatus, 503)
 		}).pipe(Effect.provide(layer))
 	})
 })
 
-describe("WarehouseQueryError category surfaces transient classification", () => {
-	it("emits category=upstream on 503", () => {
+describe("WarehouseQueryService.compiledQuery", () => {
+	const RowNumber = Schema.Union([Schema.Finite, Schema.FiniteFromString])
+
+	it.effect("executes compiled SQL and decodes rows with the compiled row schema", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [{ serviceName: "api", count: "42" }] }),
+			insert: async () => {},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const compiled = unsafeCompiledQuery<{ readonly serviceName: string; readonly count: number }>({
+			sql: "SELECT ServiceName AS serviceName, count() AS count FROM traces WHERE OrgId = 'org_test'",
+			rowSchema: Schema.Struct({ serviceName: Schema.String, count: RowNumber }),
+		})
+
+		return Effect.gen(function* () {
+			const result = yield* WarehouseQueryService.use((service) =>
+				service.compiledQuery(tenant, compiled),
+			)
+
+			assert.deepStrictEqual(result, [{ serviceName: "api", count: 42 }])
+		}).pipe(Effect.provide(layer))
+	})
+
+	it.effect("maps row decode failures to WarehouseSchemaDriftError", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [{ count: "not-a-number" }] }),
+			insert: async () => {},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
+			sql: "SELECT count() AS count FROM traces WHERE OrgId = 'org_test'",
+			rowSchema: Schema.Struct({ count: RowNumber }),
+		})
+
+		return Effect.gen(function* () {
+			const exit = yield* Effect.exit(
+				WarehouseQueryService.use((service) => service.compiledQuery(tenant, compiled)),
+			)
+
+			assert.isTrue(Exit.isFailure(exit))
+			const failure = getError(exit)
+			assert.instanceOf(failure, WarehouseSchemaDriftError)
+		}).pipe(Effect.provide(layer))
+	})
+
+	it.effect("still enforces OrgId scoping for compiled SQL", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [{ count: 1 }] }),
+			insert: async () => {},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
+			sql: "SELECT count() AS count FROM traces",
+			rowSchema: Schema.Struct({ count: RowNumber }),
+		})
+
+		return Effect.gen(function* () {
+			const exit = yield* Effect.exit(
+				WarehouseQueryService.use((service) => service.compiledQuery(tenant, compiled)),
+			)
+
+			assert.isTrue(Exit.isFailure(exit))
+			const failure = getError(exit)
+			assert.strictEqual(
+				(failure as { message?: string } | undefined)?.message,
+				"SQL query must contain OrgId filter (sqlQuery)",
+			)
+		}).pipe(Effect.provide(layer))
+	})
+})
+
+describe("WarehouseQueryService.compiledQueryFirst", () => {
+	const RowNumber = Schema.Union([Schema.Finite, Schema.FiniteFromString])
+
+	it.effect("returns Some with the decoded first row", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [{ serviceName: "api", count: "42" }, { serviceName: "worker", count: "9" }] }),
+			insert: async () => {},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const compiled = unsafeCompiledQuery<{ readonly serviceName: string; readonly count: number }>({
+			sql: "SELECT ServiceName AS serviceName, count() AS count FROM traces WHERE OrgId = 'org_test'",
+			rowSchema: Schema.Struct({ serviceName: Schema.String, count: RowNumber }),
+		})
+
+		return Effect.gen(function* () {
+			const result = yield* WarehouseQueryService.use((service) =>
+				service.compiledQueryFirst(tenant, compiled),
+			)
+
+			assert.isTrue(Option.isSome(result))
+			if (Option.isSome(result)) {
+				assert.deepStrictEqual(result.value, { serviceName: "api", count: 42 })
+			}
+		}).pipe(Effect.provide(layer))
+	})
+
+	it.effect("returns None when the compiled SQL returns no rows", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [] }),
+			insert: async () => {},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
+			sql: "SELECT count() AS count FROM traces WHERE OrgId = 'org_test'",
+			rowSchema: Schema.Struct({ count: RowNumber }),
+		})
+
+		return Effect.gen(function* () {
+			const result = yield* WarehouseQueryService.use((service) =>
+				service.compiledQueryFirst(tenant, compiled),
+			)
+
+			assert.deepStrictEqual(result, Option.none())
+		}).pipe(Effect.provide(layer))
+	})
+
+	it.effect("maps first-row decode failures to WarehouseSchemaDriftError", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [{ count: "not-a-number" }] }),
+			insert: async () => {},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
+			sql: "SELECT count() AS count FROM traces WHERE OrgId = 'org_test'",
+			rowSchema: Schema.Struct({ count: RowNumber }),
+		})
+
+		return Effect.gen(function* () {
+			const exit = yield* Effect.exit(
+				WarehouseQueryService.use((service) => service.compiledQueryFirst(tenant, compiled)),
+			)
+
+			assert.isTrue(Exit.isFailure(exit))
+			const failure = getError(exit)
+			assert.instanceOf(failure, WarehouseSchemaDriftError)
+		}).pipe(Effect.provide(layer))
+	})
+})
+
+describe("WarehouseQueryService.ingest writes through the SQL client", () => {
+	it.effect("forwards datasource + rows to the client's insert", () => {
+		const calls: Array<{ datasource: string; rows: ReadonlyArray<unknown> }> = []
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [] }),
+			insert: async (datasource, rows) => {
+				calls.push({ datasource, rows })
+			},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+		const rows = [{ trace_id: "a" }, { trace_id: "b" }]
+
+		return Effect.gen(function* () {
+			yield* WarehouseQueryService.use((service) => service.ingest(tenant, "traces", rows))
+
+			assert.strictEqual(calls.length, 1)
+			assert.strictEqual(calls[0]?.datasource, "traces")
+			assert.deepStrictEqual(calls[0]?.rows, rows)
+		}).pipe(Effect.provide(layer))
+	})
+
+	it.effect("short-circuits without calling insert when there are no rows", () => {
+		let inserts = 0
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [] }),
+			insert: async () => {
+				inserts++
+			},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+
+		return Effect.gen(function* () {
+			yield* WarehouseQueryService.use((service) => service.ingest(tenant, "traces", []))
+			assert.strictEqual(inserts, 0)
+		}).pipe(Effect.provide(layer))
+	})
+
+	it.effect("maps a failed insert to WarehouseQueryError", () => {
+		__testables.setClientFactory(() => ({
+			sql: async () => ({ data: [] }),
+			insert: async () => {
+				throw new Error("HTTP 400 Bad Request: DB::Exception: Syntax error")
+			},
+		}))
+
+		const { url } = createTempDbUrl()
+		const layer = buildLayer(url)
+		const tenant = makeTenant()
+
+		return Effect.gen(function* () {
+			const exit = yield* Effect.exit(
+				WarehouseQueryService.use((service) =>
+					service.ingest(tenant, "traces", [{ trace_id: "a" }]),
+				),
+			)
+
+			assert.isTrue(Exit.isFailure(exit))
+			const failure = getError(exit)
+			assert.instanceOf(failure, WarehouseQueryError)
+		}).pipe(Effect.provide(layer))
+	})
+})
+
+describe("WarehouseUpstreamError surfaces transient classification", () => {
+	it("carries upstreamStatus on 503", () => {
 		// Sanity check that the constructor flow we depend on for retry is intact.
-		const err = new WarehouseQueryError({
+		const err = new WarehouseUpstreamError({
 			pipe: "test",
 			message: "upstream",
-			category: "upstream",
 			upstreamStatus: 503,
 		})
-		assert.strictEqual(err.category, "upstream")
+		assert.strictEqual(err.upstreamStatus, 503)
 	})
 })
