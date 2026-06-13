@@ -9,8 +9,10 @@ import {
 	DialogTrigger,
 } from "@maple/ui/components/ui/dialog"
 import { Button } from "@maple/ui/components/ui/button"
+import { Kbd } from "@maple/ui/components/ui/kbd"
 import { MagnifierIcon } from "@/components/icons"
 import { WhereClauseEditor } from "@/components/query-builder/where-clause-editor"
+import { useAppHotkey } from "@/hooks/use-app-hotkey"
 
 interface AdvancedFilterDialogProps {
 	initialValue: string
@@ -27,24 +29,14 @@ export function AdvancedFilterDialog({ initialValue, onApply }: AdvancedFilterDi
 		}
 	}, [open, initialValue])
 
-	React.useEffect(() => {
-		const handleKeyDown = (e: KeyboardEvent) => {
-			// Open with 'f' if not typing in an input
-			if (
-				e.key.toLowerCase() === "f" &&
-				!e.ctrlKey &&
-				!e.metaKey &&
-				!e.altKey &&
-				e.target instanceof Element &&
-				!["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName) &&
-				!(e.target as HTMLElement).isContentEditable
-			) {
-				e.preventDefault()
-				setOpen(true)
-			}
+	useAppHotkey("filter.advanced", () => setOpen(true))
 
-			// Cmd+Enter to apply when modal is open
-			if (open && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+	// Cmd+Enter to apply when the modal is open — form-scoped, so it stays a
+	// plain listener instead of a registry shortcut.
+	React.useEffect(() => {
+		if (!open) return
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault()
 				onApply(value)
 				setOpen(false)
@@ -71,14 +63,16 @@ export function AdvancedFilterDialog({ initialValue, onApply }: AdvancedFilterDi
 		<Dialog open={open} onOpenChange={setOpen}>
 			<DialogTrigger
 				render={
-					<Button variant={hasActiveFilter ? "secondary" : "outline"} className="gap-2">
+					<Button
+						variant={hasActiveFilter ? "secondary" : "outline"}
+						className="gap-2"
+						data-shortcut-focus="search"
+					>
 						<MagnifierIcon
 							className={hasActiveFilter ? "text-primary" : "text-muted-foreground"}
 						/>
 						<span>Advanced Filter</span>
-						<kbd className="pointer-events-none inline-flex h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground opacity-100">
-							F
-						</kbd>
+						<Kbd>F</Kbd>
 					</Button>
 				}
 			/>

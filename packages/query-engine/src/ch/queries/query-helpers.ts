@@ -93,6 +93,7 @@ interface TracesMatchModes {
 	serviceName?: "contains"
 	spanName?: "contains"
 	deploymentEnv?: "contains"
+	serviceNamespace?: "contains"
 }
 
 export interface TracesBaseWhereOpts {
@@ -101,6 +102,7 @@ export interface TracesBaseWhereOpts {
 	rootOnly?: boolean
 	errorsOnly?: boolean
 	environments?: readonly string[]
+	namespaces?: readonly string[]
 	commitShas?: readonly string[]
 	attributeFilters?: readonly AttributeFilter[]
 	resourceAttributeFilters?: readonly AttributeFilter[]
@@ -110,6 +112,7 @@ export interface TracesBaseWhereOpts {
 	excludedServiceNames?: readonly string[]
 	excludedSpanNames?: readonly string[]
 	excludedEnvironments?: readonly string[]
+	excludedNamespaces?: readonly string[]
 }
 
 /**
@@ -162,6 +165,18 @@ export function tracesBaseWhereConditions(
 			conditions.push(CH.inList($.ResourceAttributes.get("deployment.environment"), opts.environments))
 		}
 	}
+	if (opts.namespaces?.length) {
+		if (mm?.serviceNamespace === "contains" && opts.namespaces.length === 1) {
+			conditions.push(
+				CH.positionCaseInsensitive(
+					$.ResourceAttributes.get("service.namespace"),
+					CH.lit(opts.namespaces[0]),
+				).gt(0),
+			)
+		} else {
+			conditions.push(CH.inList($.ResourceAttributes.get("service.namespace"), opts.namespaces))
+		}
+	}
 	if (opts.commitShas?.length) {
 		conditions.push(CH.inList($.ResourceAttributes.get("deployment.commit_sha"), opts.commitShas))
 	}
@@ -185,6 +200,9 @@ export function tracesBaseWhereConditions(
 		conditions.push(
 			CH.notInList($.ResourceAttributes.get("deployment.environment"), opts.excludedEnvironments),
 		)
+	}
+	if (opts.excludedNamespaces?.length) {
+		conditions.push(CH.notInList($.ResourceAttributes.get("service.namespace"), opts.excludedNamespaces))
 	}
 
 	return conditions
@@ -254,6 +272,13 @@ export function serviceOverviewWhereConditions(
 			conditions.push(CH.inList($.DeploymentEnv, opts.environments))
 		}
 	}
+	if (opts.namespaces?.length) {
+		if (mm?.serviceNamespace === "contains" && opts.namespaces.length === 1) {
+			conditions.push(CH.positionCaseInsensitive($.ServiceNamespace, CH.lit(opts.namespaces[0])).gt(0))
+		} else {
+			conditions.push(CH.inList($.ServiceNamespace, opts.namespaces))
+		}
+	}
 	if (opts.commitShas?.length) {
 		conditions.push(CH.inList($.CommitSha, opts.commitShas))
 	}
@@ -262,6 +287,9 @@ export function serviceOverviewWhereConditions(
 	}
 	if (opts.excludedEnvironments?.length) {
 		conditions.push(CH.notInList($.DeploymentEnv, opts.excludedEnvironments))
+	}
+	if (opts.excludedNamespaces?.length) {
+		conditions.push(CH.notInList($.ServiceNamespace, opts.excludedNamespaces))
 	}
 
 	return conditions
@@ -296,6 +324,7 @@ export function canUseTracesAggregatesMv(
 	if (opts.attributeFilters?.length) return false
 	if (opts.resourceAttributeFilters?.length) return false
 	if (opts.commitShas?.length) return false // MV doesn't carry CommitSha
+	if (opts.namespaces?.length || opts.excludedNamespaces?.length) return false // MV doesn't carry ServiceNamespace
 	if (opts.minDurationMs != null || opts.maxDurationMs != null) return false
 	if (groupBy) {
 		for (const g of groupBy) {

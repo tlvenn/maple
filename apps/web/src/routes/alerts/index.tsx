@@ -2,11 +2,12 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 import { Result, useAtomSet, useAtomValue } from "@/lib/effect-atom"
 import { effectRoute } from "@effect-router/core"
 import { Exit, Option, Schema } from "effect"
-import { useState, useMemo } from "react"
+import { Fragment, useState, useMemo } from "react"
 import { toast } from "sonner"
 
 import { DestinationDialog } from "@/components/alerts/destination-dialog"
 import { DestinationCard } from "@/components/alerts/destination-card"
+import { ProviderLogo } from "@/components/alerts/destination-provider"
 import { AlertStatusBadge } from "@/components/alerts/alert-status-badge"
 import { AlertSeverityBadge } from "@/components/alerts/alert-severity-badge"
 import { AlertStatCard, AlertFiringHero } from "@/components/alerts/alert-stat-card"
@@ -23,9 +24,12 @@ import {
 	type DestinationFormState,
 	signalLabels,
 	comparatorLabels,
-	destinationTypeLabels,
 	formatSignalValue,
 	formatAlertDateTime,
+	formatAlertTime,
+	eventTypeMeta,
+	deliveryStatusMeta,
+	groupDeliveryEventsByDay,
 	getExitErrorMessage,
 	defaultDestinationForm,
 	destinationToFormState,
@@ -38,7 +42,6 @@ import {
 	CircleWarningIcon,
 	FireIcon,
 	MagnifierIcon,
-	PaperPlaneIcon,
 	PlusIcon,
 	TruckIcon,
 	XmarkIcon,
@@ -107,6 +110,48 @@ function SignalBadge({ signalType }: { signalType: string }) {
 		<Badge variant="outline" className={cn("text-xs", signalBadgeClass[signalType])}>
 			{signalLabels[signalType as keyof typeof signalLabels] ?? signalType}
 		</Badge>
+	)
+}
+
+/**
+ * Notify cell. Shows the real provider marks a rule routes to (joined from the
+ * already-loaded destinations) instead of an opaque count. An enabled rule with
+ * no destination is surfaced as a warning — it can page no one.
+ */
+function NotifyChannels({ destinations, enabled }: { destinations: AlertDestination[]; enabled: boolean }) {
+	if (destinations.length === 0) {
+		if (!enabled) return <span className="text-muted-foreground text-xs">No channel</span>
+		return (
+			<Tooltip>
+				<TooltipTrigger
+					render={
+						<span className="inline-flex cursor-default items-center gap-1 text-warning text-xs" />
+					}
+				>
+					<CircleWarningIcon size={12} />
+					No channel
+				</TooltipTrigger>
+				<TooltipContent>Enabled but routed nowhere — this rule can notify no one.</TooltipContent>
+			</Tooltip>
+		)
+	}
+
+	const shown = destinations.slice(0, 3)
+	const extra = destinations.length - shown.length
+	return (
+		<Tooltip>
+			<TooltipTrigger render={<span className="inline-flex cursor-default items-center gap-1.5" />}>
+				<span className="flex items-center gap-1">
+					{shown.map((d) => (
+						<ProviderLogo key={d.id} type={d.type} size={28} bare className="flex items-center" />
+					))}
+				</span>
+				{extra > 0 && (
+					<span className="text-muted-foreground text-xs tabular-nums">+{extra}</span>
+				)}
+			</TooltipTrigger>
+			<TooltipContent>{destinations.map((d) => d.name).join(", ")}</TooltipContent>
+		</Tooltip>
 	)
 }
 
@@ -271,14 +316,19 @@ function MonitorTab({
 				</div>
 			)}
 
-			{/* Recent Activity — compact Table */}
+			{/* Recent Activity — compact, rule-centric preview of the full delivery log */}
 			{deliveryEvents.length > 0 && (
 				<div className="space-y-3">
-					<h2 className="text-lg font-semibold">Recent activity</h2>
+					<div>
+						<h2 className="text-lg font-semibold">Recent activity</h2>
+						<p className="text-muted-foreground text-sm">
+							Latest notification attempts. Full history in the Settings tab.
+						</p>
+					</div>
 					<Table>
 						<TableHeader>
 							<TableRow>
-								<TableHead className="w-[110px]">Event</TableHead>
+								<TableHead className="w-[120px]">Event</TableHead>
 								<TableHead>Rule</TableHead>
 								<TableHead>Destination</TableHead>
 								<TableHead className="w-[140px]">When</TableHead>
@@ -287,30 +337,7 @@ function MonitorTab({
 						<TableBody>
 							{deliveryEvents.slice(0, 10).map((event) => {
 								const rule = rulesById.get(event.ruleId)
-								const toneClass =
-									event.eventType === "trigger"
-										? "text-destructive"
-										: event.eventType === "resolve"
-											? "text-emerald-500"
-											: event.eventType === "renotify"
-												? "text-amber-500"
-												: "text-muted-foreground"
-								const dotClass =
-									event.eventType === "trigger"
-										? "bg-destructive"
-										: event.eventType === "resolve"
-											? "bg-emerald-500"
-											: event.eventType === "renotify"
-												? "bg-amber-500"
-												: "bg-muted-foreground"
-								const label =
-									event.eventType === "trigger"
-										? "Triggered"
-										: event.eventType === "resolve"
-											? "Resolved"
-											: event.eventType === "renotify"
-												? "Renotify"
-												: "Test"
+								const ev = eventTypeMeta[event.eventType]
 
 								return (
 									<TableRow key={event.id}>
@@ -318,19 +345,19 @@ function MonitorTab({
 											<span
 												className={cn(
 													"flex items-center gap-1.5 text-xs font-medium",
-													toneClass,
+													ev.text,
 												)}
 											>
-												<span className={cn("size-1.5 rounded-full", dotClass)} />
-												{label}
+												<span className={cn("size-1.5 rounded-full", ev.dot)} />
+												{ev.label}
 											</span>
 										</TableCell>
-										<TableCell className="truncate">
+										<TableCell className="max-w-0">
 											{rule ? (
 												<Link
 													to="/alerts/$ruleId"
 													params={{ ruleId: rule.id }}
-													className="hover:underline"
+													className="block truncate font-medium hover:underline"
 												>
 													{rule.name}
 												</Link>
@@ -338,14 +365,41 @@ function MonitorTab({
 												<span className="text-muted-foreground">–</span>
 											)}
 										</TableCell>
-										<TableCell className="text-muted-foreground">
-											{event.destinationName}
-											<span className="ml-1 text-xs">
-												· {destinationTypeLabels[event.destinationType]}
+										<TableCell>
+											<span className="flex min-w-0 items-center gap-2">
+												<ProviderLogo
+													type={event.destinationType}
+													size={32}
+													bare
+													className="flex shrink-0 items-center"
+												/>
+												<span className="truncate text-muted-foreground">
+													{event.destinationName}
+												</span>
+												{event.status === "failed" ? (
+													<span className="shrink-0 text-destructive text-xs font-medium">
+														Failed
+													</span>
+												) : event.status === "queued" || event.status === "processing" ? (
+													<span className="shrink-0 text-muted-foreground/70 text-xs">
+														Pending
+													</span>
+												) : null}
 											</span>
 										</TableCell>
 										<TableCell className="text-muted-foreground tabular-nums">
-											{event.scheduledAt ? formatRelativeTime(event.scheduledAt) : "—"}
+											{event.scheduledAt ? (
+												<Tooltip>
+													<TooltipTrigger render={<span />} className="cursor-default">
+														{formatRelativeTime(event.scheduledAt)}
+													</TooltipTrigger>
+													<TooltipContent>
+														{formatAlertDateTime(event.scheduledAt)}
+													</TooltipContent>
+												</Tooltip>
+											) : (
+												"—"
+											)}
 										</TableCell>
 									</TableRow>
 								)
@@ -416,6 +470,7 @@ function AlertsPage() {
 	const deliveryEvents = Result.builder(deliveryEventsResult)
 		.onSuccess((response) => [...response.events] as AlertDeliveryEvent[])
 		.orElse(() => [])
+	const deliveryEventGroups = useMemo(() => groupDeliveryEventsByDay(deliveryEvents), [deliveryEvents])
 
 	const isAdmin = Result.builder(sessionResult)
 		.onSuccess((session) => session.roles.some((role) => role === "root" || role === "org:admin"))
@@ -574,6 +629,13 @@ function AlertsPage() {
 		}
 		return result
 	}, [rules, searchQuery, creatorFilter])
+
+	// Resolve each rule's destination IDs against the destinations already loaded
+	// for the page — no extra query — so the Notify column can show real channels.
+	const destinationsById = useMemo(
+		() => new Map(destinations.map((d) => [d.id, d])),
+		[destinations],
+	)
 
 	const tabBar = (
 		<Tabs value={activeTab} onValueChange={(v) => handleTabSelect(v as AlertsTab)}>
@@ -756,7 +818,7 @@ function AlertsPage() {
 											<TableHead className="w-[160px]">Scope</TableHead>
 											<TableHead className="w-[180px]">Condition</TableHead>
 											<TableHead className="w-[100px]">Severity</TableHead>
-											<TableHead className="w-[70px]">Notify</TableHead>
+											<TableHead className="w-[110px]">Notify</TableHead>
 											<TableHead className="w-[100px]">Status</TableHead>
 										</TableRow>
 									</TableHeader>
@@ -767,6 +829,11 @@ function AlertsPage() {
 												: firingRuleIds.has(rule.id)
 													? "firing"
 													: "ok"
+											// Dedupe by id: a rule that lists the same destination twice
+											// still notifies it once, so show one mark (and keep React keys unique).
+											const ruleDestinations = [...new Set(rule.destinationIds)]
+												.map((id) => destinationsById.get(id))
+												.filter((d): d is AlertDestination => d != null)
 
 											return (
 												<TableRow
@@ -844,11 +911,11 @@ function AlertsPage() {
 													<TableCell>
 														<AlertSeverityBadge severity={rule.severity} />
 													</TableCell>
-													<TableCell>
-														<span className="flex items-center gap-1 text-xs text-muted-foreground">
-															{rule.destinationIds.length}
-															<PaperPlaneIcon size={12} />
-														</span>
+													<TableCell onClick={(e) => e.stopPropagation()}>
+														<NotifyChannels
+															destinations={ruleDestinations}
+															enabled={rule.enabled}
+														/>
 													</TableCell>
 													<TableCell>
 														<div className="flex items-center gap-1.5">
@@ -992,69 +1059,108 @@ function AlertsPage() {
 									<Table>
 										<TableHeader>
 											<TableRow>
-												<TableHead>Destination</TableHead>
-												<TableHead>Event</TableHead>
-												<TableHead>Status</TableHead>
-												<TableHead>Attempt</TableHead>
-												<TableHead>Scheduled</TableHead>
-												<TableHead>Result</TableHead>
+												<TableHead className="w-[150px]">Status</TableHead>
+												<TableHead className="w-[128px]">Event</TableHead>
+												<TableHead className="w-[240px]">Destination</TableHead>
+												<TableHead>Detail</TableHead>
+												<TableHead className="w-[88px] text-right">Time</TableHead>
 											</TableRow>
 										</TableHeader>
 										<TableBody>
-											{deliveryEvents.map((event) => (
-												<TableRow key={event.id}>
-													<TableCell>
-														<div className="flex flex-col">
-															<span className="font-medium">
-																{event.destinationName}
-															</span>
-															<span className="text-muted-foreground text-xs">
-																{destinationTypeLabels[event.destinationType]}
-															</span>
-														</div>
-													</TableCell>
-													<TableCell className="capitalize">
-														{event.eventType}
-													</TableCell>
-													<TableCell>
-														<Badge
-															variant={
-																event.status === "success"
-																	? "secondary"
-																	: event.status === "failed"
-																		? "destructive"
-																		: "outline"
-															}
+											{deliveryEventGroups.map((group) => (
+												<Fragment key={group.key}>
+													<TableRow>
+														<TableCell
+															colSpan={5}
+															className="bg-muted/30 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
 														>
-															{event.status}
-														</Badge>
-													</TableCell>
-													<TableCell className="tabular-nums">
-														{event.attemptNumber}
-													</TableCell>
-													<TableCell>
-														<div className="flex flex-col">
-															<span>
-																{formatAlertDateTime(event.scheduledAt)}
+															<span className="flex items-center gap-2">
+																{group.label}
+																<span className="tracking-normal normal-case text-muted-foreground/55">
+																	{group.events.length}{" "}
+																	{group.events.length === 1 ? "attempt" : "attempts"}
+																</span>
 															</span>
-															<span className="text-muted-foreground text-xs">
-																{formatRelativeTime(event.scheduledAt)}
-															</span>
-														</div>
-													</TableCell>
-													<TableCell className="max-w-[320px]">
-														<div className="text-sm truncate">
-															{event.providerMessage ??
-																event.errorMessage ??
-																"Queued"}
-														</div>
-														{event.providerReference && (
-															<div className="text-muted-foreground truncate text-xs">
-																Ref: {event.providerReference}
-															</div>
-														)}
-													</TableCell>
-												</TableRow>
+														</TableCell>
+													</TableRow>
+													{group.events.map((event) => {
+														const ev = eventTypeMeta[event.eventType]
+														const status = deliveryStatusMeta[event.status]
+														return (
+															<TableRow key={event.id}>
+																<TableCell>
+																	<span className="flex items-center gap-1.5">
+																		<Badge variant={status.variant} size="sm">
+																			{status.label}
+																		</Badge>
+																		{event.attemptNumber > 1 && (
+																			<span
+																				className="text-warning tabular-nums text-[11px]"
+																				title={`Attempt ${event.attemptNumber}`}
+																			>
+																				↻{event.attemptNumber}
+																			</span>
+																		)}
+																	</span>
+																</TableCell>
+																<TableCell>
+																	<span
+																		className={cn(
+																			"flex items-center gap-1.5 text-xs font-medium",
+																			ev.text,
+																		)}
+																	>
+																		<span className={cn("size-1.5 rounded-full", ev.dot)} />
+																		{ev.label}
+																	</span>
+																</TableCell>
+																<TableCell>
+																	<span className="flex items-center gap-2">
+																		<ProviderLogo
+																			type={event.destinationType}
+																			size={32}
+																			bare
+																			className="flex shrink-0 items-center"
+																		/>
+																		<span className="truncate font-medium">
+																			{event.destinationName}
+																		</span>
+																	</span>
+																</TableCell>
+																<TableCell className="max-w-0">
+																	{event.status === "failed" ? (
+																		<span className="block truncate text-xs text-destructive/90">
+																			{event.errorMessage ?? "Delivery failed"}
+																			{event.responseCode != null && (
+																				<span className="text-muted-foreground">
+																					{" · "}
+																					{event.responseCode}
+																				</span>
+																			)}
+																		</span>
+																	) : event.providerReference ? (
+																		<span className="block truncate text-xs text-muted-foreground">
+																			{event.providerReference}
+																		</span>
+																	) : null}
+																</TableCell>
+																<TableCell className="text-right">
+																	<Tooltip>
+																		<TooltipTrigger
+																			render={<span />}
+																			className="cursor-default text-muted-foreground tabular-nums"
+																		>
+																			{formatAlertTime(event.scheduledAt)}
+																		</TooltipTrigger>
+																		<TooltipContent>
+																			{formatAlertDateTime(event.scheduledAt)}
+																		</TooltipContent>
+																	</Tooltip>
+																</TableCell>
+															</TableRow>
+														)
+													})}
+												</Fragment>
 											))}
 										</TableBody>
 									</Table>

@@ -17,6 +17,7 @@ import { highlightCode } from "@/lib/sugar-high"
 import { isClerkAuthEnabled } from "@/lib/services/common/auth-mode"
 import type { RouterAuthContext } from "@/router"
 import { captureChatReferrer } from "@/components/chat/auto-contexts"
+import { GlobalShortcuts } from "@/components/command-palette/global-shortcuts"
 
 const PUBLIC_PATHS = new Set(["/sign-in", "/sign-up", "/org-required", "/service-map-bench"])
 
@@ -56,6 +57,7 @@ function AppFrame() {
 		<AttributesProvider notifyCopied={notifyCopied} highlightJson={highlightCode}>
 			<Outlet />
 			<Toaster />
+			{!PUBLIC_PATHS.has(pathname) && <GlobalShortcuts />}
 		</AttributesProvider>
 	)
 }

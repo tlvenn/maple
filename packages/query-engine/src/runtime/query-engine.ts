@@ -761,6 +761,7 @@ function extractTracesOpts(filters: Record<string, unknown> | undefined) {
 		rootOnly: filters?.rootSpansOnly as boolean | undefined,
 		errorsOnly: filters?.errorsOnly as boolean | undefined,
 		environments: filters?.environments as string[] | undefined,
+		namespaces: filters?.namespaces as string[] | undefined,
 		commitShas: filters?.commitShas as string[] | undefined,
 		minDurationMs: filters?.minDurationMs as number | undefined,
 		maxDurationMs: filters?.maxDurationMs as number | undefined,
@@ -769,6 +770,7 @@ function extractTracesOpts(filters: Record<string, unknown> | undefined) {
 					serviceName?: "contains"
 					spanName?: "contains"
 					deploymentEnv?: "contains"
+					serviceNamespace?: "contains"
 			  }
 			| undefined,
 		attributeFilters: filters?.attributeFilters as AttrFilterArray | undefined,
@@ -777,6 +779,7 @@ function extractTracesOpts(filters: Record<string, unknown> | undefined) {
 		excludedServiceNames: filters?.excludedServiceNames as readonly string[] | undefined,
 		excludedSpanNames: filters?.excludedSpanNames as readonly string[] | undefined,
 		excludedEnvironments: filters?.excludedEnvironments as readonly string[] | undefined,
+		excludedNamespaces: filters?.excludedNamespaces as readonly string[] | undefined,
 	}
 }
 
@@ -794,6 +797,7 @@ function extractTracesFacetsOpts(filters: Record<string, unknown> | undefined): 
 	const customRes = resFilters[0]
 
 	const envs = filters?.environments as string[] | undefined
+	const namespaces = filters?.namespaces as string[] | undefined
 
 	return {
 		serviceName: filters?.serviceName as string | undefined,
@@ -804,6 +808,7 @@ function extractTracesFacetsOpts(filters: Record<string, unknown> | undefined): 
 		httpMethod: httpMethodFilter?.value,
 		httpStatusCode: httpStatusFilter?.value,
 		deploymentEnv: envs?.[0],
+		namespace: namespaces?.[0],
 		matchModes: filters?.matchModes as CH.TracesFacetsOpts["matchModes"],
 		attributeFilterKey: customAttr?.key,
 		attributeFilterValue: customAttr?.value,
@@ -812,6 +817,21 @@ function extractTracesFacetsOpts(filters: Record<string, unknown> | undefined): 
 		resourceFilterValue: customRes?.value,
 		resourceFilterValueMatchMode: customRes?.mode === "contains" ? "contains" : undefined,
 	}
+}
+
+/**
+ * Combine the deployment-env and service-namespace `contains` match modes into
+ * the single `matchModes` object the logs queries expect.
+ */
+function logsMatchModes(
+	filters: Record<string, unknown> | undefined,
+): { deploymentEnv?: "contains"; serviceNamespace?: "contains" } | undefined {
+	const deploymentEnv = filters?.deploymentEnvMatchMode as "contains" | undefined
+	const serviceNamespace = filters?.namespaceMatchMode as "contains" | undefined
+	return Match.value([deploymentEnv, serviceNamespace] as const).pipe(
+		Match.when([undefined, undefined], () => undefined),
+		Match.orElse(([deploymentEnv, serviceNamespace]) => ({ deploymentEnv, serviceNamespace })),
+	)
 }
 
 function extractTracesDurationStatsOpts(
@@ -827,6 +847,7 @@ function extractTracesDurationStatsOpts(
 		httpMethod: facetsOpts.httpMethod,
 		httpStatusCode: facetsOpts.httpStatusCode,
 		deploymentEnv: facetsOpts.deploymentEnv,
+		namespace: facetsOpts.namespace,
 		matchModes: facetsOpts.matchModes,
 	}
 }
@@ -984,9 +1005,8 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 					serviceName: request.query.filters?.serviceName,
 					severity: request.query.filters?.severity,
 					environments: request.query.filters?.environments,
-					matchModes: request.query.filters?.deploymentEnvMatchMode
-						? { deploymentEnv: request.query.filters.deploymentEnvMatchMode }
-						: undefined,
+					namespaces: request.query.filters?.namespaces,
+					matchModes: logsMatchModes(request.query.filters),
 					groupBy: request.query.groupBy as string[] | undefined,
 					bucketSeconds: bucketSeconds!,
 				}),
@@ -1157,9 +1177,8 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 					serviceName: request.query.filters?.serviceName,
 					severity: request.query.filters?.severity,
 					environments: request.query.filters?.environments,
-					matchModes: request.query.filters?.deploymentEnvMatchMode
-						? { deploymentEnv: request.query.filters.deploymentEnvMatchMode }
-						: undefined,
+					namespaces: request.query.filters?.namespaces,
+					matchModes: logsMatchModes(request.query.filters),
 					limit: request.query.limit,
 				}),
 				{ orgId: tenant.orgId, startTime: request.startTime, endTime: request.endTime },
@@ -1321,7 +1340,6 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 
 			if (request.query.source === "logs") {
 				const filters = request.query.filters as Record<string, unknown> | undefined
-				const envMatchMode = filters?.deploymentEnvMatchMode as "contains" | undefined
 				const rows = yield* executeCHUnionQuery(
 					warehouse,
 					tenant,
@@ -1329,7 +1347,8 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 						serviceName: filters?.serviceName as string | undefined,
 						severity: filters?.severity as string | undefined,
 						environments: filters?.environments as readonly string[] | undefined,
-						matchModes: envMatchMode ? { deploymentEnv: envMatchMode } : undefined,
+						namespaces: filters?.namespaces as readonly string[] | undefined,
+						matchModes: logsMatchModes(filters),
 					}),
 					baseParams,
 					"logsFacets",
@@ -1346,7 +1365,9 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 									? row.severityText
 									: row.facetType === "deploymentEnv"
 										? row.deploymentEnv
-										: row.serviceName,
+										: row.facetType === "namespace"
+											? row.namespace
+											: row.serviceName,
 							count: Number(row.count),
 						})),
 					},
@@ -1470,7 +1491,6 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 		// ---- Count ----
 		if (request.query.source === "logs" && request.query.kind === "count") {
 			const filters = request.query.filters as Record<string, unknown> | undefined
-			const envMatchMode = filters?.deploymentEnvMatchMode as "contains" | undefined
 			const rows = yield* executeCHQuery(
 				warehouse,
 				tenant,
@@ -1480,7 +1500,8 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 					traceId: filters?.traceId as string | undefined,
 					search: filters?.search as string | undefined,
 					environments: filters?.environments as readonly string[] | undefined,
-					matchModes: envMatchMode ? { deploymentEnv: envMatchMode } : undefined,
+					namespaces: filters?.namespaces as readonly string[] | undefined,
+					matchModes: logsMatchModes(filters),
 				}),
 				{ orgId: tenant.orgId, startTime: request.startTime, endTime: request.endTime },
 				"logsCount",
@@ -1615,9 +1636,8 @@ export const computeEvaluateBuckets = Effect.fnUntraced(function* <T extends Que
 				serviceName: query.filters?.serviceName,
 				severity: query.filters?.severity,
 				environments: query.filters?.environments,
-				matchModes: query.filters?.deploymentEnvMatchMode
-					? { deploymentEnv: query.filters.deploymentEnvMatchMode }
-					: undefined,
+				namespaces: query.filters?.namespaces,
+				matchModes: logsMatchModes(query.filters),
 				groupBy: query.groupBy as readonly string[] | undefined,
 				bucketSeconds,
 			}),
@@ -1777,9 +1797,8 @@ export const makeQueryEngineEvaluate = <T extends QueryTenant>(warehouse: QueryE
 					serviceName: request.query.filters?.serviceName,
 					severity: request.query.filters?.severity,
 					environments: request.query.filters?.environments,
-					matchModes: request.query.filters?.deploymentEnvMatchMode
-						? { deploymentEnv: request.query.filters.deploymentEnvMatchMode }
-						: undefined,
+					namespaces: request.query.filters?.namespaces,
+					matchModes: logsMatchModes(request.query.filters),
 					groupBy: logsQuery.groupBy as readonly string[] | undefined,
 					bucketSeconds,
 				}),

@@ -44,10 +44,15 @@ import {
 	WorkloadDetailSummaryResponse,
 	WorkloadInfraTimeseriesResponse,
 	WorkloadFacetsResponse,
+	CommitSha,
+	FingerprintHash,
+	ServiceName,
+	SpanName,
+	StatusCode,
 	TraceId,
 	SpanId,
 } from "@maple/domain/http"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Match, Option, Schema } from "effect"
 import { QueryEngineService } from "../services/QueryEngineService"
 import { RawSqlChartService } from "@maple/query-engine/runtime"
 import { WarehouseQueryService } from "../lib/WarehouseQueryService"
@@ -65,6 +70,16 @@ const mapExecError = <A, E, R>(
 
 const decodeTraceId = Schema.decodeSync(TraceId)
 const decodeSpanId = Schema.decodeSync(SpanId)
+const decodeServiceName = Schema.decodeUnknownSync(ServiceName)
+const decodeSpanName = Schema.decodeUnknownSync(SpanName)
+const decodeFingerprintHash = Schema.decodeUnknownSync(FingerprintHash)
+const decodeCommitSha = Schema.decodeUnknownSync(CommitSha)
+
+// Warehouse stores span status in Title Case (Ok/Error/Unset). Coerce any
+// unexpected/empty value to "Unset" rather than throwing during response build.
+const decodeStatusCodeOption = Schema.decodeUnknownOption(StatusCode)
+const coerceStatusCode = (value: string): StatusCode =>
+	Option.getOrElse(decodeStatusCodeOption(value), () => "Unset" as const)
 
 // Build a ±1h partition-pruning window around a ClickHouse datetime string
 // (`YYYY-MM-DD HH:mm:ss[.ffffff]`). Sub-second precision is irrelevant for the
@@ -118,6 +133,9 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 						...row,
 						traceId: decodeTraceId(row.traceId),
 						spanId: decodeSpanId(row.spanId),
+						spanName: decodeSpanName(row.spanName),
+						serviceName: decodeServiceName(row.serviceName),
+						statusCode: coerceStatusCode(row.statusCode),
 					}))
 					return new SpanHierarchyResponse({ data: typedRows })
 				}),
@@ -184,7 +202,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 					const typedRows = rows
 					return new ErrorsByTypeResponse({
 						data: typedRows.map((row) => ({
-							fingerprintHash: row.fingerprintHash,
+							fingerprintHash: decodeFingerprintHash(row.fingerprintHash),
 							errorLabel: row.errorLabel,
 							sampleMessage: row.sampleMessage,
 							count: Number(row.count),
@@ -284,7 +302,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 							startTime: String(row.startTime),
 							durationMicros: Number(row.durationMicros),
 							spanCount: Number(row.spanCount),
-							services: row.services,
+							services: row.services.map((service) => decodeServiceName(service)),
 							rootSpanName: row.rootSpanName,
 							errorMessage: row.errorMessage,
 						})),
@@ -309,7 +327,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 					const typedRows = rows
 					return new ErrorRateByServiceResponse({
 						data: typedRows.map((row) => ({
-							serviceName: row.serviceName,
+							serviceName: decodeServiceName(row.serviceName),
 							totalLogs: Number(row.totalLogs),
 							errorLogs: Number(row.errorLogs),
 							errorRate: Number(row.errorRate),
@@ -323,6 +341,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 					const compiled = CH.compile(
 						CH.serviceOverviewQuery({
 							environments: payload.environments,
+							namespaces: payload.namespaces,
 							commitShas: payload.commitShas,
 						}),
 						{ orgId: tenant.orgId, startTime: payload.startTime, endTime: payload.endTime },
@@ -404,7 +423,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 					return new ServiceReleasesResponse({
 						data: typedRows.map((row) => ({
 							bucket: String(row.bucket),
-							commitSha: row.commitSha,
+							commitSha: decodeCommitSha(row.commitSha),
 							count: Number(row.count),
 						})),
 					})
@@ -642,7 +661,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 												? "web"
 												: "unknown"
 							return {
-								serviceName: String(row.serviceName ?? ""),
+								serviceName: decodeServiceName(String(row.serviceName ?? "")),
 								platform,
 								k8sCluster,
 								cloudPlatform,
@@ -674,7 +693,7 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 					)
 					return new ServiceWorkloadsResponse({
 						data: rows.map((row) => ({
-							serviceName: String(row.serviceName ?? ""),
+							serviceName: decodeServiceName(String(row.serviceName ?? "")),
 							workloadKind: row.workloadKind,
 							workloadName: String(row.workloadName ?? ""),
 							namespace: String(row.namespace ?? ""),
@@ -695,11 +714,22 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 			.handle("serviceUsage", ({ payload }) =>
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
-					const compiled = CH.compile(CH.serviceUsageQuery({ serviceName: payload.service }), {
-						orgId: tenant.orgId,
-						startTime: payload.startTime,
-						endTime: payload.endTime,
-					})
+					const prevStart = payload.previousStartTime
+					const prevEnd = payload.previousEndTime
+					const compiled =
+						prevStart != null && prevEnd != null
+							? CH.compile(CH.serviceUsageWithPreviousQuery({ serviceName: payload.service }), {
+									orgId: tenant.orgId,
+									startTime: payload.startTime,
+									endTime: payload.endTime,
+									previousStartTime: prevStart,
+									previousEndTime: prevEnd,
+								})
+							: CH.compile(CH.serviceUsageQuery({ serviceName: payload.service }), {
+									orgId: tenant.orgId,
+									startTime: payload.startTime,
+									endTime: payload.endTime,
+								})
 					const rows = yield* queryEngine.cachedDirect(
 						tenant,
 						"serviceUsage",
@@ -728,9 +758,17 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 							cursor: payload.cursor,
 							search: payload.search,
 							environments: payload.deploymentEnv ? [payload.deploymentEnv] : undefined,
-							matchModes: payload.deploymentEnvMatchMode
-								? { deploymentEnv: payload.deploymentEnvMatchMode }
-								: undefined,
+							namespaces: payload.namespace ? [payload.namespace] : undefined,
+							matchModes: Match.value([
+								payload.deploymentEnvMatchMode,
+								payload.namespaceMatchMode,
+							] as const).pipe(
+								Match.when([undefined, undefined], () => undefined),
+								Match.orElse(([deploymentEnv, serviceNamespace]) => ({
+									deploymentEnv,
+									serviceNamespace,
+								})),
+							),
 							limit: payload.limit,
 						}),
 						{ orgId: tenant.orgId, startTime: payload.startTime, endTime: payload.endTime },

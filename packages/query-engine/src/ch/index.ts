@@ -196,13 +196,10 @@ export {
 	type MetricsBreakdownOutput,
 	listMetricsQuery,
 	metricsSummaryQuery,
-	scrapeTargetChecksQuery,
 	type ListMetricsOpts,
 	type ListMetricsOutput,
 	type MetricsSummaryOpts,
 	type MetricsSummaryOutput,
-	type ScrapeTargetChecksOpts,
-	type ScrapeTargetChecksOutput,
 } from "./queries/metrics"
 
 // Queries — Logs
@@ -262,6 +259,7 @@ export {
 	serviceReleasesTimelineQuery,
 	serviceApdexTimeseriesQuery,
 	serviceUsageQuery,
+	serviceUsageWithPreviousQuery,
 	servicesFacetsQuery,
 	type ServiceOverviewOpts,
 	type ServiceOverviewOutput,
@@ -271,6 +269,7 @@ export {
 	type ServiceApdexTimeseriesOutput,
 	type ServiceUsageOpts,
 	type ServiceUsageOutput,
+	type ServiceUsageWithPreviousOutput,
 	type ServicesFacetsOutput,
 } from "./queries/services"
 

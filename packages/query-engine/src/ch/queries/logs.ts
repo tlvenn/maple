@@ -23,8 +23,10 @@ interface LogsQueryOpts {
 	spanId?: string
 	search?: string
 	environments?: readonly string[]
+	namespaces?: readonly string[]
 	matchModes?: {
 		deploymentEnv?: "contains"
+		serviceNamespace?: "contains"
 	}
 }
 
@@ -38,6 +40,18 @@ function environmentCondition(
 		return CH.positionCaseInsensitive(envAttr, CH.lit(opts.environments[0]!)).gt(0)
 	}
 	return CH.inList(envAttr, opts.environments)
+}
+
+function namespaceCondition(
+	$: ColumnAccessor<typeof Logs.columns>,
+	opts: LogsQueryOpts,
+): CH.Condition | undefined {
+	if (!opts.namespaces?.length) return undefined
+	const nsAttr = $.ResourceAttributes.get("service.namespace")
+	if (opts.matchModes?.serviceNamespace === "contains" && opts.namespaces.length === 1) {
+		return CH.positionCaseInsensitive(nsAttr, CH.lit(opts.namespaces[0]!)).gt(0)
+	}
+	return CH.inList(nsAttr, opts.namespaces)
 }
 
 // ---------------------------------------------------------------------------
@@ -78,9 +92,11 @@ export function canUseLogsAggregatesHourly(
 	}
 	if (opts.traceId) return false
 	if (opts.search) return false
-	// MV stores DeploymentEnv as a top-level column; the `contains` substring
-	// match is only supported via positionCaseInsensitive on the raw map column.
+	// MV stores DeploymentEnv / ServiceNamespace as top-level columns; the
+	// `contains` substring match is only supported via positionCaseInsensitive on
+	// the raw map column.
 	if (opts.matchModes?.deploymentEnv === "contains") return false
+	if (opts.matchModes?.serviceNamespace === "contains") return false
 	return true
 }
 
@@ -90,6 +106,14 @@ function mvEnvironmentCondition(
 ): CH.Condition | undefined {
 	if (!opts.environments?.length) return undefined
 	return CH.inList($.DeploymentEnv, opts.environments)
+}
+
+function mvNamespaceCondition(
+	$: ColumnAccessor<typeof LogsAggregatesHourly.columns>,
+	opts: LogsQueryOpts,
+): CH.Condition | undefined {
+	if (!opts.namespaces?.length) return undefined
+	return CH.inList($.ServiceNamespace, opts.namespaces)
 }
 
 export function logsTimeseriesQuery(
@@ -120,6 +144,7 @@ export function logsTimeseriesQuery(
 				CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
 				CH.when(opts.severity, (v: string) => $.SeverityText.eq(v)),
 				mvEnvironmentCondition($, opts),
+				mvNamespaceCondition($, opts),
 			])
 			.groupBy("bucket", "groupName")
 			.orderBy(["bucket", "asc"], ["groupName", "asc"])
@@ -144,6 +169,7 @@ export function logsTimeseriesQuery(
 			CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
 			CH.when(opts.severity, (v: string) => $.SeverityText.eq(v)),
 			environmentCondition($, opts),
+			namespaceCondition($, opts),
 		])
 		.groupBy("bucket", "groupName")
 		.orderBy(["bucket", "asc"], ["groupName", "asc"])
@@ -202,6 +228,7 @@ export function logsBreakdownQuery(opts: LogsBreakdownOpts) {
 			CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
 			CH.when(opts.severity, (v: string) => $.SeverityText.eq(v)),
 			environmentCondition($, opts),
+			namespaceCondition($, opts),
 		])
 		.groupBy("name")
 		.orderBy(["count", "desc"])
@@ -234,6 +261,7 @@ export function logsCountQuery(opts: LogsQueryOpts) {
 			CH.when(opts.spanId, (v: string) => $.SpanId.eq(v)),
 			CH.when(opts.search, (v: string) => $.Body.ilike(`%${v}%`)),
 			environmentCondition($, opts),
+			namespaceCondition($, opts),
 		])
 		.format("JSON")
 }
@@ -291,6 +319,7 @@ export function logsListQuery(opts: LogsListOpts) {
 		CH.when(opts.cursor, (v: string) => $.Timestamp.lt(v)),
 		CH.when(opts.search, (v: string) => $.Body.ilike(`%${v}%`)),
 		environmentCondition($, opts),
+		namespaceCondition($, opts),
 	]
 
 	// Stage 1: cheap scan — only `Timestamp` is read. Compiled with placeholders
@@ -407,6 +436,7 @@ export interface LogsFacetsOutput {
 	readonly severityText: string
 	readonly serviceName: string
 	readonly deploymentEnv: string
+	readonly namespace: string
 	readonly count: number
 	readonly facetType: string
 }
@@ -418,7 +448,7 @@ export function logsFacetsQuery(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOut
 	// exception is the `contains` env match mode, which needs a substring scan on
 	// the raw map column — fall back to raw `logs` there (mirrors the
 	// `canUseLogsAggregatesHourly` guard used by the timeseries query).
-	if (opts.matchModes?.deploymentEnv === "contains") {
+	if (opts.matchModes?.deploymentEnv === "contains" || opts.matchModes?.serviceNamespace === "contains") {
 		return logsFacetsQueryFromRaw(opts)
 	}
 	return logsFacetsQueryFromMv(opts)
@@ -434,6 +464,7 @@ function logsFacetsQueryFromMv(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOutp
 		CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
 		CH.when(opts.severity, (v: string) => $.SeverityText.eq(v)),
 		opts.environments?.length ? CH.inList($.DeploymentEnv, opts.environments) : undefined,
+		mvNamespaceCondition($, opts),
 	]
 
 	const severityQuery = from(LogsAggregatesHourly)
@@ -441,6 +472,7 @@ function logsFacetsQueryFromMv(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOutp
 			severityText: $.SeverityText,
 			serviceName: CH.lit(""),
 			deploymentEnv: CH.lit(""),
+			namespace: CH.lit(""),
 			count: CH.sum($.Count),
 			facetType: CH.lit("severity"),
 		}))
@@ -452,6 +484,7 @@ function logsFacetsQueryFromMv(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOutp
 			severityText: CH.lit(""),
 			serviceName: $.ServiceName,
 			deploymentEnv: CH.lit(""),
+			namespace: CH.lit(""),
 			count: CH.sum($.Count),
 			facetType: CH.lit("service"),
 		}))
@@ -463,13 +496,26 @@ function logsFacetsQueryFromMv(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOutp
 			severityText: CH.lit(""),
 			serviceName: CH.lit(""),
 			deploymentEnv: $.DeploymentEnv,
+			namespace: CH.lit(""),
 			count: CH.sum($.Count),
 			facetType: CH.lit("deploymentEnv"),
 		}))
 		.where(($) => [...baseWhere($), $.DeploymentEnv.neq("")])
 		.groupBy("deploymentEnv")
 
-	return unionAll(severityQuery, serviceQuery, envQuery)
+	const namespaceQuery = from(LogsAggregatesHourly)
+		.select(($) => ({
+			severityText: CH.lit(""),
+			serviceName: CH.lit(""),
+			deploymentEnv: CH.lit(""),
+			namespace: $.ServiceNamespace,
+			count: CH.sum($.Count),
+			facetType: CH.lit("namespace"),
+		}))
+		.where(($) => [...baseWhere($), $.ServiceNamespace.neq("")])
+		.groupBy("namespace")
+
+	return unionAll(severityQuery, serviceQuery, envQuery, namespaceQuery)
 		.orderBy(["count", "desc"])
 		.limit(500)
 		.format("JSON")
@@ -485,6 +531,7 @@ function logsFacetsQueryFromRaw(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOut
 		CH.when(opts.serviceName, (v: string) => $.ServiceName.eq(v)),
 		CH.when(opts.severity, (v: string) => $.SeverityText.eq(v)),
 		environmentCondition($, opts),
+		namespaceCondition($, opts),
 	]
 
 	const severityQuery = from(Logs)
@@ -492,6 +539,7 @@ function logsFacetsQueryFromRaw(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOut
 			severityText: $.SeverityText,
 			serviceName: CH.lit(""),
 			deploymentEnv: CH.lit(""),
+			namespace: CH.lit(""),
 			count: CH.count(),
 			facetType: CH.lit("severity"),
 		}))
@@ -503,6 +551,7 @@ function logsFacetsQueryFromRaw(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOut
 			severityText: CH.lit(""),
 			serviceName: $.ServiceName,
 			deploymentEnv: CH.lit(""),
+			namespace: CH.lit(""),
 			count: CH.count(),
 			facetType: CH.lit("service"),
 		}))
@@ -514,13 +563,26 @@ function logsFacetsQueryFromRaw(opts: LogsQueryOpts): CHUnionQuery<LogsFacetsOut
 			severityText: CH.lit(""),
 			serviceName: CH.lit(""),
 			deploymentEnv: $.ResourceAttributes.get("deployment.environment"),
+			namespace: CH.lit(""),
 			count: CH.count(),
 			facetType: CH.lit("deploymentEnv"),
 		}))
 		.where(($) => [...baseWhere($), $.ResourceAttributes.get("deployment.environment").neq("")])
 		.groupBy("deploymentEnv")
 
-	return unionAll(severityQuery, serviceQuery, envQuery)
+	const namespaceQuery = from(Logs)
+		.select(($) => ({
+			severityText: CH.lit(""),
+			serviceName: CH.lit(""),
+			deploymentEnv: CH.lit(""),
+			namespace: $.ResourceAttributes.get("service.namespace"),
+			count: CH.count(),
+			facetType: CH.lit("namespace"),
+		}))
+		.where(($) => [...baseWhere($), $.ResourceAttributes.get("service.namespace").neq("")])
+		.groupBy("namespace")
+
+	return unionAll(severityQuery, serviceQuery, envQuery, namespaceQuery)
 		.orderBy(["count", "desc"])
 		.limit(500)
 		.format("JSON")

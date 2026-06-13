@@ -63,6 +63,7 @@ export function LogsVolumeChart({ filters, onTimeRangeSelect }: LogsVolumeChartP
 					serviceName: filters?.services?.[0],
 					severity: filters?.severities?.[0],
 					environments: filters?.deploymentEnvs ? [...filters.deploymentEnvs] : undefined,
+					namespaces: filters?.namespaces ? [...filters.namespaces] : undefined,
 				},
 			},
 		}),

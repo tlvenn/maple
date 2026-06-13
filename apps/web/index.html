@@ -25,8 +25,24 @@
 		<meta name="twitter:image" content="/og-image.png" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<link rel="icon" href="/favicon.ico" />
+
+		<!-- Apply the saved theme before first paint to avoid a flash of the wrong theme.
+		     Must stay in sync with the theme store in @maple/ui/hooks/use-theme
+		     (storage key "maple-theme", `light`/`dark` class on <html>, default "dark"). -->
+		<script>
+			;(() => {
+				try {
+					let theme = localStorage.getItem("maple-theme") || "dark"
+					if (theme !== "light" && theme !== "dark") theme = "dark"
+					const root = document.documentElement
+					root.classList.remove("light", "dark")
+					root.classList.add(theme)
+					root.style.colorScheme = theme
+				} catch {}
+			})()
+		</script>
 	</head>
-	<body class="dark">
+	<body>
 		<div id="app"></div>
 		<script type="module" src="/src/main.tsx"></script>
 	</body>

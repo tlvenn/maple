@@ -25,6 +25,7 @@ const DEFAULT_INGEST_KEY = "maple_pk_bwGJomBwDO4B15sopcuinQVqNFCDjhE2"
  */
 export const TelemetryLayer = Maple.layer({
 	serviceName: "maple-cli",
+	serviceNamespace: "backend",
 	serviceVersion: MAPLE_VERSION,
 	ingestKey: process.env.MAPLE_INGEST_KEY ?? DEFAULT_INGEST_KEY,
 	shutdownTimeout: "3 seconds",

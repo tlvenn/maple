@@ -22,10 +22,10 @@ import { HttpOrgOpenRouterSettingsLive } from "./routes/org-openrouter-settings.
 import { HttpOrgClickHouseSettingsLive } from "./routes/org-clickhouse-settings.http"
 import { HttpOrganizationsLive } from "./routes/organizations.http"
 import { PrometheusScrapeProxyRouter } from "./routes/prometheus-scrape-proxy.http"
+import { ScraperInternalRouter } from "./routes/scraper-internal.http"
 import { HttpQueryEngineLive } from "./routes/query-engine.http"
 import { HttpRecommendationIssuesLive } from "./routes/recommendation-issues.http"
 import { HttpScrapeTargetsLive } from "./routes/scrape-targets.http"
-import { HttpServiceDiscoveryLive } from "./routes/sd.http"
 import { HttpSessionReplaysLive } from "./routes/session-replay.http"
 import { HttpWarehouseLive } from "./routes/warehouse.http"
 import { AlertRuntime, AlertsService } from "./services/AlertsService"
@@ -52,6 +52,7 @@ import { OrganizationService } from "./services/OrganizationService"
 import { QueryEngineService } from "./services/QueryEngineService"
 import { RecommendationIssueService } from "./services/RecommendationIssueService"
 import { RawSqlChartService } from "@maple/query-engine/runtime"
+import { PlanetScaleDiscoveryService } from "./services/PlanetScaleDiscoveryService"
 import { ScrapeTargetsService } from "./services/ScrapeTargetsService"
 import { WarehouseQueryService } from "./lib/WarehouseQueryService"
 
@@ -85,7 +86,10 @@ export const CoreServicesLive = Layer.mergeAll(
 	OrgOpenRouterSettingsService.layer,
 	OrgClickHouseSettingsService.layer,
 	OrganizationService.layer,
-	ScrapeTargetsService.layer,
+	// Shared with ScrapeTargetsService via layer memoization so the proxy and
+	// the internal target list resolve sub-targets from one discovery cache.
+	PlanetScaleDiscoveryService.layer,
+	ScrapeTargetsService.layer.pipe(Layer.provide(PlanetScaleDiscoveryService.layer)),
 	IngestAttributeMappingService.layer,
 ).pipe(Layer.provideMerge(InfraLive))
 
@@ -167,7 +171,6 @@ export const ApiRoutes = HttpApiBuilder.layer(MapleApi).pipe(
 	Layer.provide(HttpOrgClickHouseSettingsLive),
 	Layer.provide(HttpOrganizationsLive),
 	Layer.provide(HttpScrapeTargetsLive),
-	Layer.provide(HttpServiceDiscoveryLive),
 	Layer.provide(
 		Layer.mergeAll(
 			HttpQueryEngineLive,
@@ -184,6 +187,7 @@ export const AllRoutes = Layer.mergeAll(
 	IntegrationsCallbackRouter,
 	OAuthDiscoveryRouter,
 	PrometheusScrapeProxyRouter,
+	ScraperInternalRouter,
 	McpLive,
 	HealthRouter,
 	McpGetFallback,

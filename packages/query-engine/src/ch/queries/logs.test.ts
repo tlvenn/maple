@@ -387,17 +387,19 @@ describe("errorRateByServiceQuery", () => {
 // ---------------------------------------------------------------------------
 
 describe("logsFacetsQuery", () => {
-	it("routes to logs_aggregates_hourly with severity/service/deploymentEnv facets", () => {
+	it("routes to logs_aggregates_hourly with severity/service/deploymentEnv/namespace facets", () => {
 		const q = logsFacetsQuery({})
 		const { sql } = compileUnion(q, baseParams)
 		const unionCount = (sql.match(/UNION ALL/g) || []).length
-		expect(unionCount).toBe(2)
+		expect(unionCount).toBe(3)
 		expect(sql).toContain("FROM logs_aggregates_hourly")
 		// Pre-aggregated reads — no raw map lookups on the MV path.
 		expect(sql).not.toContain("ResourceAttributes")
 		expect(sql).toContain("'severity' AS facetType")
 		expect(sql).toContain("'service' AS facetType")
 		expect(sql).toContain("'deploymentEnv' AS facetType")
+		expect(sql).toContain("'namespace' AS facetType")
+		expect(sql).toContain("ServiceNamespace AS namespace")
 		expect(sql).toContain("sum(Count) AS count")
 		// Env facet reads the top-level MV column, not the resource-attr map.
 		expect(sql).toContain("DeploymentEnv AS deploymentEnv")
@@ -473,7 +475,7 @@ describe("environments filter", () => {
 		const { sql } = compileUnion(q, baseParams)
 		expect(sql).toContain("FROM logs_aggregates_hourly")
 		const matches = sql.match(/DeploymentEnv IN \('production'\)/g) || []
-		expect(matches.length).toBe(3)
+		expect(matches.length).toBe(4)
 		expect(sql).not.toContain("ResourceAttributes")
 	})
 })

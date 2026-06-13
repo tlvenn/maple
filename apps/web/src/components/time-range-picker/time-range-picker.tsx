@@ -3,6 +3,7 @@ import { Button } from "@maple/ui/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@maple/ui/components/ui/popover"
 
 import { ClockIcon } from "@/components/icons"
+import { useAppHotkey } from "@/hooks/use-app-hotkey"
 import { useRecentlyUsedTimes, type RecentTimeRange } from "@/hooks/use-recently-used-times"
 import { formatTimeRangeDisplay, presetLabel, relativeToAbsolute, type TimePreset } from "@/lib/time-utils"
 
@@ -14,10 +15,14 @@ import { ShorthandInput } from "./shorthand-input"
 import { TimezoneDisplay } from "./timezone-display"
 import type { TimeRangePickerProps, TimeRangeTab } from "./types"
 
-export function TimeRangePicker({ startTime, endTime, presetValue, onChange }: TimeRangePickerProps) {
+export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hotkey = false }: TimeRangePickerProps) {
 	const [open, setOpen] = useState(false)
 	const [tab, setTab] = useState<TimeRangeTab>("relative")
 	const { recentTimes, addRecentTime } = useRecentlyUsedTimes()
+
+	// Only the page-level picker opts in (hotkey prop) so secondary pickers
+	// (e.g. the widget builder's) don't double-register "D".
+	useAppHotkey("time.open", () => setOpen(true), { enabled: hotkey })
 
 	const displayText = presetValue ? presetLabel(presetValue) : formatTimeRangeDisplay(startTime, endTime)
 
@@ -98,7 +103,12 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange }: T
 		<Popover open={open} onOpenChange={setOpen}>
 			<PopoverTrigger
 				render={
-					<Button variant="outline" size="sm" className="gap-2">
+					<Button
+						variant="outline"
+						size="sm"
+						className="gap-2"
+						title={hotkey ? "Time range (D)" : undefined}
+					>
 						<ClockIcon className="size-3.5" />
 						<span>{displayText}</span>
 					</Button>

@@ -1,3 +1,11 @@
+<p align="center">
+  <img src=".github/assets/maple-hero.png" alt="Maple — open-source observability for traces, logs, and metrics, built on OpenTelemetry" width="100%" />
+</p>
+
+<p align="center">
+  <strong>Open-source observability for traces, logs &amp; metrics — built on OpenTelemetry + ClickHouse.</strong>
+</p>
+
 # Maple Monorepo
 
 Maple is now organized as a monorepo with a SPA frontend and an Effect-based backend API.
@@ -25,6 +33,19 @@ Maple is now organized as a monorepo with a SPA frontend and an Effect-based bac
 ```bash
 bun install
 ```
+
+## Try Maple Locally
+
+Run Maple as a single local binary with OTLP ingest, embedded ClickHouse, and
+the dashboard:
+
+```bash
+brew install Makisuo/tap/maple
+maple start
+```
+
+See [docs/local-mode.md](docs/local-mode.md) for Homebrew, manual installer,
+update, and uninstall details.
 
 ## Develop
 

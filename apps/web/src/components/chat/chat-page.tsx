@@ -2,6 +2,7 @@ import { Suspense, useCallback, useEffect, useState } from "react"
 import { useAuth } from "@clerk/clerk-react"
 import { AppSidebar } from "@/components/dashboard/app-sidebar"
 import { SidebarInset, SidebarProvider } from "@maple/ui/components/ui/sidebar"
+import { useAppHotkey } from "@/hooks/use-app-hotkey"
 import { useChatTabs } from "@/hooks/use-chat-tabs"
 import { ChatSidebar } from "./chat-sidebar"
 import { ChatConversation } from "./chat-conversation"
@@ -98,18 +99,7 @@ function ChatPageInner({
 		ensureTab(widgetFixTabId(widgetFixContext), widgetFixTabTitle(widgetFixContext))
 	}, [mode, widgetFixContext, ensureTab])
 
-	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			const mod = e.metaKey || e.ctrlKey
-			if (!mod || !e.shiftKey) return
-			if (e.key === "O" || e.key === "o") {
-				e.preventDefault()
-				createTab()
-			}
-		}
-		window.addEventListener("keydown", onKey)
-		return () => window.removeEventListener("keydown", onKey)
-	}, [createTab])
+	useAppHotkey("chat.newTab", () => createTab())
 
 	const alertTab = mode === "alert" && alertContext ? alertTabId(alertContext) : undefined
 	const widgetFixTab =

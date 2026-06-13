@@ -6,15 +6,20 @@ import {
 	AlertRuleUpsertRequest,
 	DiscordAlertDestinationConfig,
 	HazelAlertDestinationConfig,
+	HazelChannelId,
 	HazelOAuthAlertDestinationConfig,
+	HazelOrganizationId,
 	PagerDutyAlertDestinationConfig,
 	SlackAlertDestinationConfig,
 	WebhookAlertDestinationConfig,
 	type AlertComparator,
+	type AlertDeliveryEventDocument,
+	type AlertDeliveryStatus,
 	type AlertDestinationCreateRequest,
 	type AlertDestinationId,
 	type AlertDestinationType,
 	type AlertDestinationUpdateRequest,
+	type AlertEventType,
 	type AlertMetricAggregation,
 	type AlertMetricType,
 	type AlertRuleTestRequest as AlertRuleTestRequestType,
@@ -23,9 +28,12 @@ import {
 	type QueryBuilderQueryDraftPayload,
 } from "@maple/domain/http"
 import type { QueryEngineAlertReducer } from "@maple/query-engine"
-import { Cause, Exit, Option } from "effect"
+import { Cause, Exit, Option, Schema } from "effect"
 import { buildTimeseriesQuerySpec, createQueryDraft } from "@/lib/query-builder/model"
 import { formatErrorRate, formatLatency, formatNumber } from "@/lib/format"
+
+const asHazelOrganizationId = Schema.decodeUnknownSync(HazelOrganizationId)
+const asHazelChannelId = Schema.decodeUnknownSync(HazelChannelId)
 
 export type RuleFormState = {
 	name: string
@@ -429,7 +437,10 @@ export function buildRuleRequest(form: RuleFormState): AlertRuleUpsertRequest {
 		queryBuilderDraft: signalType === "builder_query" ? buildQueryDraftFromForm(form) : null,
 		rawQuerySql: signalType === "raw_query" ? form.rawQuerySql.trim() || null : null,
 		rawQueryReducer: signalType === "raw_query" ? form.rawQueryReducer : null,
-		destinationIds: [...form.destinationIds],
+		// Dedupe so the same destination is never persisted twice (e.g. when editing a
+		// rule that already had duplicates). The server is authoritative (normalizeRule),
+		// but keeping the request clean avoids a needless write-then-normalize round trip.
+		destinationIds: [...new Set(form.destinationIds)],
 		notificationTemplate,
 	})
 }
@@ -657,12 +668,12 @@ export function buildDestinationCreatePayload(form: DestinationFormState): Alert
 				type: "hazel-oauth",
 				name: form.name.trim(),
 				enabled: form.enabled,
-				hazelOrganizationId: form.hazelOrganizationId.trim(),
+				hazelOrganizationId: asHazelOrganizationId(form.hazelOrganizationId.trim()),
 				hazelOrganizationName: form.hazelOrganizationName.trim(),
 				...(logoUrl !== null && logoUrl.trim().length > 0
 					? { hazelOrganizationLogoUrl: logoUrl.trim() }
 					: {}),
-				hazelChannelId: form.hazelChannelId.trim(),
+				hazelChannelId: asHazelChannelId(form.hazelChannelId.trim()),
 				hazelChannelName: form.hazelChannelName.trim(),
 			})
 		}
@@ -714,13 +725,17 @@ export function buildDestinationUpdatePayload(form: DestinationFormState): Alert
 				type: "hazel-oauth",
 				name: form.name.trim() || undefined,
 				enabled: form.enabled,
-				hazelOrganizationId: form.hazelOrganizationId.trim() || undefined,
+				hazelOrganizationId: form.hazelOrganizationId.trim()
+					? asHazelOrganizationId(form.hazelOrganizationId.trim())
+					: undefined,
 				hazelOrganizationName: form.hazelOrganizationName.trim() || undefined,
 				hazelOrganizationLogoUrl:
 					form.hazelOrganizationLogoUrl === null
 						? null
 						: form.hazelOrganizationLogoUrl.trim() || undefined,
-				hazelChannelId: form.hazelChannelId.trim() || undefined,
+				hazelChannelId: form.hazelChannelId.trim()
+					? asHazelChannelId(form.hazelChannelId.trim())
+					: undefined,
 				hazelChannelName: form.hazelChannelName.trim() || undefined,
 			}
 		case "discord":
@@ -812,6 +827,81 @@ export function formatAlertDateTimeFull(value: string | null): string {
 		minute: "2-digit",
 		second: "2-digit",
 	})
+}
+
+/** Time of day only (`03:10 PM`) — used where a day header already carries the date. */
+export function formatAlertTime(value: string | null): string {
+	if (!value) return "—"
+	return new Date(value).toLocaleTimeString(undefined, {
+		hour: "2-digit",
+		minute: "2-digit",
+	})
+}
+
+const startOfLocalDay = (d: Date): number => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+
+/** Day-bucket heading: `Today` / `Yesterday` / `Jun 4, 2026`. */
+export function formatAlertDayHeading(value: string): string {
+	const date = new Date(value)
+	const today = startOfLocalDay(new Date())
+	const target = startOfLocalDay(date)
+	const dayMs = 86_400_000
+	if (target === today) return "Today"
+	if (target === today - dayMs) return "Yesterday"
+	return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Delivery-event presentation                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One token-based vocabulary for alert event types, shared by the delivery log,
+ * the recent-activity table, and the chat attachment card. Color is always
+ * paired with the label — never the only signal.
+ */
+export const eventTypeMeta: Record<AlertEventType, { label: string; dot: string; text: string }> = {
+	trigger: { label: "Triggered", dot: "bg-destructive", text: "text-destructive" },
+	resolve: { label: "Resolved", dot: "bg-success", text: "text-success" },
+	renotify: { label: "Re-notified", dot: "bg-warning", text: "text-warning" },
+	test: { label: "Test", dot: "bg-info", text: "text-info" },
+}
+
+export type DeliveryStatusVariant = "success" | "error" | "warning" | "outline"
+
+/** Delivery status → Badge variant + human label. */
+export const deliveryStatusMeta: Record<AlertDeliveryStatus, { label: string; variant: DeliveryStatusVariant }> = {
+	success: { label: "Delivered", variant: "success" },
+	failed: { label: "Failed", variant: "error" },
+	processing: { label: "Sending", variant: "warning" },
+	queued: { label: "Queued", variant: "outline" },
+}
+
+export interface DeliveryEventDayGroup {
+	key: string
+	label: string
+	events: AlertDeliveryEventDocument[]
+}
+
+/**
+ * Group delivery events by calendar day. Assumes the input is sorted
+ * newest-first (as the API returns it), so same-day events are contiguous.
+ */
+export function groupDeliveryEventsByDay(
+	events: ReadonlyArray<AlertDeliveryEventDocument>,
+): DeliveryEventDayGroup[] {
+	const groups: DeliveryEventDayGroup[] = []
+	for (const event of events) {
+		const d = new Date(event.scheduledAt)
+		const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+		const last = groups[groups.length - 1]
+		if (last && last.key === key) {
+			last.events.push(event)
+		} else {
+			groups.push({ key, label: formatAlertDayHeading(event.scheduledAt), events: [event] })
+		}
+	}
+	return groups
 }
 
 export function formatAlertDuration(startStr: string | null, endStr: string | null): string {

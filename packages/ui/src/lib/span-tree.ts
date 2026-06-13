@@ -53,34 +53,49 @@ export function transformSpan(raw: SpanHierarchyRow): Span {
 	}
 }
 
+/** Drop duplicate spans (at-least-once ingest delivery), keeping the first occurrence. */
+export function dedupeBySpanId(spans: Span[]): Span[] {
+	const seen = new Set<string>()
+	return spans.filter((span) => {
+		if (seen.has(span.spanId)) return false
+		seen.add(span.spanId)
+		return true
+	})
+}
+
 /**
  * Build a span tree from a flat span list. Spans whose parent is absent are
  * grouped under a synthetic "Missing Span" placeholder root so orphaned
  * subtrees still render. Children and roots are sorted by start time and each
  * node's `depth` is assigned.
+ *
+ * Duplicate spanIds (at-least-once ingest delivery) collapse to a single node;
+ * linking iterates the deduped map so a node is never attached to its parent
+ * twice — duplicates would otherwise repeat whole subtrees and break the
+ * spanId-keyed rows in the waterfall virtualizer.
  */
 export function buildSpanTree(spans: Span[]): SpanNode[] {
 	const spanMap = new Map<string, SpanNode>()
 	const rootSpans: SpanNode[] = []
 
 	for (const span of spans) {
-		spanMap.set(span.spanId, { ...span, children: [], depth: 0 })
+		if (!spanMap.has(span.spanId)) {
+			spanMap.set(span.spanId, { ...span, children: [], depth: 0 })
+		}
 	}
 
 	const missingParentGroups = new Map<string, SpanNode[]>()
 
-	for (const span of spans) {
-		const node = spanMap.get(span.spanId)
-		if (!node) {
-			continue
-		}
-		if (span.parentSpanId && spanMap.has(span.parentSpanId)) {
-			const parent = spanMap.get(span.parentSpanId)
+	for (const node of spanMap.values()) {
+		// Self-parenting (corrupt data) would make the node its own child and
+		// recurse forever in setDepth — treat it as a root instead.
+		if (node.parentSpanId && node.parentSpanId !== node.spanId && spanMap.has(node.parentSpanId)) {
+			const parent = spanMap.get(node.parentSpanId)
 			parent?.children.push(node)
-		} else if (span.parentSpanId) {
-			const group = missingParentGroups.get(span.parentSpanId) || []
+		} else if (node.parentSpanId && node.parentSpanId !== node.spanId) {
+			const group = missingParentGroups.get(node.parentSpanId) || []
 			group.push(node)
-			missingParentGroups.set(span.parentSpanId, group)
+			missingParentGroups.set(node.parentSpanId, group)
 		} else {
 			rootSpans.push(node)
 		}
@@ -147,7 +162,7 @@ export interface TraceDetail {
  * service list, and the earliest start time.
  */
 export function buildTraceDetail(rows: ReadonlyArray<SpanHierarchyRow>): TraceDetail {
-	const spans = rows.map(transformSpan)
+	const spans = dedupeBySpanId(rows.map(transformSpan))
 	const rootSpans = buildSpanTree(spans)
 	const totalDurationMs = spans.length > 0 ? Math.max(...spans.map((span) => span.durationMs)) : 0
 	const services = Array.from(new Set(spans.map((span) => span.serviceName).filter(Boolean)))

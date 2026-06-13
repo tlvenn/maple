@@ -35,6 +35,7 @@ const setupFetch = (responder: (url: string) => Response = () => new Response(nu
 // timer off so tests flush explicitly.
 const baseConfig = {
 	serviceName: "unit-test",
+	serviceNamespace: "unit-test-ns",
 	endpoint: "https://collector.test",
 	ingestKey: "secret",
 	environment: "test",
@@ -78,6 +79,7 @@ describe("MapleFlush.make (server)", () => {
 		const attrs = body.resourceSpans[0].resource.attributes
 		const attrMap = Object.fromEntries(attrs.map((a) => [a.key, a.value.stringValue]))
 		expect(attrMap["service.name"]).toBe("unit-test")
+		expect(attrMap["service.namespace"]).toBe("unit-test-ns")
 		expect(attrMap["maple.sdk.type"]).toBe("server")
 		// Dual-emit: legacy key for Tinybird MVs + OTel-canonical key.
 		expect(attrMap["deployment.environment"]).toBe("test")

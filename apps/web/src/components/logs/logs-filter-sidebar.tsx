@@ -7,6 +7,7 @@ import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
 import { FilterSection, SearchableFilterSection } from "@/components/filters/filter-section"
 import { Route } from "@/routes/logs"
 import { Separator } from "@maple/ui/components/ui/separator"
+import { Kbd } from "@maple/ui/components/ui/kbd"
 import {
 	InputGroup,
 	InputGroupAddon,
@@ -88,6 +89,7 @@ export function LogsFilterSidebar() {
 		(search.services?.length ?? 0) > 0 ||
 		(search.severities?.length ?? 0) > 0 ||
 		(search.deploymentEnvs?.length ?? 0) > 0 ||
+		(search.namespaces?.length ?? 0) > 0 ||
 		!!search.search
 
 	return Result.builder(facetsResult)
@@ -100,7 +102,8 @@ export function LogsFilterSidebar() {
 			const hasFacets =
 				(facets.services?.length ?? 0) > 0 ||
 				(facets.severities?.length ?? 0) > 0 ||
-				(facets.deploymentEnvs?.length ?? 0) > 0
+				(facets.deploymentEnvs?.length ?? 0) > 0 ||
+				(facets.namespaces?.length ?? 0) > 0
 
 			return (
 				<FilterSidebarFrame waiting={result.waiting}>
@@ -119,7 +122,13 @@ export function LogsFilterSidebar() {
 									value={searchText}
 									onChange={(e) => handleSearchChange(e.target.value)}
 									placeholder="Search log messages..."
+									data-shortcut-focus="search"
 								/>
+								{!searchText && (
+									<InputGroupAddon align="inline-end">
+										<Kbd>/</Kbd>
+									</InputGroupAddon>
+								)}
 								{searchText && (
 									<InputGroupAddon align="inline-end">
 										<InputGroupButton
@@ -154,6 +163,18 @@ export function LogsFilterSidebar() {
 									options={facets.deploymentEnvs}
 									selected={search.deploymentEnvs ?? []}
 									onChange={(val) => updateFilter("deploymentEnvs", val)}
+								/>
+								<Separator className="my-2" />
+							</>
+						)}
+
+						{(facets.namespaces?.length ?? 0) > 0 && (
+							<>
+								<SearchableFilterSection
+									title="Namespace"
+									options={facets.namespaces}
+									selected={search.namespaces ?? []}
+									onChange={(val) => updateFilter("namespaces", val)}
 								/>
 								<Separator className="my-2" />
 							</>

@@ -40,6 +40,9 @@ export function setupTracing(config: ResolvedConfig, sessionId: string): () => P
 		"maple.sdk.type": "browser",
 		"session.id": sessionId,
 	}
+	if (config.serviceNamespace) {
+		attributes["service.namespace"] = config.serviceNamespace
+	}
 	if (config.serviceVersion) {
 		attributes[ATTR_SERVICE_VERSION] = config.serviceVersion
 		attributes["deployment.commit_sha"] = config.serviceVersion

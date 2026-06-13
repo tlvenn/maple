@@ -1,15 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router"
 import { useUser, useClerk } from "@clerk/clerk-react"
 import {
-	HouseIcon,
-	FileIcon,
-	PulseIcon,
-	PlayRotateClockwiseIcon,
-	ChartLineIcon,
-	ServerIcon,
-	ComputerIcon,
-	BellIcon,
-	CircleWarningIcon,
 	CircleQuestionIcon,
 	DiscordIcon,
 	EnvelopeIcon,
@@ -17,11 +8,18 @@ import {
 	LogoutIcon,
 	ChevronUpIcon,
 	ChevronRightIcon,
-	NetworkNodesIcon,
-	ChatBubbleSparkleIcon,
 	GridSquareCirclePlusIcon,
 } from "@/components/icons"
+import {
+	investigateNavItems,
+	mainNavItems,
+	topologyNavItems,
+	visibleSignalsNavItems,
+} from "@/components/dashboard/nav-items"
+import { showKeyboardShortcuts } from "@/components/command-palette/global-shortcuts"
+import { KeyboardIcon } from "@/components/icons"
 import { OrgSwitcher } from "@/components/dashboard/org-switcher"
+import { ThemeToggle } from "@/components/dashboard/theme-toggle"
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -29,6 +27,7 @@ import {
 	DropdownMenuItem,
 	DropdownMenuLabel,
 	DropdownMenuSeparator,
+	DropdownMenuShortcut,
 	DropdownMenuTrigger,
 } from "@maple/ui/components/ui/dropdown-menu"
 import {
@@ -55,88 +54,6 @@ import { useDashboardPreferences } from "@/hooks/use-dashboard-preferences"
 import { useInfraEnabled } from "@/hooks/use-infra-enabled"
 import { useSessionReplaysEnabled } from "@/hooks/use-session-replays-enabled"
 import { Badge } from "@maple/ui/components/ui/badge"
-
-const mainNavItems = [
-	{
-		title: "Overview",
-		href: "/",
-		icon: HouseIcon,
-	},
-	{
-		title: "Chat",
-		href: "/chat",
-		icon: ChatBubbleSparkleIcon,
-	},
-]
-
-const topologyNavItems = [
-	{
-		title: "Services",
-		href: "/services",
-		icon: ServerIcon,
-	},
-	{
-		title: "Service Map",
-		href: "/service-map",
-		icon: NetworkNodesIcon,
-	},
-]
-
-interface SignalsNavItem {
-	title: string
-	href: string
-	icon: typeof PulseIcon
-	badge?: string
-	subItems?: { title: string; href: string }[]
-}
-
-const signalsNavItems: SignalsNavItem[] = [
-	{
-		title: "Traces",
-		href: "/traces",
-		icon: PulseIcon,
-	},
-	{
-		title: "Logs",
-		href: "/logs",
-		icon: FileIcon,
-	},
-	{
-		title: "Metrics",
-		href: "/metrics",
-		icon: ChartLineIcon,
-	},
-	{
-		title: "Replays",
-		href: "/replays",
-		icon: PlayRotateClockwiseIcon,
-		badge: "Beta",
-	},
-	{
-		title: "Infrastructure",
-		href: "/infra",
-		icon: ComputerIcon,
-		subItems: [
-			{ title: "Hosts", href: "/infra" },
-			{ title: "K8s Pods", href: "/infra/kubernetes/pods" },
-			{ title: "K8s Nodes", href: "/infra/kubernetes/nodes" },
-			{ title: "K8s Workloads", href: "/infra/kubernetes/workloads" },
-		],
-	},
-]
-
-const investigateNavItems = [
-	{
-		title: "Errors",
-		href: "/errors",
-		icon: CircleWarningIcon,
-	},
-	{
-		title: "Alerts",
-		href: "/alerts",
-		icon: BellIcon,
-	},
-]
 
 function UserAvatar({ imageUrl, initials, name }: { imageUrl?: string; initials: string; name: string }) {
 	return imageUrl ? (
@@ -195,9 +112,18 @@ function UserMenu() {
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
 				<DropdownMenuGroup>
+					<ThemeToggle />
+				</DropdownMenuGroup>
+				<DropdownMenuSeparator />
+				<DropdownMenuGroup>
 					<DropdownMenuItem render={<Link to="/settings" />}>
 						<GearIcon size={16} />
 						Settings
+					</DropdownMenuItem>
+					<DropdownMenuItem onClick={showKeyboardShortcuts}>
+						<KeyboardIcon size={16} />
+						Keyboard shortcuts
+						<DropdownMenuShortcut>?</DropdownMenuShortcut>
 					</DropdownMenuItem>
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
@@ -236,9 +162,18 @@ function GuestMenu() {
 			</DropdownMenuTrigger>
 			<DropdownMenuContent side="top" align="start" sideOffset={4} className="min-w-56">
 				<DropdownMenuGroup>
+					<ThemeToggle />
+				</DropdownMenuGroup>
+				<DropdownMenuSeparator />
+				<DropdownMenuGroup>
 					<DropdownMenuItem render={<Link to="/settings" />}>
 						<GearIcon size={16} />
 						Settings
+					</DropdownMenuItem>
+					<DropdownMenuItem onClick={showKeyboardShortcuts}>
+						<KeyboardIcon size={16} />
+						Keyboard shortcuts
+						<DropdownMenuShortcut>?</DropdownMenuShortcut>
 					</DropdownMenuItem>
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
@@ -267,11 +202,7 @@ export function AppSidebar() {
 
 	const infraEnabled = useInfraEnabled()
 	const sessionReplaysEnabled = useSessionReplaysEnabled()
-	const visibleSignalsNavItems = signalsNavItems.filter(
-		(item) =>
-			(infraEnabled || item.href !== "/infra") &&
-			(sessionReplaysEnabled || item.href !== "/replays"),
-	)
+	const signalsItems = visibleSignalsNavItems({ infraEnabled, sessionReplaysEnabled })
 
 	return (
 		<Sidebar collapsible="icon">
@@ -301,7 +232,7 @@ export function AppSidebar() {
 					</SidebarGroupContent>
 				</SidebarGroup>
 
-				{[topologyNavItems, visibleSignalsNavItems, investigateNavItems].map((group) => (
+				{[topologyNavItems, signalsItems, investigateNavItems].map((group) => (
 					<SidebarGroup key={group[0].title}>
 						<SidebarGroupContent>
 							<SidebarMenu>
@@ -454,6 +385,11 @@ export function AppSidebar() {
 											<DropdownMenuItem render={<a href="mailto:support@maple.dev" aria-label="Email Support" />}>
 												<EnvelopeIcon size={16} />
 												Email Support
+											</DropdownMenuItem>
+											<DropdownMenuItem onClick={showKeyboardShortcuts}>
+												<KeyboardIcon size={16} />
+												Keyboard shortcuts
+												<DropdownMenuShortcut>?</DropdownMenuShortcut>
 											</DropdownMenuItem>
 										</DropdownMenuGroup>
 									</DropdownMenuContent>

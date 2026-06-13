@@ -30,6 +30,8 @@ function buildQueryParams(
 		severity: filters?.severities?.[0],
 		deploymentEnv: filters?.deploymentEnvs?.[0],
 		deploymentEnvMatchMode: filters?.deploymentEnvMatchMode,
+		namespace: filters?.namespaces?.[0],
+		namespaceMatchMode: filters?.namespaceMatchMode,
 		search: filters?.search,
 	}
 }

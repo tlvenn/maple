@@ -1,0 +1,107 @@
+import {
+	BellIcon,
+	ChartLineIcon,
+	ChatBubbleSparkleIcon,
+	CircleWarningIcon,
+	ComputerIcon,
+	FileIcon,
+	HouseIcon,
+	NetworkNodesIcon,
+	PlayRotateClockwiseIcon,
+	PulseIcon,
+	ServerIcon,
+} from "@/components/icons"
+
+export interface NavItem {
+	title: string
+	href: string
+	icon: typeof PulseIcon
+}
+
+export interface SignalsNavItem extends NavItem {
+	badge?: string
+	subItems?: { title: string; href: string }[]
+}
+
+export const mainNavItems: NavItem[] = [
+	{
+		title: "Overview",
+		href: "/",
+		icon: HouseIcon,
+	},
+	{
+		title: "Chat",
+		href: "/chat",
+		icon: ChatBubbleSparkleIcon,
+	},
+]
+
+export const topologyNavItems: NavItem[] = [
+	{
+		title: "Services",
+		href: "/services",
+		icon: ServerIcon,
+	},
+	{
+		title: "Service Map",
+		href: "/service-map",
+		icon: NetworkNodesIcon,
+	},
+]
+
+export const signalsNavItems: SignalsNavItem[] = [
+	{
+		title: "Traces",
+		href: "/traces",
+		icon: PulseIcon,
+	},
+	{
+		title: "Logs",
+		href: "/logs",
+		icon: FileIcon,
+	},
+	{
+		title: "Metrics",
+		href: "/metrics",
+		icon: ChartLineIcon,
+	},
+	{
+		title: "Replays",
+		href: "/replays",
+		icon: PlayRotateClockwiseIcon,
+		badge: "Beta",
+	},
+	{
+		title: "Infrastructure",
+		href: "/infra",
+		icon: ComputerIcon,
+		subItems: [
+			{ title: "Hosts", href: "/infra" },
+			{ title: "K8s Pods", href: "/infra/kubernetes/pods" },
+			{ title: "K8s Nodes", href: "/infra/kubernetes/nodes" },
+			{ title: "K8s Workloads", href: "/infra/kubernetes/workloads" },
+		],
+	},
+]
+
+export const investigateNavItems: NavItem[] = [
+	{
+		title: "Errors",
+		href: "/errors",
+		icon: CircleWarningIcon,
+	},
+	{
+		title: "Alerts",
+		href: "/alerts",
+		icon: BellIcon,
+	},
+]
+
+/** Signals items with org feature gates applied (matches the sidebar's filtering). */
+export function visibleSignalsNavItems(flags: { infraEnabled: boolean; sessionReplaysEnabled: boolean }) {
+	return signalsNavItems.filter(
+		(item) =>
+			(flags.infraEnabled || item.href !== "/infra") &&
+			(flags.sessionReplaysEnabled || item.href !== "/replays"),
+	)
+}

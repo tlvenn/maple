@@ -3,6 +3,7 @@ import { ingestUrl } from "./ingest-url"
 
 export const mapleOtelLayer = Maple.layer({
 	serviceName: "maple-web",
+	serviceNamespace: "client",
 	endpoint: ingestUrl,
 	ingestKey: import.meta.env.VITE_MAPLE_INGEST_KEY,
 	environment: import.meta.env.MODE,

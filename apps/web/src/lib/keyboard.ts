@@ -10,5 +10,6 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 
 /** True when a modal dialog is open — skip page-level shortcuts so the dialog owns the keyboard. */
 export function isDialogOpen(): boolean {
-	return document.querySelector('[role="dialog"][data-state="open"]') !== null
+	// Base UI marks open popups with a bare `data-open` attribute (not Radix's `data-state="open"`).
+	return document.querySelector('[role="dialog"][data-open], [role="alertdialog"][data-open]') !== null
 }

@@ -1,7 +1,14 @@
 import { Clock, Effect, Schema } from "effect"
 import { QueryEngineExecuteRequest, type AttributeFilter } from "@maple/query-engine"
 import { TraceId, SpanId } from "@maple/domain"
-import { SpanHierarchyRequest, SpanDetailRequest } from "@maple/domain/http"
+import {
+	DeploymentEnvironment,
+	ServiceName,
+	ServiceNamespace,
+	SpanDetailRequest,
+	SpanHierarchyRequest,
+	SpanName,
+} from "@maple/domain/http"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import {
 	WarehouseDateTimeString,
@@ -15,9 +22,15 @@ import {
 } from "@/api/warehouse/effect-utils"
 import { getHttpInfo, type HttpInfo } from "@maple/ui/lib/http"
 import type { Span, SpanNode } from "@maple/ui/types"
+import {
+	buildSpanTree,
+	dedupeBySpanId,
+	parseAttributes,
+	transformSpan,
+	type SpanHierarchyRow,
+} from "@maple/ui/lib/span-tree"
 
 const toTraceId = Schema.decodeSync(TraceId)
-const toSpanId = Schema.decodeSync(SpanId)
 
 const ContainsMatchMode = Schema.optional(Schema.Literals(["contains"]))
 
@@ -33,30 +46,34 @@ const ListTracesInputSchema = Schema.Struct({
 		Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1000)),
 	),
 	offset: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-	service: Schema.optional(Schema.String),
+	service: Schema.optional(ServiceName),
 	startTime: Schema.optional(WarehouseDateTimeString),
 	endTime: Schema.optional(WarehouseDateTimeString),
-	spanName: Schema.optional(Schema.String),
+	spanName: Schema.optional(SpanName),
 	hasError: Schema.optional(Schema.Boolean),
 	minDurationMs: Schema.optional(Schema.Number),
 	maxDurationMs: Schema.optional(Schema.Number),
 	httpMethod: Schema.optional(Schema.String),
 	httpStatusCode: Schema.optional(Schema.String),
-	deploymentEnv: Schema.optional(Schema.String),
+	deploymentEnv: Schema.optional(DeploymentEnvironment),
+	namespace: Schema.optional(ServiceNamespace),
 	attributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	resourceAttributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	rootOnly: Schema.optional(Schema.Boolean),
 	serviceMatchMode: ContainsMatchMode,
 	spanNameMatchMode: ContainsMatchMode,
 	deploymentEnvMatchMode: ContainsMatchMode,
-	excludedServices: Schema.optional(Schema.Array(Schema.String)),
-	excludedSpanNames: Schema.optional(Schema.Array(Schema.String)),
-	excludedDeploymentEnvs: Schema.optional(Schema.Array(Schema.String)),
+	namespaceMatchMode: ContainsMatchMode,
+	excludedServices: Schema.optional(Schema.Array(ServiceName)),
+	excludedSpanNames: Schema.optional(Schema.Array(SpanName)),
+	excludedDeploymentEnvs: Schema.optional(Schema.Array(DeploymentEnvironment)),
+	excludedNamespaces: Schema.optional(Schema.Array(ServiceNamespace)),
 	excludedHttpMethods: Schema.optional(Schema.Array(Schema.String)),
 	excludedHttpStatusCodes: Schema.optional(Schema.Array(Schema.String)),
 })
 
-export type ListTracesInput = Schema.Schema.Type<typeof ListTracesInputSchema>
+export type ListTracesInput = (typeof ListTracesInputSchema)["Encoded"]
+type ListTracesDecoded = (typeof ListTracesInputSchema)["Type"]
 
 const DEFAULT_LIMIT = 100
 const DEFAULT_OFFSET = 0
@@ -103,7 +120,7 @@ export interface TracesResponse {
 	}
 }
 
-function buildAttributeFilters(input: ListTracesInput): AttributeFilter[] {
+function buildAttributeFilters(input: ListTracesDecoded): AttributeFilter[] {
 	const filters: AttributeFilter[] = []
 
 	if (input.httpMethod) {
@@ -132,7 +149,7 @@ function buildAttributeFilters(input: ListTracesInput): AttributeFilter[] {
 	return filters
 }
 
-function buildResourceAttributeFilters(input: ListTracesInput): AttributeFilter[] {
+function buildResourceAttributeFilters(input: ListTracesDecoded): AttributeFilter[] {
 	const filters: AttributeFilter[] = []
 
 	if (input.resourceAttributeFilters) {
@@ -210,6 +227,7 @@ const listTracesEffect = Effect.fn("QueryEngine.listTraces")(function* ({ data }
 	if (input.serviceMatchMode === "contains") matchModes.serviceName = "contains"
 	if (input.spanNameMatchMode === "contains") matchModes.spanName = "contains"
 	if (input.deploymentEnvMatchMode === "contains") matchModes.deploymentEnv = "contains"
+	if (input.namespaceMatchMode === "contains") matchModes.serviceNamespace = "contains"
 
 	const rootOnly = input.rootOnly ?? true
 
@@ -235,6 +253,7 @@ const listTracesEffect = Effect.fn("QueryEngine.listTraces")(function* ({ data }
 				rootSpansOnly: rootOnly,
 				errorsOnly: input.hasError,
 				environments: input.deploymentEnv ? [input.deploymentEnv] : undefined,
+				namespaces: input.namespace ? [input.namespace] : undefined,
 				minDurationMs: input.minDurationMs,
 				maxDurationMs: input.maxDurationMs,
 				matchModes: Object.keys(matchModes).length > 0 ? matchModes : undefined,
@@ -246,6 +265,7 @@ const listTracesEffect = Effect.fn("QueryEngine.listTraces")(function* ({ data }
 				excludedEnvironments: input.excludedDeploymentEnvs?.length
 					? input.excludedDeploymentEnvs
 					: undefined,
+				excludedNamespaces: input.excludedNamespaces?.length ? input.excludedNamespaces : undefined,
 			},
 		},
 	})
@@ -308,122 +328,6 @@ function computeSpanHierarchyRange(timestamp: string | undefined): { startTime: 
 	}
 }
 
-function parseAttributes(value: string | null | undefined): Record<string, string> {
-	if (!value) return {}
-	try {
-		const parsed = JSON.parse(value)
-		return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {}
-	} catch {
-		return {}
-	}
-}
-
-interface SpanHierarchyRow {
-	traceId: string
-	spanId: string
-	parentSpanId: string
-	spanName: string
-	serviceName: string
-	spanKind: string
-	durationMs: number
-	startTime: string
-	statusCode: string
-	statusMessage: string
-	spanAttributes: string
-	resourceAttributes: string
-}
-
-function transformSpan(raw: SpanHierarchyRow): Span {
-	return {
-		traceId: toTraceId(raw.traceId),
-		spanId: toSpanId(raw.spanId),
-		parentSpanId: raw.parentSpanId,
-		spanName: raw.spanName,
-		serviceName: raw.serviceName,
-		spanKind: raw.spanKind,
-		durationMs: Number(raw.durationMs),
-		startTime: String(raw.startTime),
-		statusCode: raw.statusCode,
-		statusMessage: raw.statusMessage,
-		spanAttributes: parseAttributes(raw.spanAttributes),
-		resourceAttributes: parseAttributes(raw.resourceAttributes),
-	}
-}
-
-function buildSpanTree(spans: Span[]): SpanNode[] {
-	const spanMap = new Map<string, SpanNode>()
-	const rootSpans: SpanNode[] = []
-
-	for (const span of spans) {
-		spanMap.set(span.spanId, { ...span, children: [], depth: 0 })
-	}
-
-	const missingParentGroups = new Map<string, SpanNode[]>()
-
-	for (const span of spans) {
-		const node = spanMap.get(span.spanId)
-		if (!node) {
-			continue
-		}
-		if (span.parentSpanId && spanMap.has(span.parentSpanId)) {
-			const parent = spanMap.get(span.parentSpanId)
-			parent?.children.push(node)
-		} else if (span.parentSpanId) {
-			const group = missingParentGroups.get(span.parentSpanId) || []
-			group.push(node)
-			missingParentGroups.set(span.parentSpanId, group)
-		} else {
-			rootSpans.push(node)
-		}
-	}
-
-	for (const [missingParentId, children] of missingParentGroups) {
-		const placeholder: SpanNode = {
-			traceId: children[0].traceId,
-			spanId: toSpanId(missingParentId),
-			parentSpanId: "",
-			spanName: "Missing Span",
-			serviceName: "unknown",
-			spanKind: "SPAN_KIND_INTERNAL",
-			durationMs: 0,
-			startTime: children[0].startTime,
-			statusCode: "Unset",
-			statusMessage: "",
-			spanAttributes: {},
-			resourceAttributes: {},
-			children,
-			depth: 0,
-			isMissing: true,
-		}
-		rootSpans.push(placeholder)
-	}
-
-	function setDepth(node: SpanNode, depth: number) {
-		node.depth = depth
-		for (const child of node.children) {
-			setDepth(child, depth + 1)
-		}
-	}
-
-	for (const root of rootSpans) {
-		setDepth(root, 0)
-	}
-
-	function sortChildren(node: SpanNode) {
-		node.children.sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
-		for (const child of node.children) {
-			sortChildren(child)
-		}
-	}
-
-	for (const root of rootSpans) {
-		sortChildren(root)
-	}
-
-	rootSpans.sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
-	return rootSpans
-}
-
 export function getSpanHierarchy({ data }: { data: GetSpanHierarchyInput }) {
 	return getSpanHierarchyEffect({ data })
 }
@@ -453,7 +357,7 @@ const getSpanHierarchyEffect = Effect.fn("QueryEngine.getSpanHierarchy")(functio
 		}),
 	)
 
-	const spans = result.data.map((raw) => transformSpan(raw as SpanHierarchyRow))
+	const spans = dedupeBySpanId(result.data.map((raw) => transformSpan(raw as SpanHierarchyRow)))
 	const rootSpans = buildSpanTree(spans)
 	const totalDurationMs = spans.length > 0 ? Math.max(...spans.map((span) => span.durationMs)) : 0
 
@@ -532,6 +436,7 @@ export interface TracesFacets {
 	httpMethods: FacetItem[]
 	httpStatusCodes: FacetItem[]
 	deploymentEnvs: FacetItem[]
+	namespaces: FacetItem[]
 	errorCount: number
 	durationStats: {
 		minDurationMs: number
@@ -557,30 +462,34 @@ export interface TracesDurationStatsResponse {
 const GetTracesFacetsInputSchema = Schema.Struct({
 	startTime: Schema.optional(WarehouseDateTimeString),
 	endTime: Schema.optional(WarehouseDateTimeString),
-	service: Schema.optional(Schema.String),
-	spanName: Schema.optional(Schema.String),
+	service: Schema.optional(ServiceName),
+	spanName: Schema.optional(SpanName),
 	hasError: Schema.optional(Schema.Boolean),
 	minDurationMs: Schema.optional(Schema.Number),
 	maxDurationMs: Schema.optional(Schema.Number),
 	httpMethod: Schema.optional(Schema.String),
 	httpStatusCode: Schema.optional(Schema.String),
-	deploymentEnv: Schema.optional(Schema.String),
+	deploymentEnv: Schema.optional(DeploymentEnvironment),
+	namespace: Schema.optional(ServiceNamespace),
 	attributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	resourceAttributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	serviceMatchMode: ContainsMatchMode,
 	spanNameMatchMode: ContainsMatchMode,
 	deploymentEnvMatchMode: ContainsMatchMode,
+	namespaceMatchMode: ContainsMatchMode,
 })
 
-export type GetTracesFacetsInput = Schema.Schema.Type<typeof GetTracesFacetsInputSchema>
+export type GetTracesFacetsInput = (typeof GetTracesFacetsInputSchema)["Encoded"]
+type GetTracesFacetsDecoded = (typeof GetTracesFacetsInputSchema)["Type"]
 
-function buildTracesFiltersFromInput(input: GetTracesFacetsInput) {
-	const attributeFilters = buildAttributeFilters(input as ListTracesInput)
-	const resourceAttributeFilters = buildResourceAttributeFilters(input as ListTracesInput)
+function buildTracesFiltersFromInput(input: GetTracesFacetsDecoded) {
+	const attributeFilters = buildAttributeFilters(input as ListTracesDecoded)
+	const resourceAttributeFilters = buildResourceAttributeFilters(input as ListTracesDecoded)
 	const matchModes: Record<string, string> = {}
 	if (input.serviceMatchMode === "contains") matchModes.serviceName = "contains"
 	if (input.spanNameMatchMode === "contains") matchModes.spanName = "contains"
 	if (input.deploymentEnvMatchMode === "contains") matchModes.deploymentEnv = "contains"
+	if (input.namespaceMatchMode === "contains") matchModes.serviceNamespace = "contains"
 
 	return {
 		serviceName: input.service,
@@ -589,6 +498,7 @@ function buildTracesFiltersFromInput(input: GetTracesFacetsInput) {
 		minDurationMs: input.minDurationMs,
 		maxDurationMs: input.maxDurationMs,
 		environments: input.deploymentEnv ? [input.deploymentEnv] : undefined,
+		namespaces: input.namespace ? [input.namespace] : undefined,
 		matchModes: Object.keys(matchModes).length > 0 ? matchModes : undefined,
 		attributeFilters: attributeFilters.length > 0 ? attributeFilters : undefined,
 		resourceAttributeFilters: resourceAttributeFilters.length > 0 ? resourceAttributeFilters : undefined,
@@ -649,6 +559,7 @@ const getTracesFacetsEffect = Effect.fn("QueryEngine.getTracesFacets")(function*
 			httpMethods: byType("httpMethod"),
 			httpStatusCodes: byType("httpStatus"),
 			deploymentEnvs: byType("deploymentEnv"),
+			namespaces: byType("serviceNamespace"),
 			errorCount: errorRow ? Number(errorRow.count) : 0,
 			durationStats: statsData,
 		} satisfies TracesFacets,

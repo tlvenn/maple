@@ -1,5 +1,5 @@
 # Build context: monorepo root (.)
-FROM oven/bun:1.3.8 AS base
+FROM oven/bun:1.3.11 AS base
 WORKDIR /app
 
 FROM base AS pruner
@@ -15,10 +15,9 @@ RUN apt-get update && \
 RUN bun install
 COPY --from=pruner /app/out/full/ ./
 
-# `@maple-dev/effect-sdk` and `@maple-dev/browser` both only expose pre-built
-# `dist/` via their exports map — build them first so rolldown can resolve
-# the imports during `vite build`.
-RUN bunx turbo build --filter=@maple-dev/effect-sdk --filter=@maple-dev/browser
+# Build workspace dependencies that publish from dist/
+RUN bun run --cwd packages/browser build && \
+    bun run --cwd lib/effect-sdk build
 
 # Build-time env vars (baked into the SPA bundle)
 ARG VITE_API_BASE_URL

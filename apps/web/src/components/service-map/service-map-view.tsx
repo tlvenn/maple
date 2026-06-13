@@ -185,7 +185,14 @@ function ServiceDetailPanel({
 						style={{ backgroundColor: accentColor }}
 					/>
 					<div className={cn("h-1.5 w-1.5 rounded-full shrink-0", getHealthDotClass(errorRate))} />
-					<span className="text-sm font-semibold text-foreground truncate">{serviceId}</span>
+					<div className="flex flex-col min-w-0">
+						<span className="text-sm font-semibold text-foreground truncate">{serviceId}</span>
+						{overview?.serviceNamespace ? (
+							<span className="text-[10px] text-muted-foreground truncate">
+								{overview.serviceNamespace}
+							</span>
+						) : null}
+					</div>
 				</div>
 				<div className="flex items-center gap-2 shrink-0">
 					<Link

@@ -13,6 +13,11 @@ export interface MapleClientConfig {
 	readonly ingestKey?: string | undefined
 	/** Service version or commit SHA. */
 	readonly serviceVersion?: string | undefined
+	/**
+	 * Logical group this service belongs to, emitted as the OTel
+	 * `service.namespace` resource attribute. Optional — only stamped when set.
+	 */
+	readonly serviceNamespace?: string | undefined
 	/** Deployment environment (e.g. "production", "staging"). */
 	readonly environment?: string | undefined
 	/** Additional resource attributes merged into the telemetry resource. */
@@ -68,6 +73,7 @@ export const layer = (config: MapleClientConfig) => {
 		attributes["deployment.environment.name"] = config.environment
 	}
 	if (config.serviceVersion) attributes["deployment.commit_sha"] = config.serviceVersion
+	if (config.serviceNamespace) attributes["service.namespace"] = config.serviceNamespace
 	if (config.attributes) Object.assign(attributes, config.attributes)
 
 	const base = Otlp.layerJson({

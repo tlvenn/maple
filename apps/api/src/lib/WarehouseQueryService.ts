@@ -51,8 +51,13 @@ const createClickHouseSqlClient = (config: ClickHouseConfig): WarehouseSqlClient
 			const data = await resultSet.json<Record<string, unknown>>()
 			return { data }
 		},
-		insert: async (datasource, rows) => {
-			await client.insert({ table: datasource, values: rows, format: "JSONEachRow" })
+		insert: async (_datasource, _rows) => {
+			// ClickHouse is READ-ONLY for Maple: the managed CLICKHOUSE_URL endpoint is
+			// a query gateway that rejects inserts ("Only SELECT or DESCRIBE queries are
+			// supported. Got: InsertQuery"), and a BYO org override is a read concern.
+			// All ingest goes to Tinybird's Events API (see resolveIngestConfig), so this
+			// must never be reached — fail loudly instead of silently 500'ing.
+			throw new Error("ClickHouse is read-only for Maple — ingest must use Tinybird")
 		},
 	}
 }
@@ -108,6 +113,46 @@ export class WarehouseQueryService extends Context.Service<
 		 *   2. Env-level managed ClickHouse (`CLICKHOUSE_URL` set)
 		 *   3. Env-level managed Tinybird (`TINYBIRD_HOST` + `TINYBIRD_TOKEN`)
 		 */
+		// The managed (env-level) upstream: ClickHouse when CLICKHOUSE_URL is set,
+		// otherwise the managed Tinybird pipeline. This is the canonical WRITE
+		// target — demo-seed, service-map rollups and alert-check inserts all land
+		// here — and the read-path fallback when an org has no BYO override.
+		const resolveManagedConfig = Effect.fn("WarehouseQueryService.resolveManagedConfig")(
+			function* () {
+				if (Option.isSome(env.CLICKHOUSE_URL)) {
+					yield* Effect.annotateCurrentSpan("db.client", "clickhouse")
+					return {
+						config: {
+							_tag: "clickhouse" as const,
+							url: env.CLICKHOUSE_URL.value,
+							username: env.CLICKHOUSE_USER,
+							password: Option.match(env.CLICKHOUSE_PASSWORD, {
+								onNone: () => Redacted.value(env.TINYBIRD_TOKEN),
+								onSome: Redacted.value,
+							}),
+							database: env.CLICKHOUSE_DATABASE,
+						},
+						source: "managed" as const,
+					}
+				}
+
+				yield* Effect.annotateCurrentSpan("db.client", "tinybird-sdk")
+				return {
+					config: {
+						_tag: "tinybird" as const,
+						host: env.TINYBIRD_HOST,
+						token: Redacted.value(env.TINYBIRD_TOKEN),
+					},
+					source: "managed" as const,
+				}
+			},
+		)
+
+		/**
+		 * Read-path config. A per-org BYO ClickHouse row (`org_clickhouse_settings`)
+		 * overrides the managed upstream for that org's queries; otherwise we fall
+		 * back to the managed config.
+		 */
 		const resolveConfig: WarehouseExecutorDeps["resolveConfig"] = Effect.fn(
 			"WarehouseQueryService.resolveSqlConfig",
 		)(function* (tenant, label) {
@@ -131,23 +176,27 @@ export class WarehouseQueryService extends Context.Service<
 			}
 
 			yield* Effect.annotateCurrentSpan("clientSource", "managed")
-			if (Option.isSome(env.CLICKHOUSE_URL)) {
-				yield* Effect.annotateCurrentSpan("db.client", "clickhouse")
-				return {
-					config: {
-						_tag: "clickhouse" as const,
-						url: env.CLICKHOUSE_URL.value,
-						username: env.CLICKHOUSE_USER,
-						password: Option.match(env.CLICKHOUSE_PASSWORD, {
-							onNone: () => Redacted.value(env.TINYBIRD_TOKEN),
-							onSome: Redacted.value,
-						}),
-						database: env.CLICKHOUSE_DATABASE,
-					},
-					source: "managed" as const,
-				}
-			}
+			return yield* resolveManagedConfig()
+		})
 
+		/**
+		 * Write-path config. Inserts (demo seed, service-map rollups, alert checks)
+		 * ALWAYS go to the Tinybird ingest pipeline (Events API) — never ClickHouse.
+		 *
+		 * This is deliberately NOT `resolveManagedConfig()`: when `CLICKHOUSE_URL` is
+		 * set, the *managed* backend is a READ-ONLY ClickHouse query gateway that
+		 * rejects inserts ("DB::Exception: Only SELECT or DESCRIBE queries are
+		 * supported. Got: InsertQuery"). A per-org BYO ClickHouse override is also a
+		 * read concern. Tinybird is the only writable warehouse, so ingest pins to
+		 * it unconditionally (TINYBIRD_HOST/TOKEN are required env, always present).
+		 * Routing writes anywhere else broke demo-seed onboarding.
+		 */
+		const resolveIngestConfig: WarehouseExecutorDeps["resolveConfig"] = Effect.fn(
+			"WarehouseQueryService.resolveIngestConfig",
+		)(function* (tenant, _label) {
+			yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
+			yield* Effect.annotateCurrentSpan("clientSource", "managed")
+			yield* Effect.annotateCurrentSpan("ingest.routing", "tinybird")
 			yield* Effect.annotateCurrentSpan("db.client", "tinybird-sdk")
 			return {
 				config: {
@@ -162,6 +211,7 @@ export class WarehouseQueryService extends Context.Service<
 		return makeWarehouseExecutor({
 			createClient: (config) => sqlClientFactory(config),
 			resolveConfig,
+			resolveIngestConfig,
 		})
 	}),
 }) {
@@ -207,4 +257,6 @@ export const __testables = {
 	reset: () => {
 		sqlClientFactory = createClient
 	},
+	createClickHouseSqlClient,
+	createTinybirdSdkSqlClient,
 }

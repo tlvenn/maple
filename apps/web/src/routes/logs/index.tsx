@@ -16,6 +16,8 @@ const logsSearchSchema = Schema.Struct({
 	severities: OptionalStringArrayParam,
 	deploymentEnvs: OptionalStringArrayParam,
 	deploymentEnvMatchMode: Schema.optional(Schema.Literals(["contains"])),
+	namespaces: OptionalStringArrayParam,
+	namespaceMatchMode: Schema.optional(Schema.Literals(["contains"])),
 	search: Schema.optional(Schema.String),
 	startTime: Schema.optional(Schema.String),
 	endTime: Schema.optional(Schema.String),

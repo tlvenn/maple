@@ -6,6 +6,7 @@ use tracing::{info_span, Span};
 
 pub struct ResourceConfig {
     pub service_name: &'static str,
+    pub service_namespace: &'static str,
     pub service_version: &'static str,
     pub service_instance_id: String,
     pub deployment_env: String,
@@ -15,6 +16,7 @@ pub struct ResourceConfig {
 pub fn build_resource(cfg: ResourceConfig) -> Resource {
     let mut attrs = vec![
         KeyValue::new("service.name", cfg.service_name),
+        KeyValue::new("service.namespace", cfg.service_namespace),
         KeyValue::new("service.version", cfg.service_version),
         KeyValue::new("service.instance.id", cfg.service_instance_id),
         KeyValue::new("deployment.environment.name", cfg.deployment_env.clone()),
@@ -205,6 +207,7 @@ mod tests {
     fn build_resource_sets_runtime_and_sdk_type() {
         let resource = build_resource(ResourceConfig {
             service_name: "ingest",
+            service_namespace: "ingest",
             service_version: "0.0.0",
             service_instance_id: "test-instance".to_string(),
             deployment_env: "test".to_string(),
@@ -220,6 +223,10 @@ mod tests {
         );
         assert_eq!(
             find_attr(&resource, "service.name").as_deref(),
+            Some("ingest")
+        );
+        assert_eq!(
+            find_attr(&resource, "service.namespace").as_deref(),
             Some("ingest")
         );
         // Dual-emit deployment env

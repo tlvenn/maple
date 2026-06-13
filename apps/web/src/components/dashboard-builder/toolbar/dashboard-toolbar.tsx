@@ -47,6 +47,7 @@ export function DashboardToolbar({
 	return (
 		<div className="flex items-center gap-3">
 			<TimeRangePicker
+				hotkey
 				startTime={resolvedTimeRange?.startTime}
 				endTime={resolvedTimeRange?.endTime}
 				presetValue={timeRange.type === "relative" ? timeRange.value : undefined}

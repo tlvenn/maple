@@ -204,17 +204,24 @@ describe("errorsFacetsQuery", () => {
 // ---------------------------------------------------------------------------
 
 describe("tracesFacetsQuery", () => {
-	it("compiles UNION ALL with 6 facet dimensions", () => {
+	it("compiles UNION ALL with 7 facet dimensions", () => {
 		const q = tracesFacetsQuery({})
 		const { sql } = compileUnion(q, baseParams)
 		const unionCount = (sql.match(/UNION ALL/g) || []).length
-		expect(unionCount).toBe(5) // 6 queries = 5 UNION ALL
+		expect(unionCount).toBe(6) // 7 queries = 6 UNION ALL
 		expect(sql).toContain("'service' AS facetType")
 		expect(sql).toContain("'spanName' AS facetType")
 		expect(sql).toContain("'httpMethod' AS facetType")
 		expect(sql).toContain("'httpStatus' AS facetType")
 		expect(sql).toContain("'deploymentEnv' AS facetType")
+		expect(sql).toContain("'serviceNamespace' AS facetType")
 		expect(sql).toContain("'errorCount' AS facetType")
+	})
+
+	it("applies namespace filter", () => {
+		const q = tracesFacetsQuery({ namespace: "team-a" })
+		const { sql } = compileUnion(q, baseParams)
+		expect(sql).toContain("ServiceNamespace = 'team-a'")
 	})
 
 	it("applies serviceName filter", () => {

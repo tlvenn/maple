@@ -8,6 +8,7 @@ order: 1
 import LocalHero from "../../components/local/LocalHero.astro"
 import LocalFlow from "../../components/local/LocalFlow.astro"
 import LocalCommandGrid from "../../components/local/LocalCommandGrid.astro"
+import InstallTabs from "../../components/local/InstallTabs.astro"
 
 <LocalHero />
 
@@ -15,13 +16,11 @@ Local mode is the fastest way to look at OpenTelemetry data — point any OTLP e
 
 ## Install
 
-```bash
-curl -fsSL https://maple.dev/cli/install | sh
-```
+Pick your package manager. Homebrew is the easiest path on macOS and Linux; the install script works anywhere a shell does.
 
-The installer detects your OS/arch, downloads the matching bundle from the latest GitHub release, verifies its checksum, installs the two files (`maple` + `libchdb`) into `~/.maple/bin`, clears the macOS Gatekeeper quarantine, and symlinks `maple` onto your `PATH`. macOS (Apple Silicon) and Linux (x86_64 & arm64) are supported.
+<InstallTabs />
 
-> Prefer not to pipe to a shell? The script is [`scripts/install.sh`](https://github.com/Makisuo/maple/blob/main/scripts/install.sh) — read it first, or download a release bundle from [GitHub Releases](https://github.com/Makisuo/maple/releases) by hand. Uninstall with `curl -fsSL https://maple.dev/cli/uninstall | sh` (your `~/.maple/data` is kept).
+> Prefer to do it by hand? Download a release bundle (both `maple` + `libchdb`) from [GitHub Releases](https://github.com/Makisuo/maple/releases), or read [`scripts/install.sh`](https://github.com/Makisuo/maple/blob/main/scripts/install.sh) first before piping it to a shell.
 
 ## Start the server
 

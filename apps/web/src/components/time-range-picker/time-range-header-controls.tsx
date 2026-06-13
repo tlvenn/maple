@@ -31,6 +31,7 @@ export function TimeRangeHeaderControls({
 					endTime={endTime}
 					presetValue={presetValue}
 					onChange={onTimeChange}
+					hotkey
 				/>
 				{hasCustomRange && (
 					<Button

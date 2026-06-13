@@ -37,6 +37,13 @@ const getServiceInstanceId = (): string => (serviceInstanceId ??= crypto.randomU
 export interface ResourceConfigInput {
 	readonly serviceName?: string | undefined
 	readonly serviceVersion?: string | undefined
+	/**
+	 * Logical group this service belongs to, emitted as the OTel
+	 * `service.namespace` resource attribute. Optional — only stamped when set,
+	 * so external apps choose their own (or none). Can also be supplied via
+	 * `OTEL_RESOURCE_ATTRIBUTES=service.namespace=…`, which overrides this.
+	 */
+	readonly serviceNamespace?: string | undefined
 	readonly environment?: string | undefined
 	readonly endpoint?: string | undefined
 	readonly ingestKey?: string | undefined
@@ -107,6 +114,7 @@ export const resolveResource = (config: ResourceConfigInput): Effect.Effect<Reso
 			attributes["deployment.environment.name"] = environment
 		}
 		if (serviceVersion) attributes["deployment.commit_sha"] = serviceVersion
+		if (config.serviceNamespace) attributes["service.namespace"] = config.serviceNamespace
 		Object.assign(attributes, envResourceAttributes)
 		if (config.attributes) Object.assign(attributes, config.attributes)
 
@@ -178,6 +186,7 @@ export const resolveResourceFromEnv = (
 		attributes["deployment.environment.name"] = environment
 	}
 	if (serviceVersion) attributes["deployment.commit_sha"] = serviceVersion
+	if (config.serviceNamespace) attributes["service.namespace"] = config.serviceNamespace
 	Object.assign(attributes, envResourceAttributes)
 	if (config.attributes) Object.assign(attributes, config.attributes)
 

@@ -324,6 +324,7 @@ export interface TracesDurationStatsParams {
 
 export interface ServiceOverviewOutput {
 	readonly serviceName: string
+	readonly serviceNamespace: string
 	readonly environment: string
 	readonly commitSha: string
 	readonly throughput: number
@@ -340,6 +341,7 @@ export interface ServiceOverviewParams {
 	start_time?: string
 	end_time?: string
 	environments?: string
+	namespaces?: string
 	commit_shas?: string
 }
 

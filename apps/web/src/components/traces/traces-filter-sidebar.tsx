@@ -37,6 +37,7 @@ export function TracesFilterSidebarView({
 		(filters.services?.length ?? 0) > 0 ||
 		(filters.spanNames?.length ?? 0) > 0 ||
 		(filters.deploymentEnvs?.length ?? 0) > 0 ||
+		(filters.namespaces?.length ?? 0) > 0 ||
 		(filters.httpMethods?.length ?? 0) > 0 ||
 		(filters.httpStatusCodes?.length ?? 0) > 0 ||
 		filters.hasError !== undefined ||
@@ -91,6 +92,18 @@ export function TracesFilterSidebarView({
 									options={facets.deploymentEnvs}
 									selected={filters.deploymentEnvs ?? []}
 									onChange={(val) => onFilterChange("deploymentEnvs", val)}
+								/>
+								<Separator className="my-2" />
+							</>
+						)}
+
+						{(facets.namespaces?.length ?? 0) > 0 && (
+							<>
+								<SearchableFilterSection
+									title="Namespace"
+									options={facets.namespaces}
+									selected={filters.namespaces ?? []}
+									onChange={(val) => onFilterChange("namespaces", val)}
 								/>
 								<Separator className="my-2" />
 							</>

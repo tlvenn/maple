@@ -50,6 +50,11 @@ export interface Config {
 	 */
 	readonly serviceName?: string | undefined
 	readonly serviceVersion?: string | undefined
+	/**
+	 * Logical group this service belongs to, emitted as the OTel
+	 * `service.namespace` resource attribute. Optional — only stamped when set.
+	 */
+	readonly serviceNamespace?: string | undefined
 	readonly environment?: string | undefined
 	/**
 	 * Ingest endpoint URL (base, no path). Defaults to `env.MAPLE_ENDPOINT`,

@@ -127,11 +127,12 @@ export const ServiceMapEdge = memo(function ServiceMapEdge({
 				strokeOpacity={0.12 + i * 0.15}
 			/>
 
-			{/* Layer 2: Tube dark core — hollow interior */}
+			{/* Layer 2: Tube core — hollow interior matching the canvas background
+			    (theme token; SVG presentation attrs don't support var(), so set via style) */}
 			<path
 				d={edgePath}
 				fill="none"
-				stroke="oklch(0.141 0.005 285.823)"
+				style={{ stroke: "var(--service-map-edge-core)" }}
 				strokeWidth={sw}
 				strokeOpacity={0.5 + i * 0.2}
 				className="react-flow__edge-path"

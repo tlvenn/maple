@@ -138,6 +138,7 @@ function generateBenchGraph(params: BenchParams): BenchGraph {
 		const samplingWeight = hasSampling ? 1 + Math.floor(rng() * 9) : 1
 		return {
 			serviceName: name,
+			serviceNamespace: "",
 			environment: "prod",
 			commits: [],
 			p50LatencyMs: 2 + rng() * 50,

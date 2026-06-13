@@ -71,6 +71,7 @@ export const TraceListMv = table("trace_list_mv", {
 	HttpRoute: T.string,
 	HttpStatusCode: T.string,
 	DeploymentEnv: T.string,
+	ServiceNamespace: T.string,
 	HasError: T.uint8,
 	TraceState: T.string,
 })
@@ -103,6 +104,7 @@ export const ServiceOverviewSpans = table("service_overview_spans", {
 	StatusCode: T.string,
 	TraceState: T.string,
 	DeploymentEnv: T.string,
+	ServiceNamespace: T.string,
 	CommitSha: T.string,
 	SampleRate: T.float64,
 })
@@ -313,6 +315,7 @@ export const LogsAggregatesHourly = table("logs_aggregates_hourly", {
 	ServiceName: T.string,
 	SeverityText: T.string,
 	DeploymentEnv: T.string,
+	ServiceNamespace: T.string,
 	Count: T.uint64,
 	SizeBytes: T.uint64,
 })

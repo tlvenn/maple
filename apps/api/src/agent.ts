@@ -28,6 +28,7 @@ const buildSetup = async (env: Record<string, unknown>): Promise<MapleAgentSetup
 	const workerEnvLive = Layer.succeed(envMod.WorkerEnvironment, env as Record<string, any>)
 	const telemetry = MapleCloudflareSDK.make({
 		serviceName: "maple-agent",
+		serviceNamespace: "backend",
 		dropSpanNames: ["McpServer/Notifications."],
 	})
 

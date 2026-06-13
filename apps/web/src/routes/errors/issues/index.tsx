@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import { Result, useAtomValue } from "@/lib/effect-atom"
 import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
+import { useListNavigation } from "@/hooks/use-list-navigation"
 import { IssueGroup } from "@/components/errors/issue-group"
 import { IssuesBulkBar } from "@/components/errors/issues-bulk-bar"
 import { IssuesToolbar } from "@/components/errors/issues-toolbar"
@@ -76,13 +77,6 @@ export const Route = effectRoute(createFileRoute("/errors/issues/"))({
 	validateSearch: Schema.toStandardSchemaV1(searchSchema),
 })
 
-function isTypingTarget(target: EventTarget | null): boolean {
-	if (!(target instanceof HTMLElement)) return false
-	if (target.isContentEditable) return true
-	const tag = target.tagName
-	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT"
-}
-
 function IssuesPage() {
 	const search = Route.useSearch()
 	const navigate = useNavigate({ from: Route.fullPath })
@@ -99,7 +93,6 @@ function IssuesPage() {
 	const mutations = useIssueMutations()
 
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
-	const [focusedId, setFocusedId] = useState<string | null>(null)
 	const anchorRef = useRef<string | null>(null)
 
 	const totalCount = Result.isSuccess(issuesResult) ? issuesResult.value.issues.length : undefined
@@ -171,8 +164,6 @@ function IssuesPage() {
 					mutations={mutations}
 					selectedIds={selectedIds}
 					setSelectedIds={setSelectedIds}
-					focusedId={focusedId}
-					setFocusedId={setFocusedId}
 					anchorRef={anchorRef}
 					toolbar={toolbar}
 				/>
@@ -188,8 +179,6 @@ interface IssuesPageBodyProps {
 	mutations: ReturnType<typeof useIssueMutations>
 	selectedIds: Set<string>
 	setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>
-	focusedId: string | null
-	setFocusedId: React.Dispatch<React.SetStateAction<string | null>>
 	anchorRef: React.MutableRefObject<string | null>
 	toolbar: React.ReactNode
 }
@@ -201,8 +190,6 @@ function IssuesPageBody({
 	mutations,
 	selectedIds,
 	setSelectedIds,
-	focusedId,
-	setFocusedId,
 	anchorRef,
 	toolbar,
 }: IssuesPageBodyProps) {
@@ -241,17 +228,18 @@ function IssuesPageBody({
 		[flatIssues, selectedIds],
 	)
 
-	const handleSelectToggle = useCallback(
-		(id: string, event: SelectToggleEvent) => {
+	const flatIssueIds = useMemo(() => flatIssues.map((i) => i.id as string), [flatIssues])
+
+	const toggleSelection = useCallback(
+		(id: string, event: Pick<SelectToggleEvent, "shiftKey">) => {
 			setSelectedIds((prev) => {
 				const next = new Set(prev)
 				if (event.shiftKey && anchorRef.current) {
-					const ids = flatIssues.map((i) => i.id as string)
-					const a = ids.indexOf(anchorRef.current)
-					const b = ids.indexOf(id)
+					const a = flatIssueIds.indexOf(anchorRef.current)
+					const b = flatIssueIds.indexOf(id)
 					if (a !== -1 && b !== -1) {
 						const [lo, hi] = a < b ? [a, b] : [b, a]
-						for (let i = lo; i <= hi; i++) next.add(ids[i]!)
+						for (let i = lo; i <= hi; i++) next.add(flatIssueIds[i]!)
 						return next
 					}
 				}
@@ -260,16 +248,8 @@ function IssuesPageBody({
 				anchorRef.current = id
 				return next
 			})
-			setFocusedId(id)
 		},
-		[flatIssues, anchorRef, setSelectedIds, setFocusedId],
-	)
-
-	const handleFocus = useCallback(
-		(id: string) => {
-			setFocusedId(id)
-		},
-		[setFocusedId],
+		[flatIssueIds, anchorRef, setSelectedIds],
 	)
 
 	const clearSelection = useCallback(() => {
@@ -278,60 +258,37 @@ function IssuesPageBody({
 
 	const navigate = useNavigate({ from: Route.fullPath })
 
-	useEffect(() => {
-		const handler = (e: KeyboardEvent) => {
-			if (isTypingTarget(e.target)) return
-			if (e.defaultPrevented) return
-			if (e.metaKey || e.ctrlKey || e.altKey) return
-			if (flatIssues.length === 0) return
+	const { focusedId, setFocusedId } = useListNavigation({
+		ids: flatIssueIds,
+		onOpen: (id) => {
+			navigate({
+				to: "/errors/issues/$issueId",
+				params: { issueId: id as ErrorIssueId },
+			})
+		},
+		onToggleSelect: toggleSelection,
+		onEscape: () => {
+			if (selectedIds.size === 0) return false
+			clearSelection()
+			return true
+		},
+		scrollTo: (id) => scrollIntoView(id),
+	})
 
-			const ids = flatIssues.map((i) => i.id as string)
-			const currentIndex = focusedId ? ids.indexOf(focusedId) : -1
+	const handleSelectToggle = useCallback(
+		(id: string, event: SelectToggleEvent) => {
+			toggleSelection(id, event)
+			setFocusedId(id)
+		},
+		[toggleSelection, setFocusedId],
+	)
 
-			if (e.key === "j" || e.key === "ArrowDown") {
-				e.preventDefault()
-				const next = currentIndex < 0 ? 0 : Math.min(currentIndex + 1, ids.length - 1)
-				const id = ids[next]!
-				setFocusedId(id)
-				scrollIntoView(id)
-				return
-			}
-			if (e.key === "k" || e.key === "ArrowUp") {
-				e.preventDefault()
-				const next = currentIndex <= 0 ? 0 : currentIndex - 1
-				const id = ids[next]!
-				setFocusedId(id)
-				scrollIntoView(id)
-				return
-			}
-			if (e.key === "Enter" && focusedId) {
-				e.preventDefault()
-				navigate({
-					to: "/errors/issues/$issueId",
-					params: { issueId: focusedId as ErrorIssueId },
-				})
-				return
-			}
-			if (e.key.toLowerCase() === "x" && focusedId) {
-				e.preventDefault()
-				handleSelectToggle(focusedId, {
-					shiftKey: e.shiftKey,
-					metaKey: e.metaKey,
-					ctrlKey: e.ctrlKey,
-				})
-				return
-			}
-			if (e.key === "Escape") {
-				if (selectedIds.size > 0) {
-					e.preventDefault()
-					clearSelection()
-				}
-				return
-			}
-		}
-		window.addEventListener("keydown", handler)
-		return () => window.removeEventListener("keydown", handler)
-	}, [flatIssues, focusedId, selectedIds, setFocusedId, handleSelectToggle, clearSelection, navigate])
+	const handleFocus = useCallback(
+		(id: string) => {
+			setFocusedId(id)
+		},
+		[setFocusedId],
+	)
 
 	return (
 		<DashboardLayout

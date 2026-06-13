@@ -4,13 +4,14 @@
 	"ignore": ["**/routeTree.gen.ts", ".context/**", ".deepsec/**", "**/sst-env.d.ts"],
 	"workspaces": {
 		".": {
-			"entry": ["alchemy.run.ts", "scripts/**/*.ts"]
+			"entry": ["alchemy.run.ts", "scripts/**/*.ts", "otel/**/*.ts"]
 		},
 		"apps/web": {
 			"entry": ["src/routes/**/*.tsx", "src/worker.ts", "alchemy.run.ts"]
 		},
 		"apps/api": {
-			"entry": ["alchemy.run.ts"]
+			"entry": ["alchemy.run.ts"],
+			"ignoreDependencies": ["cloudflare"]
 		},
 		"apps/alerting": {
 			"entry": ["alchemy.run.ts"]

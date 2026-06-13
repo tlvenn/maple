@@ -12,6 +12,11 @@ export interface MapleConfig {
 	readonly serviceName?: string | undefined
 	/** Override auto-detected service version (commit SHA). */
 	readonly serviceVersion?: string | undefined
+	/**
+	 * Logical group this service belongs to, emitted as the OTel
+	 * `service.namespace` resource attribute. Optional — only stamped when set.
+	 */
+	readonly serviceNamespace?: string | undefined
 	/** Override auto-detected deployment environment. */
 	readonly environment?: string | undefined
 	/**

@@ -6,6 +6,11 @@ export interface MapleBrowserConfig {
 	readonly serviceName: string
 	/** Maple ingest base URL. Defaults to `https://ingest.maple.dev`. */
 	readonly endpoint?: string
+	/**
+	 * Logical group this service belongs to, emitted as the OTel
+	 * `service.namespace` resource attribute on traces. Optional.
+	 */
+	readonly serviceNamespace?: string
 	/** Service version / commit SHA. */
 	readonly serviceVersion?: string
 	/** Deployment environment, e.g. "production". */
@@ -44,6 +49,7 @@ export interface ResolvedConfig {
 	readonly ingestKey: string
 	readonly serviceName: string
 	readonly endpoint: string
+	readonly serviceNamespace: string | undefined
 	readonly serviceVersion: string | undefined
 	readonly environment: string | undefined
 	/** Mutable: `MapleBrowser.identify()` can attach/replace the user id after init. */
@@ -63,6 +69,7 @@ export function resolveConfig(config: MapleBrowserConfig): ResolvedConfig {
 		ingestKey: config.ingestKey,
 		serviceName: config.serviceName,
 		endpoint: (config.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, ""),
+		serviceNamespace: config.serviceNamespace,
 		serviceVersion: config.serviceVersion,
 		environment: config.environment,
 		userId: config.userId,

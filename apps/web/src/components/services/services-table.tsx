@@ -294,7 +294,7 @@ export function ServicesTable({ filters }: ServicesTableProps) {
 
 												return (
 													<TableRow
-														key={`${service.serviceName}-${service.environment}`}
+														key={`${service.serviceName}-${service.serviceNamespace}-${service.environment}`}
 														className="cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
 														tabIndex={0}
 														onClick={() =>
@@ -339,6 +339,11 @@ export function ServicesTable({ filters }: ServicesTableProps) {
 															>
 																{service.serviceName}
 															</Link>
+															{service.serviceNamespace ? (
+																<div className="text-xs text-muted-foreground">
+																	{service.serviceNamespace}
+																</div>
+															) : null}
 														</TableCell>
 														<TableCell className="hidden lg:table-cell font-mono text-xs">
 															{formatLatency(service.p50LatencyMs)}

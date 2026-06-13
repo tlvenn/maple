@@ -10,6 +10,7 @@ import { useTimezonePreference } from "@/hooks/use-timezone-preference"
 import { formatCompactTimeInTimezone } from "@/lib/timezone-format"
 import { getSeverityColor } from "@maple/ui/lib/severity"
 import { useInfiniteLogs, FETCH_THRESHOLD } from "@/hooks/use-infinite-logs"
+import { useListNavigation } from "@/hooks/use-list-navigation"
 import { pickImportantAttributes } from "@/lib/log-attributes"
 import { LogAttributeChip } from "./log-attribute-chip"
 import { QueryErrorState } from "@/components/common/query-error-state"
@@ -55,6 +56,7 @@ interface LogRowProps {
 	top: number
 	timeZone: string
 	isSelected: boolean
+	isFocused: boolean
 	measureRef: (node: Element | null) => void
 	onClick: (log: Log) => void
 }
@@ -65,6 +67,7 @@ const LogRow = React.memo(function LogRow({
 	top,
 	timeZone,
 	isSelected,
+	isFocused,
 	measureRef,
 	onClick,
 }: LogRowProps) {
@@ -78,6 +81,7 @@ const LogRow = React.memo(function LogRow({
 			ref={measureRef}
 			data-index={index}
 			data-selected={isSelected || undefined}
+			data-focused={isFocused || undefined}
 			style={{
 				position: "absolute",
 				top: 0,
@@ -87,7 +91,7 @@ const LogRow = React.memo(function LogRow({
 				borderLeftWidth: "3px",
 				borderLeftColor: severityColor,
 			}}
-			className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono cursor-pointer border-b border-border hover:bg-muted/50 data-[selected]:bg-primary/5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+			className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono cursor-pointer border-b border-border hover:bg-muted/50 data-[selected]:bg-primary/5 data-[focused]:bg-muted/70 data-[focused]:ring-1 data-[focused]:ring-ring data-[focused]:ring-inset focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
 			tabIndex={0}
 			role="listitem"
 			onClick={() => onClick(log)}
@@ -170,6 +174,20 @@ export function LogsTableView({
 
 	const virtualItems = virtualizer.getVirtualItems()
 
+	// Index-keyed nav ids: logs have no stable row id, and the list is
+	// append-only for a given query, so indices stay stable while browsing.
+	const rowIds = React.useMemo(() => allData.map((_, index) => String(index)), [allData])
+	const { focusedId } = useListNavigation({
+		ids: rowIds,
+		enabled: allData.length > 0,
+		onOpen: (id) => {
+			const log = allData[Number(id)]
+			if (log) handleRowClick(log)
+		},
+		scrollTo: (_id, index) => virtualizer.scrollToIndex(index, { align: "auto" }),
+	})
+	const focusedIndex = focusedId === null ? -1 : Number(focusedId)
+
 	React.useEffect(() => {
 		const lastItem = virtualItems[virtualItems.length - 1]
 		if (!lastItem) return
@@ -209,6 +227,7 @@ export function LogsTableView({
 										top={virtualRow.start}
 										timeZone={effectiveTimezone}
 										isSelected={isSelected}
+										isFocused={virtualRow.index === focusedIndex}
 										measureRef={virtualizer.measureElement}
 										onClick={handleRowClick}
 									/>

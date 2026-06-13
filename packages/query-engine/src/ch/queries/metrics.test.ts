@@ -6,7 +6,6 @@ import {
 	metricsBreakdownQuery,
 	listMetricsQuery,
 	metricsSummaryQuery,
-	scrapeTargetChecksQuery,
 } from "./metrics"
 
 const baseParams = {
@@ -103,8 +102,13 @@ describe("metricsTimeseriesRateQuery", () => {
 		// Partition must isolate each pod/series (ResourceAttributes) and
 		// accumulation epoch (StartTimeUnix) — otherwise cumulative deltas are
 		// computed across interleaved replicas and inflate by orders of magnitude.
+		// The attribute Maps are folded into cityHash64 series fingerprints so the
+		// window sort key is fixed-width instead of a serialized Map per row.
 		expect(sql).toContain(
-			"PARTITION BY ServiceName, MetricName, Attributes, ResourceAttributes, StartTimeUnix",
+			"PARTITION BY ServiceName, MetricName, " +
+				"cityHash64(mapKeys(Attributes), mapValues(Attributes)), " +
+				"cityHash64(mapKeys(ResourceAttributes), mapValues(ResourceAttributes)), " +
+				"StartTimeUnix",
 		)
 		expect(sql).toContain("rateValue")
 		expect(sql).toContain("increaseValue")
@@ -233,43 +237,3 @@ describe("metricsSummaryQuery", () => {
 	})
 })
 
-// ---------------------------------------------------------------------------
-// scrapeTargetChecksQuery
-// ---------------------------------------------------------------------------
-
-describe("scrapeTargetChecksQuery", () => {
-	it("pivots Prometheus scrape metadata for one target", () => {
-		const q = scrapeTargetChecksQuery({ limit: 25 })
-		const { sql } = compileCH(q, {
-			orgId: "org_1",
-			targetId: "target_1",
-			startTime: "2024-01-01 00:00:00",
-			endTime: "2024-01-01 01:00:00",
-		})
-
-		expect(sql).toContain("FROM metrics_gauge")
-		expect(sql).toContain("OrgId = 'org_1'")
-		expect(sql).toContain("TimeUnix >= '2024-01-01 00:00:00'")
-		expect(sql).toContain("TimeUnix <= '2024-01-01 01:00:00'")
-		expect(sql).toContain("MetricName IN ('up', 'scrape_duration_seconds'")
-		expect(sql).toContain("Attributes['maple_scrape_target_id'] = 'target_1'")
-		expect(sql).toContain("maxIf(Value, MetricName = 'up') AS up")
-		expect(sql).toContain("maxIf(Value, MetricName = 'scrape_samples_scraped') AS samplesScraped")
-		expect(sql).toContain("GROUP BY timestamp")
-		expect(sql).toContain("ORDER BY timestamp DESC")
-		expect(sql).toContain("LIMIT 25")
-		expect(sql).toContain("FORMAT JSON")
-	})
-
-	it("defaults to 50 recent checks", () => {
-		const q = scrapeTargetChecksQuery()
-		const { sql } = compileCH(q, {
-			orgId: "org_1",
-			targetId: "target_1",
-			startTime: "2024-01-01 00:00:00",
-			endTime: "2024-01-01 01:00:00",
-		})
-
-		expect(sql).toContain("LIMIT 50")
-	})
-})

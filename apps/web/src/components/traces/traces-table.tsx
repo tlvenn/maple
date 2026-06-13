@@ -14,6 +14,7 @@ import { formatTimestampInTimezone } from "@/lib/timezone-format"
 import { formatRelativeTime } from "@/lib/format"
 import { HttpSpanLabel } from "@maple/ui/components/traces/http-span-label"
 import { useInfiniteTraces, FETCH_THRESHOLD } from "@/hooks/use-infinite-traces"
+import { useListNavigation } from "@/hooks/use-list-navigation"
 
 export interface TracesTableViewProps {
 	allData: Trace[]
@@ -249,6 +250,19 @@ export function TracesTableView({
 		}
 	}, [virtualItems, rows.length, hasNextPage, isFetchingNextPage, fetchNextPage])
 
+	// Index-keyed nav ids — the list is append-only for a given query.
+	const rowIds = React.useMemo(() => allData.map((_, index) => String(index)), [allData])
+	const { focusedId } = useListNavigation({
+		ids: rowIds,
+		enabled: allData.length > 0,
+		onOpen: (id) => {
+			const trace = allData[Number(id)]
+			if (trace) onTraceClick(trace.traceId, trace.startTime)
+		},
+		scrollTo: (_id, index) => virtualizer.scrollToIndex(index, { align: "auto" }),
+	})
+	const focusedIndex = focusedId === null ? -1 : Number(focusedId)
+
 	if (allData.length === 0) {
 		return (
 			<div className="flex-1 min-h-0 flex flex-col gap-4">
@@ -317,7 +331,8 @@ export function TracesTableView({
 									key={row.id}
 									ref={virtualizer.measureElement}
 									data-index={virtualRow.index}
-									className="border-b transition-colors hover:bg-muted/50 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+									data-focused={virtualRow.index === focusedIndex || undefined}
+									className="border-b transition-colors hover:bg-muted/50 data-[focused]:bg-muted/70 data-[focused]:ring-1 data-[focused]:ring-ring data-[focused]:ring-inset cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
 									tabIndex={0}
 									onClick={() => onTraceClick(row.original.traceId, row.original.startTime)}
 									onKeyDown={(e) => {

@@ -40,6 +40,7 @@ const WorkerPlatformLive = Layer.mergeAll(
 // live in the same runtime as the routes that emit spans.
 const telemetry = MapleCloudflareSDK.make({
 	serviceName: "maple-api",
+	serviceNamespace: "backend",
 	dropSpanNames: ["McpServer/Notifications."],
 })
 
@@ -200,6 +201,11 @@ const handle = async (
 		return new Response(`worker handler error: ${message}`, { status: 504 })
 	}
 }
+
+// Cloudflare requires Workflow classes to be exported from the worker entry.
+// The class is a thin shell that dynamic-imports its heavy logic inside run(),
+// so this static export keeps module-scope evaluation light (startup-CPU budget).
+export { ClickHouseSchemaApplyWorkflow } from "./workflows/ClickHouseSchemaApplyWorkflow"
 
 export default {
 	fetch: (request: Request, env: Record<string, unknown>, ctx: ExecutionContext) =>

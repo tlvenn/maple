@@ -302,10 +302,12 @@ export interface TracesDurationStatsOpts {
 	httpMethod?: string
 	httpStatusCode?: string
 	deploymentEnv?: string
+	namespace?: string
 	matchModes?: {
 		serviceName?: "contains"
 		spanName?: "contains"
 		deploymentEnv?: "contains"
+		serviceNamespace?: "contains"
 	}
 }
 
@@ -350,6 +352,11 @@ export function tracesDurationStatsQuery(opts: TracesDurationStatsOpts) {
 					? CH.positionCaseInsensitive($.DeploymentEnv, CH.lit(v)).gt(0)
 					: $.DeploymentEnv.eq(v),
 			),
+			CH.when(opts.namespace, (v: string) =>
+				mm?.serviceNamespace === "contains"
+					? CH.positionCaseInsensitive($.ServiceNamespace, CH.lit(v)).gt(0)
+					: $.ServiceNamespace.eq(v),
+			),
 		])
 		.format("JSON")
 }
@@ -367,10 +374,12 @@ export interface TracesFacetsOpts {
 	httpMethod?: string
 	httpStatusCode?: string
 	deploymentEnv?: string
+	namespace?: string
 	matchModes?: {
 		serviceName?: "contains"
 		spanName?: "contains"
 		deploymentEnv?: "contains"
+		serviceNamespace?: "contains"
 	}
 	attributeFilterKey?: string
 	attributeFilterValue?: string
@@ -418,6 +427,13 @@ export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFa
 				opts.matchModes?.deploymentEnv === "contains"
 					? CH.positionCaseInsensitive($.DeploymentEnv, CH.lit(opts.deploymentEnv)).gt(0)
 					: $.DeploymentEnv.eq(opts.deploymentEnv),
+			)
+		}
+		if (opts.namespace) {
+			conditions.push(
+				opts.matchModes?.serviceNamespace === "contains"
+					? CH.positionCaseInsensitive($.ServiceNamespace, CH.lit(opts.namespace)).gt(0)
+					: $.ServiceNamespace.eq(opts.namespace),
 			)
 		}
 
@@ -497,6 +513,7 @@ export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFa
 		makeFacetQuery("HttpMethod", "httpMethod", ($) => $.HttpMethod.neq(""), 20),
 		makeFacetQuery("HttpStatusCode", "httpStatus", ($) => $.HttpStatusCode.neq(""), 20),
 		makeFacetQuery("DeploymentEnv", "deploymentEnv", ($) => $.DeploymentEnv.neq(""), 20),
+		makeFacetQuery("ServiceNamespace", "serviceNamespace", ($) => $.ServiceNamespace.neq(""), 20),
 		from(TraceListMv)
 			.select(() => ({
 				name: CH.lit("error"),

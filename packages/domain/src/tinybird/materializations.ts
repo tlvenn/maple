@@ -18,6 +18,7 @@ import {
 	tracesAggregatesHourly,
 	logsAggregatesHourly,
 	metricCatalog,
+	spanMetricsCallsHourly,
 } from "./datasources"
 import {
 	DB_QUERY_KEY_SQL,
@@ -284,7 +285,8 @@ export const serviceOverviewSpansMv = defineMaterializedView("service_overview_s
           TraceState,
           ResourceAttributes['deployment.environment'] AS DeploymentEnv,
           ResourceAttributes['deployment.commit_sha'] AS CommitSha,
-          SampleRate
+          SampleRate,
+          ResourceAttributes['service.namespace'] AS ServiceNamespace
         FROM traces
         WHERE SpanKind IN ('Server', 'Consumer') OR ParentSpanId = ''
       `,
@@ -795,7 +797,8 @@ export const traceListMvMv = defineMaterializedView("trace_list_mv_mv", {
             OR (SpanAttributes['http.status_code'] != '' AND toUInt16OrZero(SpanAttributes['http.status_code']) >= 500)
             OR (SpanAttributes['http.response.status_code'] != '' AND toUInt16OrZero(SpanAttributes['http.response.status_code']) >= 500)
           ) AS HasError,
-          TraceState
+          TraceState,
+          ResourceAttributes['service.namespace'] AS ServiceNamespace
         FROM traces
         WHERE ParentSpanId = ''
       `,
@@ -918,6 +921,38 @@ export const metricCatalogSumMv = defineMaterializedView("metric_catalog_sum_mv"
           max(toDateTime(TimeUnix)) AS LastSeen
         FROM metrics_sum
         GROUP BY OrgId, Hour, MetricType, ServiceName, MetricName
+      `,
+		}),
+	],
+})
+
+/**
+ * Hourly per-series argMax(value) rollup of the span-metrics calls counter into
+ * span_metrics_calls_hourly. Keyed per series-epoch so per-hour increase can be
+ * derived as LastValue(hour) − LastValue(prev hour) at read time. The attribute
+ * Maps are folded into cityHash64 fingerprints (fixed-width series identity).
+ */
+export const spanMetricsCallsHourlyMv = defineMaterializedView("span_metrics_calls_hourly_mv", {
+	description:
+		"Hourly per-series argMax(value) rollup of the span-metrics calls counter into span_metrics_calls_hourly.",
+	datasource: spanMetricsCallsHourly,
+	nodes: [
+		node({
+			name: "span_metrics_calls_hourly_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(TimeUnix)) AS Hour,
+          ServiceName,
+          MetricName,
+          Attributes['span.kind'] AS SpanKind,
+          cityHash64(mapKeys(Attributes), mapValues(Attributes)) AS AttrFingerprint,
+          cityHash64(mapKeys(ResourceAttributes), mapValues(ResourceAttributes)) AS ResourceFingerprint,
+          StartTimeUnix,
+          argMaxState(Value, TimeUnix) AS LastValue
+        FROM metrics_sum
+        WHERE MetricName IN ('span.metrics.calls', 'calls') AND IsMonotonic
+        GROUP BY OrgId, Hour, ServiceName, MetricName, SpanKind, AttrFingerprint, ResourceFingerprint, StartTimeUnix
       `,
 		}),
 	],
@@ -1161,9 +1196,10 @@ export const logsAggregatesHourlyMv = defineMaterializedView("logs_aggregates_ho
           SeverityText,
           ResourceAttributes['deployment.environment'] AS DeploymentEnv,
           count() AS Count,
-          sum(length(Body) + 200) AS SizeBytes
+          sum(length(Body) + 200) AS SizeBytes,
+          ResourceAttributes['service.namespace'] AS ServiceNamespace
         FROM logs
-        GROUP BY OrgId, Hour, ServiceName, SeverityText, DeploymentEnv
+        GROUP BY OrgId, Hour, ServiceName, SeverityText, DeploymentEnv, ServiceNamespace
       `,
 		}),
 	],

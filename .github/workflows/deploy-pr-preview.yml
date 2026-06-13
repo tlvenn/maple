@@ -28,6 +28,10 @@ jobs:
             DOPPLER_CONFIG: pr
             PR_NUMBER: ${{ github.event.pull_request.number }}
             PR_BRANCH: ${{ github.head_ref }}
+            # Stamped onto deployed telemetry as `deployment.commit_sha`. Use the PR
+            # head SHA (github.sha is the merge commit on pull_request events).
+            COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+            VITE_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         steps:
             - name: Checkout
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -46,6 +50,19 @@ jobs:
             - name: Install dependencies
               run: bun install --frozen-lockfile
 
+            # Needed for both branch create (deploy) and rm (close). `tb` is the
+            # real Tinybird CLI (branch commands live there, not in `bunx tinybird`).
+            - name: Install Tinybird CLI
+              run: curl https://tinybird.co | sh
+
+            # Create/refresh an ephemeral Tinybird branch `pr_<n>` seeded with the
+            # latest prod partition, deploy this PR's schema into it, and override
+            # TINYBIRD_HOST/TINYBIRD_TOKEN (from Doppler `pr`) with the branch's
+            # values so the Alchemy deploy below binds the whole stack to the branch.
+            - name: Create/refresh Tinybird PR branch
+              if: ${{ github.event.action != 'closed' }}
+              run: bun scripts/tinybird-pr-branch.ts up "$PR_NUMBER"
+
             - name: Deploy PR preview stack with Alchemy
               if: ${{ github.event.action != 'closed' }}
               run: bun run alchemy:deploy:pr
@@ -53,3 +70,9 @@ jobs:
             - name: Destroy PR preview stack with Alchemy
               if: ${{ github.event.action == 'closed' }}
               run: bun run alchemy:destroy:pr
+
+            # Tear the branch down after the stack — branches share compute with
+            # production, so this must run on every PR close.
+            - name: Remove Tinybird PR branch
+              if: ${{ github.event.action == 'closed' }}
+              run: bun scripts/tinybird-pr-branch.ts down "$PR_NUMBER"
