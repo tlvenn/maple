@@ -15,6 +15,7 @@ import {
 	ErrorDetailTracesResponse,
 	ErrorRateByServiceResponse,
 	ServiceOverviewResponse,
+	ServiceHealthBaselineResponse,
 	ServiceApdexResponse,
 	ServiceReleasesResponse,
 	ServiceDependenciesResponse,
@@ -57,6 +58,7 @@ import { QueryEngineService } from "../services/QueryEngineService"
 import { RawSqlChartService } from "@maple/query-engine/runtime"
 import { WarehouseQueryService } from "../lib/WarehouseQueryService"
 import { CH, QueryEngineExecuteRequest } from "@maple/query-engine"
+import { LOGS_BODY_SEARCH_SETTINGS } from "@maple/query-engine/profiles"
 import { buildBreakdownQuerySpec, buildTimeseriesQuerySpec } from "@maple/query-engine/query-builder"
 
 // `warehouse.sqlQuery` fails with the warehouse error union (distinct tagged
@@ -361,6 +363,39 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 					return new ServiceOverviewResponse({ data: rows })
 				}),
 			)
+				.handle("serviceHealthBaseline", ({ payload }) =>
+					Effect.gen(function* () {
+						const tenant = yield* CurrentTenant.Context
+						const compiled = CH.compile(
+							CH.serviceHealthBaselineQuery({
+								environments: payload.environments,
+								namespaces: payload.namespaces,
+							}),
+							{ orgId: tenant.orgId, startTime: payload.startTime, endTime: payload.endTime },
+						)
+						const rows = yield* queryEngine.cachedDirect(
+							tenant,
+							"serviceHealthBaseline",
+							payload,
+							mapExecError(
+								warehouse.compiledQuery(tenant, compiled, {
+									profile: "aggregation",
+									context: "serviceHealthBaseline",
+								}),
+								"serviceHealthBaseline query failed",
+							),
+						)
+						return new ServiceHealthBaselineResponse({
+							data: rows.map((row) => ({
+								serviceName: decodeServiceName(String(row.serviceName ?? "")),
+								serviceNamespace: String(row.serviceNamespace ?? ""),
+								environment: String(row.environment ?? "unknown"),
+								baselineP95LatencyMs: Number(row.baselineP95LatencyMs ?? 0),
+								baselineSpanCount: Number(row.baselineSpanCount ?? 0),
+							})),
+						})
+					}),
+				)
 			.handle("serviceApdex", ({ payload }) =>
 				Effect.gen(function* () {
 					const tenant = yield* CurrentTenant.Context
@@ -781,6 +816,10 @@ export const HttpQueryEngineLive = HttpApiBuilder.group(MapleApi, "queryEngine",
 							warehouse.compiledQuery(tenant, compiled, {
 								profile: "list",
 								context: "listLogs",
+								// Body search reads the wide Body column for the ILIKE
+								// filter — cap the read block size (see
+								// WarehouseQuerySettings.maxBlockSize).
+								settings: payload.search ? LOGS_BODY_SEARCH_SETTINGS : undefined,
 							}),
 							"listLogs query failed",
 						),

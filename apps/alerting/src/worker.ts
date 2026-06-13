@@ -1,6 +1,6 @@
 import {
-	AlertRuntime,
 	AlertsService,
+	AnomalyDetectionService,
 	BucketCacheService,
 	CacheBackendLive,
 	DatabaseD1Live,
@@ -9,6 +9,7 @@ import {
 	EmailService,
 	Env,
 	ErrorsService,
+	EscalationService,
 	HazelOAuthService,
 	NotificationDispatcher,
 	OnboardingEmailService,
@@ -24,12 +25,16 @@ import {
 	WorkerConfigProviderLayer,
 	WorkerEnvironment,
 } from "@maple/effect-cloudflare"
-import { Cause, Effect, Layer } from "effect"
+import { Cause, Effect, Layer, Match } from "effect"
 
 // Module-scope construction; `flush(env)` resolves env on first call. The
 // in-isolate buffers coalesce concurrent scheduled ticks into one POST per
 // signal.
-const telemetry = MapleCloudflareSDK.make({ serviceName: "alerting", serviceNamespace: "backend" })
+const telemetry = MapleCloudflareSDK.make({
+	serviceName: "alerting",
+	serviceNamespace: "backend",
+	repositoryUrl: "https://github.com/Makisuo/maple",
+})
 
 const buildLayer = (_env: Record<string, unknown>) => {
 	const ConfigLive = WorkerConfigProviderLayer
@@ -59,14 +64,17 @@ const buildLayer = (_env: Record<string, unknown>) => {
 
 	const HazelOAuthServiceLive = HazelOAuthService.layer.pipe(Layer.provide(BaseLive))
 
+	// WorkerEnvironment is merged in so the incident-open issue-hub hook can see
+	// the cross-script AI_TRIAGE_WORKFLOW binding (absent → triage marked failed).
+	// AlertRuntime is a Context.Reference with defaults, so it needs no wiring here.
 	const AlertsServiceLive = AlertsService.layer.pipe(
 		Layer.provide(
 			Layer.mergeAll(
 				BaseLive,
 				QueryEngineServiceLive,
 				WarehouseQueryServiceLive,
-				AlertRuntime.layer,
 				HazelOAuthServiceLive,
+				WorkerEnvironment.layer,
 			),
 		),
 	)
@@ -75,8 +83,27 @@ const buildLayer = (_env: Record<string, unknown>) => {
 		Layer.provide(Layer.mergeAll(BaseLive, HazelOAuthServiceLive)),
 	)
 
+	const EscalationServiceLive = EscalationService.layer.pipe(
+		Layer.provide(Layer.mergeAll(BaseLive, NotificationDispatcherLive)),
+	)
+
+	// WorkerEnvironment is merged in so the incident-open AI-triage hook can see
+	// the cross-script AI_TRIAGE_WORKFLOW binding (absent → triage marked failed).
 	const ErrorsServiceLive = ErrorsService.layer.pipe(
-		Layer.provide(Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, NotificationDispatcherLive)),
+		Layer.provide(
+			Layer.mergeAll(
+				BaseLive,
+				WarehouseQueryServiceLive,
+				NotificationDispatcherLive,
+				WorkerEnvironment.layer,
+			),
+		),
+	)
+
+	const AnomalyDetectionServiceLive = AnomalyDetectionService.layer.pipe(
+		Layer.provide(
+			Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, EdgeCacheServiceLive, WorkerEnvironment.layer),
+		),
 	)
 
 	const EmailServiceLive = EmailService.layer.pipe(Layer.provide(EnvLive))
@@ -104,9 +131,11 @@ const buildLayer = (_env: Record<string, unknown>) => {
 
 	return Layer.mergeAll(
 		AlertsServiceLive,
+		AnomalyDetectionServiceLive,
 		DigestServiceLive,
 		OnboardingEmailServiceLive,
 		ErrorsServiceLive,
+		EscalationServiceLive,
 		ServiceMapRollupServiceLive,
 	).pipe(Layer.provideMerge(telemetry.layer), Layer.provideMerge(ConfigLive))
 }
@@ -150,6 +179,29 @@ const errorTick = Effect.gen(function* () {
 	Effect.withSpan("alerting.error_tick"),
 	Effect.catchCause((cause) =>
 		Effect.logError("Errors worker tick failed").pipe(
+			Effect.annotateLogs({ error: Cause.pretty(cause) }),
+		),
+	),
+)
+
+const escalationTick = Effect.gen(function* () {
+	const escalations = yield* EscalationService
+	const result = yield* escalations.runEscalationTick()
+	if (result.processed > 0) {
+		yield* Effect.logInfo("Escalation tick complete").pipe(
+			Effect.annotateLogs({
+				processed: result.processed,
+				sent: result.sent,
+				skipped: result.skipped,
+				failed: result.failed,
+				retried: result.retried,
+			}),
+		)
+	}
+}).pipe(
+	Effect.withSpan("alerting.escalation_tick"),
+	Effect.catchCause((cause) =>
+		Effect.logError("Escalation tick failed").pipe(
 			Effect.annotateLogs({ error: Cause.pretty(cause) }),
 		),
 	),
@@ -213,6 +265,30 @@ const serviceMapRollupTick = Effect.gen(function* () {
 	),
 )
 
+const anomalyTick = Effect.gen(function* () {
+	const anomalies = yield* AnomalyDetectionService
+	const result = yield* anomalies.runTick()
+	yield* Effect.logInfo("Anomaly detection tick complete").pipe(
+		Effect.annotateLogs({
+			orgsProcessed: result.orgsProcessed,
+			seriesEvaluated: result.seriesEvaluated,
+			incidentsOpened: result.incidentsOpened,
+			incidentsAttached: result.incidentsAttached,
+			incidentsReopened: result.incidentsReopened,
+			incidentsContinued: result.incidentsContinued,
+			incidentsResolved: result.incidentsResolved,
+			orgFailures: result.orgFailures,
+		}),
+	)
+}).pipe(
+	Effect.withSpan("alerting.anomaly_tick"),
+	Effect.catchCause((cause) =>
+		Effect.logError("Anomaly detection tick failed").pipe(
+			Effect.annotateLogs({ error: Cause.pretty(cause) }),
+		),
+	),
+)
+
 interface ScheduledEventLike {
 	readonly cron: string
 }
@@ -227,14 +303,18 @@ export default {
 		env: Record<string, unknown>,
 		ctx: ExecutionContextLike,
 	): Promise<void> {
-		const program =
-			event.cron === "*/15 * * * *"
-				? digestTick
-				: event.cron === "0 * * * *"
-					? serviceMapRollupTick
-					: event.cron === "0 9 * * *"
-						? onboardingTick
-						: Effect.all([alertTick, errorTick], { concurrency: 2, discard: true })
+		const program = Match.value(event.cron).pipe(
+			Match.when("*/5 * * * *", () => anomalyTick),
+			Match.when("*/15 * * * *", () => digestTick),
+			Match.when("0 * * * *", () => serviceMapRollupTick),
+			Match.when("0 9 * * *", () => onboardingTick),
+			Match.orElse(() =>
+				Effect.all([alertTick, errorTick, escalationTick], {
+					concurrency: 2,
+					discard: true,
+				}),
+			),
+		)
 		try {
 			await runScheduledEffect(buildLayer(env), program, ctx)
 		} finally {

@@ -6,6 +6,7 @@ import {
 	AlertDestinationId,
 	AlertIncidentId,
 	AlertRuleId,
+	ErrorIssueId,
 	HazelChannelId,
 	HazelOrganizationId,
 	IsoDateTimeString,
@@ -492,6 +493,7 @@ export class AlertIncidentDocument extends Schema.Class<AlertIncidentDocument>("
 	dedupeKey: Schema.String,
 	lastDeliveredEventType: Schema.NullOr(AlertEventType),
 	lastNotifiedAt: Schema.NullOr(IsoDateTimeString),
+	errorIssueId: Schema.NullOr(ErrorIssueId),
 }) {}
 
 export class AlertIncidentsListResponse extends Schema.Class<AlertIncidentsListResponse>(
@@ -557,6 +559,7 @@ export class AlertPersistenceError extends Schema.TaggedErrorClass<AlertPersiste
 	"@maple/http/errors/AlertPersistenceError",
 	{
 		message: Schema.String,
+		cause: Schema.optionalKey(Schema.String),
 	},
 	{ httpApiStatus: 503 },
 ) {}
@@ -624,10 +627,10 @@ export class AlertChecksListResponse extends Schema.Class<AlertChecksListRespons
 ) {}
 
 export const ListRuleChecksQuery = Schema.Struct({
-	groupKey: Schema.optionalKey(Schema.String),
-	since: Schema.optionalKey(IsoDateTimeString),
-	until: Schema.optionalKey(IsoDateTimeString),
-	limit: Schema.optionalKey(
+	groupKey: Schema.optional(Schema.String),
+	since: Schema.optional(IsoDateTimeString),
+	until: Schema.optional(IsoDateTimeString),
+	limit: Schema.optional(
 		Schema.NumberFromString.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 2000 })),
 	),
 })

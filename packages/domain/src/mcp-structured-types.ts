@@ -649,9 +649,12 @@ export interface ActorSummary {
 
 export interface ErrorIssueRow {
 	id: string
+	kind: string
 	fingerprintHash: string
 	workflowState: string
 	priority: number
+	severity: string | null
+	severitySource: string | null
 	serviceName: string
 	exceptionType: string
 	exceptionMessage: string
@@ -679,6 +682,14 @@ export interface TransitionErrorIssueData {
 	assignedActorId: string | null
 	leaseHolderActorId: string | null
 	snoozeUntil: string | null
+}
+
+export interface SetIssueSeverityData {
+	id: string
+	severity: string | null
+	severitySource: string | null
+	/** False when an AI write was blocked by a manual override. */
+	applied: boolean
 }
 
 export interface ClaimErrorIssueData {
@@ -820,6 +831,41 @@ export interface GetSessionTracesData {
 	}>
 }
 
+export interface InstrumentationRecommendationRow {
+	id: string
+	number: number
+	recommendationKey: string
+	kind: "rename" | "double-emission" | "naming"
+	severity: "warn" | "info"
+	sourceKey: string
+	canonicalKey: string | null
+	status: string
+	usageCount: number
+	/** Only rename issues can be fixed by accepting an ingest attribute mapping. */
+	applyableAsMapping: boolean
+	openedAt: string
+	updatedAt: string
+}
+
+export interface InstrumentationCoverageGap {
+	/** Check id from the maple-audit skill checklist (e.g. RES-03). */
+	checkId: string
+	attribute: string
+	severity: "warn"
+	reason: string
+}
+
+export interface GetInstrumentationRecommendationsData {
+	issues: InstrumentationRecommendationRow[]
+	coverage: {
+		available: boolean
+		included: boolean
+		timeRange: { start: string; end: string }
+		gaps: ReadonlyArray<InstrumentationCoverageGap>
+	}
+	total: number
+}
+
 export type StructuredToolOutput =
 	| { tool: "search_sessions"; data: SearchSessionsData }
 	| { tool: "get_session_transcript"; data: GetSessionTranscriptData }
@@ -854,10 +900,15 @@ export type StructuredToolOutput =
 	| { tool: "explore_attributes"; data: ExploreAttributesData }
 	| { tool: "list_services"; data: ListServicesData }
 	| { tool: "get_service_top_operations"; data: GetServiceTopOperationsData }
+	| {
+			tool: "get_instrumentation_recommendations"
+			data: GetInstrumentationRecommendationsData
+	  }
 	| { tool: "get_incident_timeline"; data: GetIncidentTimelineData }
 	| { tool: "inspect_chart_data"; data: InspectChartDataData }
 	| { tool: "list_error_issues"; data: ListErrorIssuesData }
 	| { tool: "transition_error_issue"; data: TransitionErrorIssueData }
+	| { tool: "set_issue_severity"; data: SetIssueSeverityData }
 	| { tool: "claim_error_issue"; data: ClaimErrorIssueData }
 	| { tool: "release_error_issue"; data: ReleaseErrorIssueData }
 	| { tool: "heartbeat_error_issue"; data: HeartbeatErrorIssueData }

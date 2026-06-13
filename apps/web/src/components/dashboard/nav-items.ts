@@ -69,7 +69,6 @@ export const signalsNavItems: SignalsNavItem[] = [
 		title: "Replays",
 		href: "/replays",
 		icon: PlayRotateClockwiseIcon,
-		badge: "Beta",
 	},
 	{
 		title: "Infrastructure",
@@ -90,6 +89,13 @@ export const investigateNavItems: NavItem[] = [
 		href: "/errors",
 		icon: CircleWarningIcon,
 	},
+	// Anomalies is reachable at /anomalies but hidden from the sidebar until the
+	// detector has been validated against production baselines.
+	// {
+	// 	title: "Anomalies",
+	// 	href: "/anomalies",
+	// 	icon: ChartBarTrendUpIcon,
+	// },
 	{
 		title: "Alerts",
 		href: "/alerts",
@@ -98,10 +104,6 @@ export const investigateNavItems: NavItem[] = [
 ]
 
 /** Signals items with org feature gates applied (matches the sidebar's filtering). */
-export function visibleSignalsNavItems(flags: { infraEnabled: boolean; sessionReplaysEnabled: boolean }) {
-	return signalsNavItems.filter(
-		(item) =>
-			(flags.infraEnabled || item.href !== "/infra") &&
-			(flags.sessionReplaysEnabled || item.href !== "/replays"),
-	)
+export function visibleSignalsNavItems(flags: { infraEnabled: boolean }) {
+	return signalsNavItems.filter((item) => flags.infraEnabled || item.href !== "/infra")
 }

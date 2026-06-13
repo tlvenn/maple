@@ -256,6 +256,7 @@ export {
 // Queries — Services
 export {
 	serviceOverviewQuery,
+	serviceHealthBaselineQuery,
 	serviceReleasesTimelineQuery,
 	serviceApdexTimeseriesQuery,
 	serviceUsageQuery,
@@ -263,6 +264,8 @@ export {
 	servicesFacetsQuery,
 	type ServiceOverviewOpts,
 	type ServiceOverviewOutput,
+	type ServiceHealthBaselineOpts,
+	type ServiceHealthBaselineOutput,
 	type ServiceReleasesTimelineOpts,
 	type ServiceReleasesTimelineOutput,
 	type ServiceApdexTimeseriesOpts,
@@ -310,6 +313,27 @@ export {
 	type ErrorIssueTimeseriesOutput,
 	type ErrorIssueSampleTracesOutput,
 } from "./queries/errors"
+
+// Queries — Anomaly detector
+export {
+	anomalyTraceSignalsQuery,
+	anomalyLogVolumeQuery,
+	anomalyErrorSpikeCurrentQuery,
+	anomalyErrorSpikeBaselineQuery,
+	anomalyTraceSignalTimeseriesQuery,
+	anomalyLogVolumeTimeseriesQuery,
+	anomalyErrorSpikeTimeseriesQuery,
+	anomalyErrorSpikeServiceTimeseriesQuery,
+	matchedHoursOfDay,
+	type AnomalyTraceSignalsOpts,
+	type AnomalyTraceSignalsOutput,
+	type AnomalyLogVolumeOutput,
+	type AnomalyErrorSpikeCurrentOutput,
+	type AnomalyErrorSpikeBaselineOutput,
+	type AnomalyTraceSignalTimeseriesOutput,
+	type AnomalyLogVolumeTimeseriesOutput,
+	type AnomalyErrorSpikeTimeseriesOutput,
+} from "./queries/anomaly"
 
 // Queries — Service Map
 export {

@@ -5,6 +5,14 @@ import { Exit, Schema } from "effect"
 import { useMemo, useState } from "react"
 import { toast } from "sonner"
 
+import { AiTriageCard } from "@/components/ai-triage/ai-triage-card"
+import {
+	OpenAnomalyBadge,
+	RelatedAnomaliesSection,
+} from "@/components/anomalies/related-anomalies-section"
+import { AlertSourceCard } from "@/components/errors/alert-source-card"
+import { IssueKindBadge } from "@/components/errors/kind-badge"
+import { SeverityBadge } from "@/components/errors/severity-badge"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { IssueCommentComposer } from "@/components/errors/issue-comment-composer"
 import { IssueHero } from "@/components/errors/issue-hero"
@@ -13,56 +21,24 @@ import { IssueOccurrenceSparkline } from "@/components/errors/issue-occurrence-s
 import { IssueOccurrencesTable } from "@/components/errors/issue-occurrences-table"
 import { IssueSidebar } from "@/components/errors/issue-sidebar"
 import { IssueTimeline } from "@/components/errors/issue-timeline"
+import { SectionHeader } from "@/components/layout/section-header"
+import { WorkflowBadge } from "@/components/errors/workflow-badge"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@maple/ui/components/ui/empty"
-import { ErrorIssueId, type WorkflowState } from "@maple/domain/http"
+import {
+	ErrorIssueId,
+	ErrorIssueSetSeverityRequest,
+	type IssueSeverity,
+	type WorkflowState,
+} from "@maple/domain/http"
 
 const decodeIssueId = Schema.decodeSync(ErrorIssueId)
 
 export const Route = effectRoute(createFileRoute("/errors/issues/$issueId"))({
 	component: IssueDetailPage,
 })
-
-const WORKFLOW_BADGE: Record<WorkflowState, { label: string; tone: string }> = {
-	triage: {
-		label: "Triage",
-		tone: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-	},
-	todo: { label: "Todo", tone: "bg-muted text-muted-foreground" },
-	in_progress: {
-		label: "In progress",
-		tone: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
-	},
-	in_review: {
-		label: "In review",
-		tone: "bg-purple-500/10 text-purple-600 dark:text-purple-400",
-	},
-	done: { label: "Done", tone: "bg-success/10 text-success" },
-	cancelled: { label: "Cancelled", tone: "bg-muted text-muted-foreground" },
-	wontfix: { label: "Wontfix", tone: "bg-muted text-muted-foreground" },
-}
-
-function WorkflowBadge({ state }: { state: WorkflowState }) {
-	const { label, tone } = WORKFLOW_BADGE[state]
-	return (
-		<Badge variant="outline" className={tone}>
-			{label}
-		</Badge>
-	)
-}
-
-function SectionHeader({ id, label }: { id: string; label: string }) {
-	return (
-		<h2
-			id={id}
-			className="mb-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground"
-		>
-			{label}
-		</h2>
-	)
-}
 
 function IssueDetailPage() {
 	const { issueId: rawIssueId } = Route.useParams()
@@ -97,9 +73,14 @@ function IssueDetailPage() {
 	const commentOnIssue = useAtomSet(MapleApiAtomClient.mutation("errors", "commentOnIssue"), {
 		mode: "promiseExit",
 	})
+	const setIssueSeverity = useAtomSet(MapleApiAtomClient.mutation("errors", "setIssueSeverity"), {
+		mode: "promiseExit",
+	})
 
 	const [commentDraft, setCommentDraft] = useState("")
-	const [busy, setBusy] = useState<"state" | "claim" | "release" | "heartbeat" | "comment" | null>(null)
+	const [busy, setBusy] = useState<
+		"state" | "claim" | "release" | "heartbeat" | "comment" | "severity" | null
+	>(null)
 
 	const invalidateKeys = useMemo(
 		() => ["errorIssues", `errorIssue:${issueId}`, `errorIssue:${issueId}:events`],
@@ -153,6 +134,21 @@ function IssueDetailPage() {
 		else toast.error("Release failed")
 	}
 
+	const changeSeverity = async (next: IssueSeverity | null) => {
+		setBusy("severity")
+		const result = await setIssueSeverity({
+			params: { issueId },
+			payload: new ErrorIssueSetSeverityRequest({ severity: next }),
+			reactivityKeys: invalidateKeys,
+		})
+		setBusy(null)
+		if (Exit.isSuccess(result)) {
+			toast.success(next === null ? "Severity cleared" : `Severity set to ${next}`)
+		} else {
+			toast.error("Severity change failed")
+		}
+	}
+
 	const submitComment = async () => {
 		const body = commentDraft.trim()
 		if (body.length === 0) return
@@ -202,7 +198,6 @@ function IssueDetailPage() {
 		.onSuccess((detail) => {
 			const { issue, timeseries, sampleTraces, incidents } = detail
 			const totalInWindow = timeseries.reduce((sum, b) => sum + b.count, 0)
-			const events = Result.isSuccess(eventsResult) ? eventsResult.value.events : []
 
 			return (
 				<DashboardLayout
@@ -215,12 +210,15 @@ function IssueDetailPage() {
 					description={issue.serviceName}
 					headerActions={
 						<div className="flex items-center gap-2">
+							<IssueKindBadge kind={issue.kind} />
+							<SeverityBadge severity={issue.severity} />
 							<WorkflowBadge state={issue.workflowState} />
 							{issue.hasOpenIncident ? (
 								<Badge variant="outline" className="bg-destructive/10 text-destructive">
 									Incident open
 								</Badge>
 							) : null}
+							<OpenAnomalyBadge issueId={issueId} />
 						</div>
 					}
 					rightSidebar={
@@ -232,18 +230,43 @@ function IssueDetailPage() {
 							onClaim={claim}
 							onHeartbeat={heartbeat}
 							onRelease={release}
+							onSetSeverity={changeSeverity}
 						/>
 					}
 				>
 					<div className="space-y-8">
 						<section className="space-y-4">
 							<IssueHero issue={issue} />
-							<IssueOccurrenceSparkline data={timeseries} />
+							{issue.kind === "alert" ? (
+								<AlertSourceCard issue={issue} />
+							) : (
+								<IssueOccurrenceSparkline data={timeseries} />
+							)}
+							<AiTriageCard
+								incidentKind={issue.kind === "alert" ? "alert" : "error"}
+								incidentId={
+									issue.kind === "alert"
+										? typeof issue.sourceRef?.latestIncidentId === "string"
+											? issue.sourceRef.latestIncidentId
+											: null
+										: ((incidents.find((i) => i.status === "open") ?? incidents[0])?.id ?? null)
+								}
+								issueId={issueId}
+							/>
 						</section>
 
 						<section aria-labelledby="activity-heading">
 							<SectionHeader id="activity-heading" label="Activity" />
-							<IssueTimeline events={events} />
+							{Result.builder(eventsResult)
+								.onError(() => (
+									<div className="py-6 text-center text-sm text-destructive">
+										Failed to load the activity timeline.
+									</div>
+								))
+								.onSuccess((value) => <IssueTimeline events={value.events} />)
+								.orElse(() => (
+									<Skeleton className="h-20 w-full" />
+								))}
 							<IssueCommentComposer
 								value={commentDraft}
 								onChange={setCommentDraft}
@@ -252,15 +275,21 @@ function IssueDetailPage() {
 							/>
 						</section>
 
-						<section aria-labelledby="incidents-heading">
-							<SectionHeader id="incidents-heading" label="Incidents" />
-							<IssueIncidentsTable incidents={incidents} />
-						</section>
+						{issue.kind === "error" ? (
+							<section aria-labelledby="incidents-heading">
+								<SectionHeader id="incidents-heading" label="Incidents" />
+								<IssueIncidentsTable incidents={incidents} />
+							</section>
+						) : null}
 
-						<section aria-labelledby="occurrences-heading">
-							<SectionHeader id="occurrences-heading" label="Latest occurrences" />
-							<IssueOccurrencesTable traces={sampleTraces} />
-						</section>
+						<RelatedAnomaliesSection issueId={issueId} />
+
+						{issue.kind === "error" ? (
+							<section aria-labelledby="occurrences-heading">
+								<SectionHeader id="occurrences-heading" label="Latest occurrences" />
+								<IssueOccurrencesTable traces={sampleTraces} />
+							</section>
+						) : null}
 					</div>
 				</DashboardLayout>
 			)

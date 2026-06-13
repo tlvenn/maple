@@ -11,6 +11,10 @@ export interface IssuesToolbarProps<T extends string> {
 	active: T
 	onChange: (value: T) => void
 	totalCount?: number
+	/** Singular/plural noun for the count readout; defaults to issue/issues. */
+	countNoun?: readonly [string, string]
+	/** Extra controls rendered right-aligned, before the count readout. */
+	trailing?: React.ReactNode
 }
 
 export function IssuesToolbar<T extends string>({
@@ -18,6 +22,8 @@ export function IssuesToolbar<T extends string>({
 	active,
 	onChange,
 	totalCount,
+	countNoun = ["issue", "issues"],
+	trailing,
 }: IssuesToolbarProps<T>) {
 	return (
 		<div className="flex items-center gap-2 border-b border-border/60 px-2 py-1.5">
@@ -53,11 +59,14 @@ export function IssuesToolbar<T extends string>({
 					)
 				})}
 			</div>
-			{totalCount !== undefined ? (
-				<span className="ml-auto text-xs text-muted-foreground tabular-nums">
-					{totalCount} {totalCount === 1 ? "issue" : "issues"}
-				</span>
-			) : null}
+			<div className="ml-auto flex items-center gap-2">
+				{trailing}
+				{totalCount !== undefined ? (
+					<span className="text-xs text-muted-foreground tabular-nums">
+						{totalCount} {totalCount === 1 ? countNoun[0] : countNoun[1]}
+					</span>
+				) : null}
+			</div>
 		</div>
 	)
 }
