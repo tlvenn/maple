@@ -168,7 +168,7 @@ const triggerCron = async (cron: string): Promise<void> => {
 	}
 }
 // Keep this list in sync with apps/alerting/wrangler.jsonc `triggers.crons`.
-const alertingCrons = ["* * * * *", "*/15 * * * *", "0 * * * *", "0 9 * * *"] as const
+const alertingCrons = ["* * * * *", "*/5 * * * *", "*/15 * * * *", "0 * * * *", "0 9 * * *"] as const
 for (const cron of alertingCrons) {
 	new CronJob(cron, () => triggerCron(cron), null, true)
 }
