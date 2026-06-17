@@ -45,15 +45,7 @@ export function DestinationCard({
 	const provider = PROVIDERS[destination.type]
 
 	return (
-		<Card
-			className={cn("group relative overflow-hidden p-0 transition-colors", "hover:border-border/80")}
-		>
-			<span
-				aria-hidden
-				className="pointer-events-none absolute -left-12 -top-12 size-32 rounded-full opacity-0 blur-3xl transition-opacity duration-500 group-hover:opacity-60"
-				style={{ background: provider.accentBg }}
-			/>
-
+		<Card className={cn("group relative overflow-hidden p-0 transition-colors", "hover:border-border/80")}>
 			<div className="relative flex flex-col gap-4 p-5 lg:flex-row lg:items-start lg:justify-between">
 				<div
 					className={cn(

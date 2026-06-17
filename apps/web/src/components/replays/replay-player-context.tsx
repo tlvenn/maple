@@ -282,6 +282,12 @@ export function ReplayPlayerProvider({
 	skipInactiveRef.current = skipInactive
 	const isFullscreenRef = React.useRef(isFullscreen)
 	isFullscreenRef.current = isFullscreen
+	// Mirrors read by the rAF-coalesced seek (see `seekDisplay`) so a frame that
+	// fires after several pointer moves still applies against fresh values.
+	const isPlayingRef = React.useRef(isPlaying)
+	isPlayingRef.current = isPlaying
+	const totalMsRef = React.useRef(totalMs)
+	totalMsRef.current = totalMs
 
 	// While skip-idle is on, present the timeline in active time: idle gaps
 	// collapse so the clock/scrubber match the (already idle-skipping) playback.
@@ -289,6 +295,8 @@ export function ReplayPlayerProvider({
 		() => buildTimeline(skipInactive ? inactiveIntervals : [], totalMs),
 		[inactiveIntervals, totalMs, skipInactive],
 	)
+	const timelineRef = React.useRef(timeline)
+	timelineRef.current = timeline
 	const displayCurrentMs = timeline.toDisplay(currentMs)
 	const displayTotalMs = timeline.activeTotalMs
 	const markers = React.useMemo<DisplayMarker[]>(
@@ -453,19 +461,46 @@ export function ReplayPlayerProvider({
 		}
 	}, [finished, isPlaying, currentMs, totalMs])
 
-	const seekDisplay = React.useCallback(
+	// rrweb's `pause(offset)` rebuilds the DOM synchronously — expensive. Pointer
+	// devices fire `pointermove` far above 60Hz, so seeking on every raw event
+	// thrashes the engine and re-renders. Coalesce to one engine seek per frame:
+	// the scrubbers write the latest target and we apply only the last one.
+	const pendingSeekRef = React.useRef<number | null>(null)
+	const seekRafRef = React.useRef<number | null>(null)
+
+	const applySeek = React.useCallback(() => {
+		seekRafRef.current = null
+		const displayMs = pendingSeekRef.current
+		pendingSeekRef.current = null
+		if (displayMs === null) return
+		const replayer = replayerRef.current
+		if (!replayer) return
 		// `displayMs` arrives in trimmed-timeline space; map back to rrweb's real
-		// clock before driving the engine.
+		// clock before driving the engine. Read state via refs — this runs a frame
+		// after the call, so closed-over values would be stale.
+		const total = totalMsRef.current
+		const clamped = Math.max(0, Math.min(timelineRef.current.toReal(displayMs), total))
+		setCurrentMs(clamped)
+		if (clamped < total) setFinished(false)
+		if (isPlayingRef.current && clamped < total) replayer.play(clamped)
+		else replayer.pause(clamped)
+	}, [])
+
+	const seekDisplay = React.useCallback(
 		(displayMs: number) => {
-			const replayer = replayerRef.current
-			if (!replayer) return
-			const clamped = Math.max(0, Math.min(timeline.toReal(displayMs), totalMs))
-			setCurrentMs(clamped)
-			if (clamped < totalMs) setFinished(false)
-			if (isPlaying && clamped < totalMs) replayer.play(clamped)
-			else replayer.pause(clamped)
+			pendingSeekRef.current = displayMs
+			if (seekRafRef.current === null) {
+				seekRafRef.current = requestAnimationFrame(applySeek)
+			}
 		},
-		[isPlaying, totalMs, timeline],
+		[applySeek],
+	)
+
+	React.useEffect(
+		() => () => {
+			if (seekRafRef.current !== null) cancelAnimationFrame(seekRafRef.current)
+		},
+		[],
 	)
 
 	const changeSpeed = React.useCallback((next: number) => {

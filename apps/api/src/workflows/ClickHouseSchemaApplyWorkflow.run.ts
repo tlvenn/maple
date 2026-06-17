@@ -14,7 +14,7 @@ import { createDecipheriv } from "node:crypto"
 import { orgClickHouseSchemaApplyRuns, orgClickHouseSettings } from "@maple/db"
 import { createMapleD1Client, type CloudflareD1Database } from "@maple/db/client"
 import {
-	clickHouseProjectRevision,
+	clickHouseSchemaVersion,
 	computeSchemaDiff,
 	expandMigrationToSteps,
 	extractColumnDefinition,
@@ -306,7 +306,7 @@ export async function runClickHouseSchemaApply(
 					lastSyncAt: finishedAt,
 					lastSyncError: null,
 					syncStatus: "connected",
-					schemaVersion: clickHouseProjectRevision,
+					schemaVersion: clickHouseSchemaVersion,
 					updatedAt: finishedAt,
 				})
 				.where(eq(orgClickHouseSettings.orgId, orgId))

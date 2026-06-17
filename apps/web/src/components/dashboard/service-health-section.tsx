@@ -56,6 +56,16 @@ function servicesLinkSearch({
 	return { startTime, endTime, timePreset, environments, health }
 }
 
+/**
+ * Time-range slice shared by every per-service detail link. The clicked row's
+ * environment is appended at the {@link ServiceHealthRow} link site so the
+ * detail page scopes its charts to that environment; `health` is not carried —
+ * narrower than {@link servicesLinkSearch}.
+ */
+function serviceDetailSearch({ startTime, endTime, timePreset }: ServiceHealthProps) {
+	return { startTime, endTime, timePreset }
+}
+
 interface EnrichedService {
 	service: ServiceOverview
 	health: ServiceHealth
@@ -293,11 +303,12 @@ export function ServiceHealthList(props: ServiceHealthProps) {
 							<ul className="divide-y divide-border">
 								{rows.map(({ service, health, hasOpenIncident, baseline }) => (
 									<ServiceHealthRow
-										key={`${service.serviceName}:${service.environment}`}
+										key={`${service.serviceName}:${service.serviceNamespace}:${service.environment}`}
 										service={service}
 										health={health}
 										hasOpenIncident={hasOpenIncident}
 										baseline={baseline}
+										detailSearch={serviceDetailSearch(props)}
 									/>
 								))}
 							</ul>
@@ -309,41 +320,56 @@ export function ServiceHealthList(props: ServiceHealthProps) {
 		.render()
 }
 
-function ServiceHealthRow({ service, health, hasOpenIncident, baseline }: EnrichedService) {
+function ServiceHealthRow({
+	service,
+	health,
+	hasOpenIncident,
+	baseline,
+	detailSearch,
+}: EnrichedService & { detailSearch: ReturnType<typeof serviceDetailSearch> }) {
 	return (
-		<li className="flex items-center gap-3 px-4 py-2.5">
-			<span
-				aria-hidden
-				className="size-2 shrink-0 rounded-full"
-				style={{ backgroundColor: HEALTH_DOT_COLOR[health] }}
-			/>
-			<div className="flex min-w-0 flex-1 items-center gap-2">
-				<span className="truncate text-sm font-medium text-foreground">{service.serviceName}</span>
-				<span className="shrink-0 rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">
-					{service.environment}
-				</span>
-				{hasOpenIncident && (
-					<Badge variant="error" size="sm" className="shrink-0">
-						Alerting
-					</Badge>
-				)}
-			</div>
-			<div className="flex shrink-0 items-center gap-5 font-mono text-xs tabular-nums">
-				<Metric
-					label="err"
-					value={formatErrorRate(service.errorRate)}
-					tone={errorRateTone(service.errorRate)}
+		<li>
+			<Link
+				to="/services/$serviceName"
+				params={{ serviceName: service.serviceName }}
+				search={{ ...detailSearch, environments: [service.environment] }}
+				className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+			>
+				<span
+					aria-hidden
+					className="size-2 shrink-0 rounded-full"
+					style={{ backgroundColor: HEALTH_DOT_COLOR[health] }}
 				/>
-				<Metric
-					label="p95"
-					value={formatLatency(service.p95LatencyMs)}
-					tone={latencyTone(service.p95LatencyMs, service.spanCount, baseline)}
-				/>
-				<Metric
-					label="rps"
-					value={`${service.hasSampling ? "~" : ""}${formatThroughput(service.throughput)}`}
-				/>
-			</div>
+				<div className="flex min-w-0 flex-1 items-center gap-2">
+					<span className="truncate text-sm font-medium text-foreground">
+						{service.serviceName}
+					</span>
+					<span className="shrink-0 rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">
+						{service.environment}
+					</span>
+					{hasOpenIncident && (
+						<Badge variant="error" size="sm" className="shrink-0">
+							Alerting
+						</Badge>
+					)}
+				</div>
+				<div className="flex shrink-0 items-center gap-5 font-mono text-xs tabular-nums">
+					<Metric
+						label="err"
+						value={formatErrorRate(service.errorRate)}
+						tone={errorRateTone(service.errorRate)}
+					/>
+					<Metric
+						label="p95"
+						value={formatLatency(service.p95LatencyMs)}
+						tone={latencyTone(service.p95LatencyMs, service.spanCount, baseline)}
+					/>
+					<Metric
+						label="rps"
+						value={`${service.hasSampling ? "~" : ""}${formatThroughput(service.throughput)}`}
+					/>
+				</div>
+			</Link>
 		</li>
 	)
 }

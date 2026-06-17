@@ -359,6 +359,10 @@ export interface SessionTraceSummaryOutput {
 	readonly durationMs: number
 	readonly rootSpanName: string
 	readonly rootServiceName: string
+	/** Root span's OTel kind (e.g. SPAN_KIND_CLIENT), so the UI can format the HTTP label. */
+	readonly rootSpanKind: string
+	/** Root span's attribute map, JSON-encoded — parsed by the UI for `getHttpInfo`. */
+	readonly rootSpanAttributes: string
 	readonly spanCount: number
 	readonly hasError: number
 }
@@ -385,6 +389,12 @@ export function sessionTraceSummariesQuery(opts: SessionTraceSummariesOpts) {
 					CH.nullIf(CH.anyIf($.ServiceName, isRoot), ""),
 					CH.any_($.ServiceName),
 				),
+				// Root span's kind + attributes let the UI render the canonical HTTP
+				// label (`POST /api/foo`) instead of the raw span name. Traces with no
+				// ingested root span yield empty strings — the UI's getHttpInfo then
+				// falls back to name-only parsing.
+				rootSpanKind: CH.anyIf($.SpanKind, isRoot),
+				rootSpanAttributes: CH.anyIf(CH.toJSONString($.SpanAttributes), isRoot),
 				spanCount: CH.count(),
 				hasError: CH.if_(CH.countIf($.StatusCode.eq("Error")).gt(0), CH.lit(1), CH.lit(0)),
 			}
