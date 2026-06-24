@@ -24,9 +24,7 @@ const decodeScrapeIntervalSecondsSync = Schema.decodeUnknownSync(ScrapeIntervalS
 /** Audit identity for lazily-created ingest keys (org_ingest_keys.created_by). */
 const SCRAPER_SYSTEM_USER = Schema.decodeUnknownSync(UserId)("system-prometheus-scraper")
 const decodeScrapeResultsEffect = Schema.decodeUnknownEffect(ScrapeResultReportList)
-const decodeLabelsEffect = Schema.decodeUnknownEffect(
-	Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)),
-)
+const decodeLabelsEffect = Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.String))
 
 const errorText = (message: string, status: number) =>
 	HttpServerResponse.text(message, {
@@ -41,7 +39,7 @@ export interface ScrapeTargetRowLike {
 	readonly serviceName: string | null
 	readonly url: string
 	readonly scrapeIntervalSeconds: number
-	readonly labelsJson: string | null
+	readonly labelsJson: Record<string, string> | null
 }
 
 export interface SubTargetOverride {
@@ -119,9 +117,7 @@ export const ScraperInternalRouter = HttpRouter.use((router) =>
 				const denied = unauthorized(req)
 				if (denied) return denied
 
-				const rows = yield* service
-					.listAllEnabled()
-					.pipe(Effect.catch(() => Effect.succeed([])))
+				const rows = yield* service.listAllEnabled().pipe(Effect.catch(() => Effect.succeed([])))
 
 				// One public ingest key per org (lazily created on first use, like
 				// onboarding does). The scraper ingests with this key so scraped
@@ -209,13 +205,15 @@ export const ScraperInternalRouter = HttpRouter.use((router) =>
 				const results = yield* decodeScrapeResultsEffect(body.value).pipe(Effect.option)
 				if (Option.isNone(results)) return errorText("Invalid scrape results payload", 400)
 
-				yield* service.recordScrapeResults(results.value).pipe(
-					Effect.catch((error) =>
-						Effect.logWarning("Failed to persist scrape results").pipe(
-							Effect.annotateLogs({ error: error.message }),
+				yield* service
+					.recordScrapeResults(results.value)
+					.pipe(
+						Effect.catch((error) =>
+							Effect.logWarning("Failed to persist scrape results").pipe(
+								Effect.annotateLogs({ error: error.message }),
+							),
 						),
-					),
-				)
+					)
 
 				return yield* HttpServerResponse.json({ recorded: results.value.length })
 			}).pipe(Effect.withSpan("ScraperInternal.recordResults"))

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { compileUnion } from "../compile"
+import { compileUnion } from "@maple-dev/clickhouse-builder"
 import { localIngestPulseQuery } from "./ingest"
 
 const baseParams = {
@@ -35,5 +35,8 @@ describe("localIngestPulseQuery", () => {
 		expect((sql.match(/OrgId = 'local'/g) || []).length).toBe(2)
 		expect(sql).toContain("Timestamp >= '2024-01-01 00:00:00'")
 		expect(sql).toContain("Timestamp <= '2024-01-01 00:10:00'")
+		// The log branch also carries TimestampTime, the logs partition/index key.
+		expect(sql).toContain("TimestampTime >= '2024-01-01 00:00:00'")
+		expect(sql).toContain("TimestampTime <= '2024-01-01 00:10:00'")
 	})
 })

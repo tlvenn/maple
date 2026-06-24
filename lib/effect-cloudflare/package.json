@@ -5,7 +5,7 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./worker-environment": "./src/worker-environment.ts",
-		"./d1-connection": "./src/d1-connection.ts",
+		"./hyperdrive-connection": "./src/hyperdrive-connection.ts",
 		"./workers-cache": "./src/workers-cache.ts"
 	},
 	"scripts": {
@@ -15,7 +15,7 @@
 		"effect": "catalog:effect"
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^4.20260405.0",
+		"@cloudflare/workers-types": "4.20260603.1",
 		"@effect/language-service": "catalog:effect",
 		"@types/node": "catalog:tooling",
 		"typescript": "catalog:tooling"

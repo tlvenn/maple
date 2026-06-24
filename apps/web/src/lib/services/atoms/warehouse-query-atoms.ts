@@ -1,6 +1,7 @@
 import { Atom } from "@/lib/effect-atom"
 import { Effect, Schema } from "effect"
 import { encodeKey } from "@/lib/cache-key"
+import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import type { BackendError, WarehouseApiError } from "@/api/warehouse/effect-utils"
 import {
 	getCustomChartServiceDetail,
@@ -15,13 +16,7 @@ import {
 	getErrorsSummary,
 	getErrorsTimeseries,
 } from "@/api/warehouse/errors"
-import {
-	getLog,
-	getLogAttributeKeys,
-	getLogAttributeValues,
-	getLogsFacets,
-	listLogs,
-} from "@/api/warehouse/logs"
+import { getLog, getLogAttributeKeys, getLogsFacets, listLogs } from "@/api/warehouse/logs"
 import {
 	getMetricAttributeKeys,
 	getMetricTimeSeries,
@@ -58,7 +53,6 @@ import {
 import { getServiceExternalEdges } from "@/api/warehouse/service-external-edges"
 import { getServiceWorkloads } from "@/api/warehouse/service-infra"
 import {
-	getServiceApdexTimeSeries,
 	getServiceHealthBaseline,
 	getServiceOverview,
 	getServiceReleasesTimeline,
@@ -97,21 +91,17 @@ interface QueryAtomOptions {
 	staleTime?: number
 }
 
-export class QueryAtomError extends Schema.TaggedErrorClass<QueryAtomError>()(
-	"@maple/web/services/QueryAtomError",
-	{
-		message: Schema.String,
-		cause: Schema.optionalKey(Schema.Unknown),
-	},
-) {}
+class QueryAtomError extends Schema.TaggedErrorClass<QueryAtomError>()("@maple/web/services/QueryAtomError", {
+	message: Schema.String,
+	cause: Schema.optionalKey(Schema.Unknown),
+}) {}
 
 // The error union surfaced to atom consumers: the structured query errors plus
 // any tagged backend error, all normalized through `QueryAtomError`'s shape for
 // anything that is not already a known tagged error.
 type QueryAtomFailure = QueryError | QueryAtomError
 
-const isTaggedBackendError = (error: QueryError): boolean =>
-	error._tag.startsWith("@maple/http/errors/")
+const isTaggedBackendError = (error: QueryError): boolean => error._tag.startsWith("@maple/http/errors/")
 
 const toQueryAtomError = (error: QueryError): QueryAtomFailure => {
 	// Tagged `@maple/http/errors/*` errors are already user-presentable via
@@ -129,7 +119,15 @@ function makeQueryAtomFamily<Input, Output>(query: QueryEffect<Input, Output>, o
 	const UnknownFromJson = Schema.fromJsonString(Schema.Unknown)
 
 	const family = Atom.family((key: string) => {
-		let resultAtom = Atom.make(
+		// Build on the mounted `MapleApiAtomClient.runtime` (not bare `Atom.make`,
+		// which runs on the default atom runtime). That runtime owns the Maple OTLP
+		// tracer that actually flushes, so the wrapper span each `query` opens — e.g.
+		// `QueryEngine.getCustomChartServiceDetail`, the composite that fans out to
+		// several `executeQueryEngine` calls — is exported instead of silently
+		// dropped, which is what left traces rootless (a child whose parent never
+		// shipped). The inner query spans already export by re-providing this same
+		// (memoized) layer; this lifts the parent onto the same tracer.
+		let resultAtom = MapleApiAtomClient.runtime.atom(
 			Schema.decodeUnknownEffect(UnknownFromJson)(key).pipe(
 				Effect.flatMap((input) => query(input as Input)),
 				Effect.mapError(toQueryAtomError),
@@ -333,10 +331,6 @@ export const workloadFacetsResultAtom = makeQueryAtomFamily(getWorkloadFacets, {
 	staleTime: 30_000,
 })
 
-export const getServiceApdexTimeSeriesResultAtom = makeQueryAtomFamily(getServiceApdexTimeSeries, {
-	staleTime: 30_000,
-})
-
 export const getServiceReleasesTimelineResultAtom = makeQueryAtomFamily(getServiceReleasesTimeline, {
 	staleTime: 60_000,
 })
@@ -369,10 +363,9 @@ export const getServiceMapDbEdgesResultAtom = makeQueryAtomFamily(getServiceMapD
 	staleTime: 15_000,
 })
 
-export const getServiceMapDbEdgesForServiceResultAtom = makeQueryAtomFamily(
-	getServiceMapDbEdgesForService,
-	{ staleTime: 15_000 },
-)
+export const getServiceMapDbEdgesForServiceResultAtom = makeQueryAtomFamily(getServiceMapDbEdgesForService, {
+	staleTime: 15_000,
+})
 
 export const getServiceDbQuerySummaryResultAtom = makeQueryAtomFamily(getServiceDbQuerySummary, {
 	staleTime: 15_000,
@@ -408,8 +401,4 @@ export const getResourceAttributeValuesResultAtom = makeQueryAtomFamily(getResou
 
 export const getLogAttributeKeysResultAtom = makeQueryAtomFamily(getLogAttributeKeys, {
 	staleTime: 60_000,
-})
-
-export const getLogAttributeValuesResultAtom = makeQueryAtomFamily(getLogAttributeValues, {
-	staleTime: 30_000,
 })

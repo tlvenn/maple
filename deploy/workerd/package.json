@@ -5,6 +5,7 @@
   "dependencies": {
     "miniflare": "4.20260424.0",
     "drizzle-orm": "^0.45.1",
+    "postgres": "^3.4.9",
     "cron": "^4.3.0"
   },
   "devDependencies": {

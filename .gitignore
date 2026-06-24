@@ -1,6 +1,9 @@
 .tinyb
 .tinybird-generated
 .tinybird-entities-*.mjs
+# D1→Postgres migration dumps — contain prod data, never commit
+.migration
+**/.migration
 .terraform
 .DS_Store
 .claude
@@ -20,6 +23,7 @@ count.txt
 .output
 .vinxi
 .turbo
+**/drizzle.config.local.ts
 todos.json
 apps/api/.data/
 apps/api/scripts/.bench/
@@ -43,3 +47,6 @@ playwright/.cache/
 /apps/ingest/apps/ingest/.wal
 /apps/ingest/target
 /apps/ingest/.wal
+
+# local-only Drizzle Studio config pointing at miniflare D1
+drizzle.config.local.ts

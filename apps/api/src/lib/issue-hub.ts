@@ -31,8 +31,7 @@ const decodeActorId = Schema.decodeUnknownSync(ActorId)
  * decimal UInt64 strings from ClickHouse, so the `alert:` prefix can never
  * collide with them inside the UNIQUE(orgId, fingerprintHash) index.
  */
-export const alertIssueFingerprint = (ruleId: string, groupKey: string) =>
-	`alert:${ruleId}:${groupKey}`
+export const alertIssueFingerprint = (ruleId: string, groupKey: string) => `alert:${ruleId}:${groupKey}`
 
 /** Detection-time severity mapping; refined later by AI triage or a human. */
 export const detectorSeverityFor = (severity: AlertSeverity): IssueSeverity =>
@@ -66,16 +65,12 @@ export interface UpsertAlertIssueResult {
 const describeIncident = (input: UpsertAlertIssueInput): string => {
 	const observed = input.observedValue == null ? "no data" : `observed ${input.observedValue}`
 	const bound =
-		input.thresholdUpper == null
-			? `${input.threshold}`
-			: `${input.threshold}..${input.thresholdUpper}`
+		input.thresholdUpper == null ? `${input.threshold}` : `${input.threshold}..${input.thresholdUpper}`
 	const group = input.groupKey === "__total__" ? "" : ` (group ${input.groupKey})`
 	return `${input.signalType} ${input.comparator} ${bound} — ${observed}${group}`
 }
 
-const ensureSystemAlertsActor = Effect.fn("issueHub.ensureSystemAlertsActor")(function* (
-	orgId: OrgId,
-) {
+const ensureSystemAlertsActor = Effect.fn("issueHub.ensureSystemAlertsActor")(function* (orgId: OrgId) {
 	const database = yield* Database
 	const select = () =>
 		database.execute((db) =>
@@ -105,10 +100,10 @@ const ensureSystemAlertsActor = Effect.fn("issueHub.ensureSystemAlertsActor")(fu
 				userId: null,
 				agentName: SYSTEM_ALERTS_AGENT_NAME,
 				model: null,
-				capabilitiesJson: JSON.stringify(["system", "alert-issues"]),
+				capabilitiesJson: ["system", "alert-issues"],
 				createdBy: null,
-				createdAt: timestamp,
-				lastActiveAt: timestamp,
+				createdAt: new Date(timestamp),
+				lastActiveAt: new Date(timestamp),
 			})
 			.onConflictDoNothing(),
 	)
@@ -130,12 +125,12 @@ export const upsertAlertIssue: (
 	function* (input: UpsertAlertIssueInput) {
 		const database = yield* Database
 		const fingerprintHash = alertIssueFingerprint(input.ruleId, input.groupKey)
-		const sourceRefJson = JSON.stringify({
+		const sourceRefJson = {
 			ruleId: input.ruleId,
 			groupKey: input.groupKey,
 			signalType: input.signalType,
 			latestIncidentId: input.incidentId,
-		})
+		}
 
 		const existingRows = yield* database.execute((db) =>
 			db
@@ -175,15 +170,15 @@ export const upsertAlertIssue: (
 					leaseExpiresAt: null,
 					claimedAt: null,
 					notes: null,
-					firstSeenAt: input.timestamp,
-					lastSeenAt: input.timestamp,
+					firstSeenAt: new Date(input.timestamp),
+					lastSeenAt: new Date(input.timestamp),
 					occurrenceCount: 1,
 					resolvedAt: null,
 					resolvedByActorId: null,
 					snoozeUntil: null,
 					archivedAt: null,
-					createdAt: input.timestamp,
-					updatedAt: input.timestamp,
+					createdAt: new Date(input.timestamp),
+					updatedAt: new Date(input.timestamp),
 				}),
 			)
 			const actorId = yield* ensureSystemAlertsActor(input.orgId)
@@ -202,7 +197,7 @@ export const upsertAlertIssue: (
 			issueId = prior.id
 			const snoozeActive =
 				prior.workflowState === "wontfix" &&
-				(prior.snoozeUntil == null || prior.snoozeUntil > input.timestamp)
+				(prior.snoozeUntil == null || prior.snoozeUntil.getTime() > input.timestamp)
 			if (snoozeActive) {
 				// Mirrors the errors tick: a wontfix issue with an active (or
 				// indefinite) snooze is left alone entirely.
@@ -213,11 +208,11 @@ export const upsertAlertIssue: (
 				db
 					.update(errorIssues)
 					.set({
-						lastSeenAt: input.timestamp,
+						lastSeenAt: new Date(input.timestamp),
 						occurrenceCount: sql`${errorIssues.occurrenceCount} + 1`,
 						exceptionMessage: describeIncident(input),
 						sourceRefJson,
-						updatedAt: input.timestamp,
+						updatedAt: new Date(input.timestamp),
 					})
 					.where(and(eq(errorIssues.orgId, input.orgId), eq(errorIssues.id, prior.id))),
 			)
@@ -253,7 +248,7 @@ export const upsertAlertIssue: (
 							resolvedAt: null,
 							resolvedByActorId: null,
 							snoozeUntil: null,
-							updatedAt: input.timestamp,
+							updatedAt: new Date(input.timestamp),
 						})
 						.where(and(eq(errorIssues.orgId, input.orgId), eq(errorIssues.id, prior.id))),
 				)
@@ -276,7 +271,7 @@ export const upsertAlertIssue: (
 		yield* database.execute((db) =>
 			db
 				.update(alertIncidents)
-				.set({ errorIssueId: issueId, updatedAt: input.timestamp })
+				.set({ errorIssueId: issueId, updatedAt: new Date(input.timestamp) })
 				.where(and(eq(alertIncidents.orgId, input.orgId), eq(alertIncidents.id, input.incidentId))),
 		)
 
@@ -344,8 +339,8 @@ const recordIssueEvent = Effect.fn("issueHub.recordIssueEvent")(function* (
 			type,
 			fromState: opts.fromState ?? null,
 			toState: opts.toState ?? null,
-			payloadJson: JSON.stringify(opts.payload ?? {}),
-			createdAt: opts.timestamp,
+			payloadJson: opts.payload ?? {},
+			createdAt: new Date(opts.timestamp),
 		}),
 	)
 })

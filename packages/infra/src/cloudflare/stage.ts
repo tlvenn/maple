@@ -17,6 +17,8 @@ export interface MapleDomains {
 	local?: string
 }
 
+export const CLOUDFLARE_WORKER_PLACEMENT = { region: "aws:us-east-1" } as const
+
 const PRD_DOMAINS: MapleDomains = {
 	web: "app.maple.dev",
 	api: "api.maple.dev",
@@ -96,7 +98,13 @@ export function resolveMapleDomains(stage: MapleStage): MapleDomains {
 		case "stg":
 			return STG_DOMAINS
 		case "pr":
-			return {}
+			// Give PR previews a stable, secret-free web URL so GitHub can attach it
+			// to the PR as a clickable deployment. The default workers.dev URL embeds
+			// the Cloudflare account subdomain, which Doppler masks as a secret —
+			// GitHub then refuses to set the environment URL. A custom domain under the
+			// `maple.dev` zone has no secret in it. api/chat/ingest stay on workers.dev
+			// (the API allows all origins, so cross-origin calls keep working).
+			return { web: `app-pr-${stage.prNumber}.maple.dev` }
 		case "dev":
 			return {}
 	}
@@ -112,6 +120,40 @@ export function resolveD1Name(stage: MapleStage): string {
 			return `maple-api-pr-${stage.prNumber}`
 		case "dev":
 			return `maple-api-dev-${stage.name}`
+	}
+}
+
+export function resolveHyperdriveName(stage: MapleStage): string {
+	switch (stage.kind) {
+		case "prd":
+			// Pre-configured in the Cloudflare dashboard (origin/credentials managed
+			// there); the prod deploy references it by this name. See alchemy.run.ts.
+			return "maple-prd"
+		case "stg":
+			return "maple-db-stg"
+		case "pr":
+			return `maple-db-pr-${stage.prNumber}`
+		case "dev":
+			return `maple-db-dev-${stage.name}`
+	}
+}
+
+/**
+ * PlanetScale Postgres branch backing a stage. One database (`maple-api`)
+ * with a fully-isolated branch per stage; pr branches are created/destroyed
+ * by scripts/planetscale-pr-branch.ts. Dev stages have no managed branch —
+ * local dev runs against the docker-compose Postgres.
+ */
+export function resolvePlanetScaleBranch(stage: MapleStage): string | undefined {
+	switch (stage.kind) {
+		case "prd":
+			return "main"
+		case "stg":
+			return "stg"
+		case "pr":
+			return `pr-${stage.prNumber}`
+		case "dev":
+			return undefined
 	}
 }
 

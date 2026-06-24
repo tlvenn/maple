@@ -20,6 +20,8 @@ interface MetricsGridItem {
 	tooltip?: ChartTooltipMode
 	rateMode?: "per_second"
 	referenceLines?: ChartReferenceLine[]
+	/** Interactive marker (e.g. a commit hover card) for each reference line. */
+	renderReferenceMarker?: (line: ChartReferenceLine) => ReactNode
 	isLoading?: boolean
 	/** Headline stat rendered at the top-right of the card header. */
 	headerValue?: ReactNode
@@ -57,7 +59,7 @@ export function MetricsGrid({ items, className, waiting, syncId }: MetricsGridPr
 				const fullWidth = item.layout.w > 6
 
 				return (
-					<div key={item.id} className={cn("h-[280px]", fullWidth && "md:col-span-2")}>
+					<div key={item.id} className={cn("h-[240px] md:h-[280px]", fullWidth && "md:col-span-2")}>
 						<ReadonlyWidgetShell
 							title={item.title}
 							headerValue={item.headerValue}
@@ -74,6 +76,7 @@ export function MetricsGrid({ items, className, waiting, syncId }: MetricsGridPr
 										tooltip={item.tooltip}
 										rateMode={item.rateMode}
 										referenceLines={item.referenceLines}
+										renderReferenceMarker={item.renderReferenceMarker}
 										syncId={syncId}
 									/>
 								</Suspense>

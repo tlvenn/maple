@@ -31,9 +31,7 @@ import { Env } from "../lib/Env"
 
 const DELIVERY_TIMEOUT_MS = 15_000
 
-export class NotificationDispatchError extends Data.TaggedError(
-	"@maple/api/services/NotificationDispatchError",
-)<{
+class NotificationDispatchError extends Data.TaggedError("@maple/api/services/NotificationDispatchError")<{
 	readonly message: string
 	readonly cause?: unknown
 }> {}
@@ -213,7 +211,7 @@ const make: Effect.Effect<NotificationDispatcherShape, NotificationDispatchError
 					),
 				)
 
-			const enabled = rows.filter((row) => row.enabled === 1)
+			const enabled = rows.filter((row) => row.enabled)
 
 			const results = yield* Effect.forEach(
 				enabled,

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest"
 import * as CH from "./index"
-import { compileCH, compileUnion } from "./compile"
+import { compileCH, compileUnion } from "@maple-dev/clickhouse-builder"
 import { tracesTimeseriesQuery, tracesBreakdownQuery, tracesListQuery } from "./queries/traces"
 import { logsFacetsQuery } from "./queries/logs"
 import { servicesFacetsQuery } from "./queries/services"
 import { sessionReplaysFacetsQuery } from "./queries/session-replays"
 import { metricsSummaryQuery } from "./queries/metrics"
 import { tracesDurationStatsQuery, spanHierarchyQuery, spanDetailQuery } from "./queries/errors"
-import { unionAll } from "./union"
+import { unionAll } from "@maple-dev/clickhouse-builder"
 
 // ---------------------------------------------------------------------------
 // Core DSL tests
@@ -126,12 +126,33 @@ describe("CH.from / select / where / compile", () => {
 	})
 
 	it("compiles toStartOfInterval", () => {
-		const q = CH.from(TestTable).select(($) => ({
+		const q = CH.from(TestTable).select((_$) => ({
 			bucket: CH.toStartOfInterval(CH.rawExpr<string>("Timestamp"), 3600),
 		}))
 
 		const { sql } = compileCH(q, {})
 		expect(sql).toContain("toStartOfInterval(Timestamp, INTERVAL 3600 SECOND) AS bucket")
+	})
+
+	it("compiles window frame helpers", () => {
+		const q = CH.from(TestTable).select(($) => {
+			const frame = CH.windowSpec({
+				partitionBy: [$.Name, CH.cityHash64(CH.mapKeys($.Attrs), CH.mapValues($.Attrs))],
+				orderBy: [[$.Value, "asc"]],
+				frame: CH.rowsBetween(CH.preceding(1), CH.currentRow),
+			})
+
+			return {
+				delta: $.Value.sub(CH.over(CH.lagInFrame($.Value, 1, $.Value), frame)),
+			}
+		})
+
+		const { sql } = compileCH(q, {})
+		expect(sql).toContain(
+			"Value - lagInFrame(Value, 1, Value) OVER (PARTITION BY Name, " +
+				"cityHash64(mapKeys(Attrs), mapValues(Attrs)) ORDER BY Value ASC " +
+				"ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS delta",
+		)
 	})
 
 	it("compiles if_ expressions", () => {
@@ -437,7 +458,10 @@ describe("tracesTimeseriesQuery", () => {
 			attributeFilters: [{ key: "http.status_code", value: "200", mode: "equals" }],
 		})
 		const { sql } = compileCH(q, baseParams)
-		expect(sql).toContain("SpanAttributes['http.status_code'] = '200'")
+		// Coalesces the old + new OTel semconv spellings (mirrors trace_list_mv).
+		expect(sql).toContain(
+			"if(SpanAttributes['http.status_code'] != '', SpanAttributes['http.status_code'], SpanAttributes['http.response.status_code']) = '200'",
+		)
 	})
 
 	it("filters by attribute filters (exists)", () => {
@@ -467,7 +491,9 @@ describe("tracesTimeseriesQuery", () => {
 			attributeFilters: [{ key: "http.status_code", value: "400", mode: "gt" }],
 		})
 		const { sql } = compileCH(q, baseParams)
-		expect(sql).toContain("toFloat64OrZero(SpanAttributes['http.status_code']) > 400")
+		expect(sql).toContain(
+			"toFloat64OrZero(if(SpanAttributes['http.status_code'] != '', SpanAttributes['http.status_code'], SpanAttributes['http.response.status_code'])) > 400",
+		)
 	})
 
 	it("filters by resource attribute filters", () => {
@@ -489,7 +515,9 @@ describe("tracesTimeseriesQuery", () => {
 		})
 		const { sql } = compileCH(q, baseParams)
 		expect(sql).toContain("FROM traces")
-		expect(sql).toContain("SpanAttributes['http.method'] = 'GET'")
+		expect(sql).toContain(
+			"if(SpanAttributes['http.method'] != '', SpanAttributes['http.method'], SpanAttributes['http.request.method']) = 'GET'",
+		)
 	})
 
 	it("falls back to raw traces when groupBy includes span_name", () => {
@@ -549,6 +577,8 @@ describe("tracesBreakdownQuery", () => {
 		const q = tracesBreakdownQuery({ metric: "count", groupBy: "service" })
 		const { sql } = compileCH(q, baseParams)
 		expect(sql).toContain("SELECT")
+		expect(sql).toContain("FROM service_overview_spans")
+		expect(sql).not.toContain("FROM traces")
 		expect(sql).toContain("ServiceName AS name")
 		expect(sql).toContain("count() AS count")
 		expect(sql).toContain("GROUP BY name")
@@ -560,18 +590,23 @@ describe("tracesBreakdownQuery", () => {
 	it("groups by span_name", () => {
 		const q = tracesBreakdownQuery({ metric: "count", groupBy: "span_name" })
 		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM traces")
+		expect(sql).not.toContain("FROM service_overview_spans")
 		expect(sql).toContain("SpanName AS name")
 	})
 
 	it("groups by status_code", () => {
 		const q = tracesBreakdownQuery({ metric: "count", groupBy: "status_code" })
 		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM service_overview_spans")
 		expect(sql).toContain("StatusCode AS name")
 	})
 
 	it("groups by http_method", () => {
 		const q = tracesBreakdownQuery({ metric: "count", groupBy: "http_method" })
 		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM traces")
+		expect(sql).not.toContain("FROM service_overview_spans")
 		expect(sql).toContain("SpanAttributes['http.method'] AS name")
 	})
 
@@ -582,6 +617,8 @@ describe("tracesBreakdownQuery", () => {
 			groupByAttributeKey: "rpc.service",
 		})
 		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM traces")
+		expect(sql).not.toContain("FROM service_overview_spans")
 		expect(sql).toContain("SpanAttributes['rpc.service'] AS name")
 	})
 
@@ -620,8 +657,33 @@ describe("tracesBreakdownQuery", () => {
 			errorsOnly: true,
 		})
 		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM service_overview_spans")
 		expect(sql).toContain("ServiceName = 'api'")
 		expect(sql).toContain("StatusCode = 'Error'")
+	})
+
+	it("uses pre-extracted deployment env on the service overview branch", () => {
+		const q = tracesBreakdownQuery({
+			metric: "count",
+			groupBy: "service",
+			environments: ["prod"],
+		})
+		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM service_overview_spans")
+		expect(sql).toContain("DeploymentEnv IN ('prod')")
+		expect(sql).not.toContain("ResourceAttributes")
+	})
+
+	it("falls back to raw traces for resource attribute filters", () => {
+		const q = tracesBreakdownQuery({
+			metric: "count",
+			groupBy: "service",
+			resourceAttributeFilters: [{ key: "host.name", value: "server-1", mode: "equals" }],
+		})
+		const { sql } = compileCH(q, baseParams)
+		expect(sql).toContain("FROM traces")
+		expect(sql).not.toContain("FROM service_overview_spans")
+		expect(sql).toContain("ResourceAttributes['host.name'] = 'server-1'")
 	})
 })
 
@@ -677,7 +739,10 @@ describe("tracesListQuery", () => {
 	it("emits NOT IN for excludedSpanNames", () => {
 		const q = tracesListQuery({ excludedSpanNames: ["GET /health"] })
 		const { sql } = compileCH(q, baseParams)
-		expect(sql).toContain("SpanName NOT IN ('GET /health')")
+		// Display-name aware: excludes rows whose raw OR rewritten span name
+		// matches, so excluding a "Root Span" facet value ("GET /route") works.
+		expect(sql).toMatch(/NOT \(\(SpanName IN \('GET \/health'\) OR /)
+		expect(sql).toContain("replaceOne(SpanName, 'http.server ', '')")
 	})
 
 	it("wraps a negated attribute filter in NOT (...)", () => {

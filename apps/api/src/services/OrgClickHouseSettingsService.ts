@@ -18,16 +18,16 @@ import {
 	UserId,
 } from "@maple/domain/http"
 import {
-	CLICKHOUSE_MV_SOURCE_TABLES,
-	clickHouseProjectRevision,
+	clickHouseSchemaVersion,
 	computeSchemaDiff,
 	migrations as clickHouseMigrations,
 	parseEmittedStatement,
-	qualifyStatementForDatabase,
 	type ActualTable,
 	type DesiredTable,
+	type TableDiffEntry,
 } from "@maple/domain/clickhouse"
 import { orgClickHouseSchemaApplyRuns, orgClickHouseSettings } from "@maple/db"
+import { EdgeCacheService } from "@maple/query-engine/caching"
 import { eq } from "drizzle-orm"
 import { WorkerEnvironment } from "@maple/effect-cloudflare/worker-environment"
 import { Clock, Context, Duration, Effect, Layer, Option, Redacted, Ref, Schedule, Schema } from "effect"
@@ -40,6 +40,7 @@ import {
 } from "../lib/Crypto"
 import { Database } from "../lib/DatabaseLive"
 import { Env } from "../lib/Env"
+import { dateToMs } from "../lib/time"
 import { validateExternalUrl } from "../lib/url-validator"
 
 /**
@@ -50,7 +51,7 @@ import { validateExternalUrl } from "../lib/url-validator"
  * settings row, so callers will see `Option.none()` from
  * `resolveRuntimeConfig` for those orgs.
  */
-export type RuntimeBackendConfig = {
+type RuntimeBackendConfig = {
 	readonly backend: "clickhouse"
 	readonly url: string
 	readonly user: string
@@ -59,6 +60,43 @@ export type RuntimeBackendConfig = {
 }
 
 type ActiveRow = typeof orgClickHouseSettings.$inferSelect
+
+// Edge-cache bucket + TTL for the per-org runtime ClickHouse config lookup.
+// `resolveRuntimeConfig` runs on the hot path of every warehouse SQL execution
+// (and once per missing bucket in the cache fan-out), so a 5-min cross-request
+// entry removes the repeated Postgres round-trip.
+const ORG_CH_CONFIG_BUCKET = "org-clickhouse-config"
+const ORG_CH_CONFIG_TTL_SECONDS = 300
+
+/**
+ * JSON-safe projection of the settings row cached cross-request by
+ * `resolveRuntimeConfig`. Holds the ENCRYPTED password material
+ * (ciphertext/iv/tag) — never the plaintext — so decryption still happens
+ * per-request after the cache, keeping credentials out of Workers KV. `null`
+ * encodes "no BYO ClickHouse row" (the common managed-org case), cached too so
+ * managed orgs stop paying the Postgres round-trip just to learn "use Tinybird".
+ */
+const CachedChSettings = Schema.Struct({
+	schemaVersion: Schema.NullOr(Schema.String),
+	chUrl: Schema.String,
+	chUser: Schema.String,
+	chDatabase: Schema.String,
+	chPasswordCiphertext: Schema.NullOr(Schema.String),
+	chPasswordIv: Schema.NullOr(Schema.String),
+	chPasswordTag: Schema.NullOr(Schema.String),
+})
+type CachedChSettings = typeof CachedChSettings.Type
+const CachedChSettingsOrNull = Schema.NullOr(CachedChSettings)
+
+const toCachedChSettings = (row: ActiveRow): CachedChSettings => ({
+	schemaVersion: row.schemaVersion,
+	chUrl: row.chUrl,
+	chUser: row.chUser,
+	chDatabase: row.chDatabase,
+	chPasswordCiphertext: row.chPasswordCiphertext,
+	chPasswordIv: row.chPasswordIv,
+	chPasswordTag: row.chPasswordTag,
+})
 
 const ROOT_ROLE = Schema.decodeUnknownSync(RoleName)("root")
 const ORG_ADMIN_ROLE = Schema.decodeUnknownSync(RoleName)("org:admin")
@@ -188,12 +226,6 @@ const decryptToken = (
 	decryptAes256Gcm(encrypted, encryptionKey, () =>
 		toEncryptionError("Failed to decrypt ClickHouse password"),
 	)
-
-// Both `qualifyStatementForDatabase` and `CLICKHOUSE_MV_SOURCE_TABLES` live
-// in `@maple/domain/clickhouse` now (so the `@maple/clickhouse-cli` package
-// can share them) and are imported at the top of this file. Re-exported here
-// for any tests / callers that still import from this module path.
-export { CLICKHOUSE_MV_SOURCE_TABLES, qualifyStatementForDatabase }
 
 // Image reference baked into the rendered collector config. Bumping this
 // here is the single edit needed to roll customers onto a newer maple-otel
@@ -334,8 +366,8 @@ const normalizeHttpUrl = (raw: string): Effect.Effect<string, OrgClickHouseSetti
 const isOrgAdmin = (roles: ReadonlyArray<RoleName>) =>
 	roles.includes(ROOT_ROLE) || roles.includes(ORG_ADMIN_ROLE)
 
-const isIsoDateTime = (value: number | null | undefined) =>
-	value == null ? null : decodeIsoDateTimeStringSync(new Date(value).toISOString())
+const isIsoDateTime = (value: Date | null | undefined) =>
+	value == null ? null : decodeIsoDateTimeStringSync(value.toISOString())
 
 const decodeStatus = (raw: string | null | undefined): "connected" | "error" | null => {
 	if (raw === "connected" || raw === "error") return raw
@@ -423,6 +455,29 @@ export const isRetryableUpstream = (
 	// ClickHouse returns 500 for genuine SQL/DDL errors; 408 is our own timeout.
 	return status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 529)
 }
+
+/**
+ * Whether `schemaDiff` should re-stamp the recorded `schema_version` to the
+ * current `clickHouseSchemaVersion`. True when the live ClickHouse schema is fully
+ * in sync (every diff entry `up_to_date`) yet the stored value is stale.
+ *
+ * This closes the "stuck not ready" gap: the ingest gateway only routes an org's
+ * frames to its own ClickHouse when `schema_version` equals the running version,
+ * but a credential re-save preserves the old value and the standalone CLI never
+ * writes D1 — so a CLI-applied (or revision-bumped) org whose cluster is actually
+ * current would otherwise stay on the managed Tinybird write path forever, with no
+ * way to re-stamp because Apply is disabled when there's no diff. The non-empty
+ * guard avoids healing off a degenerate empty diff (e.g. a failed schema fetch),
+ * where `every` would be vacuously true.
+ */
+export const shouldHealSchemaVersion = (
+	entries: ReadonlyArray<TableDiffEntry>,
+	storedSchemaVersion: string | null,
+	currentSchemaVersion: string,
+): boolean =>
+	storedSchemaVersion !== currentSchemaVersion &&
+	entries.length > 0 &&
+	entries.every((entry) => entry.status === "up_to_date")
 
 const describeUpstream5xx = (status: number, message: string): string => {
 	// A 52x with the literal `error code: 5xx` body is Cloudflare's synthetic
@@ -634,6 +689,19 @@ export class OrgClickHouseSettingsService extends Context.Service<
 			return Option.fromNullishOr(rows[0])
 		})
 
+		// Bust the cross-request edge entry for an org's runtime config after any
+		// write to its settings row, so the next warehouse query re-resolves rather
+		// than serving the ≤5-min-stale value. The edge cache is optional (absent
+		// in tests / non-worker contexts) — a no-op when unavailable.
+		const invalidateRuntimeConfigCache = (orgId: OrgId): Effect.Effect<void> =>
+			Effect.serviceOption(EdgeCacheService).pipe(
+				Effect.flatMap((cache) =>
+					Option.isNone(cache)
+						? Effect.void
+						: cache.value.invalidate({ bucket: ORG_CH_CONFIG_BUCKET, key: orgId }),
+				),
+			)
+
 		const requireActiveRow = Effect.fn("OrgClickHouseSettingsService.requireActiveRow")(function* (
 			orgId: OrgId,
 		) {
@@ -647,7 +715,7 @@ export class OrgClickHouseSettingsService extends Context.Service<
 		})
 
 		const decryptStoredPassword = (
-			row: ActiveRow,
+			row: Pick<ActiveRow, "chPasswordCiphertext" | "chPasswordIv" | "chPasswordTag">,
 		): Effect.Effect<string, OrgClickHouseSettingsEncryptionError> =>
 			row.chPasswordCiphertext !== null && row.chPasswordIv !== null && row.chPasswordTag !== null
 				? decryptToken(
@@ -749,15 +817,15 @@ export class OrgClickHouseSettingsService extends Context.Service<
 							chPasswordTag: encryptedPassword?.tag ?? null,
 							chDatabase: dbName,
 							syncStatus: "connected",
-							lastSyncAt: now,
+							lastSyncAt: new Date(now),
 							lastSyncError: null,
 							// schemaVersion is preserved across re-saves — credentials
 							// changing doesn't invalidate the schema apply state.
 							schemaVersion: Option.isSome(existingRow)
 								? existingRow.value.schemaVersion
 								: null,
-							createdAt: Option.isSome(existingRow) ? existingRow.value.createdAt : now,
-							updatedAt: now,
+							createdAt: Option.isSome(existingRow) ? existingRow.value.createdAt : new Date(now),
+							updatedAt: new Date(now),
 							createdBy: Option.isSome(existingRow) ? existingRow.value.createdBy : userId,
 							updatedBy: userId,
 						})
@@ -771,15 +839,16 @@ export class OrgClickHouseSettingsService extends Context.Service<
 								chPasswordTag: encryptedPassword?.tag ?? null,
 								chDatabase: dbName,
 								syncStatus: "connected",
-								lastSyncAt: now,
+								lastSyncAt: new Date(now),
 								lastSyncError: null,
-								updatedAt: now,
+								updatedAt: new Date(now),
 								updatedBy: userId,
 							},
 						}),
 				)
 				.pipe(Effect.mapError(toPersistenceError))
 
+			yield* invalidateRuntimeConfigCache(orgId)
 			const refreshed = yield* selectActiveRow(orgId)
 			return toResponse(Option.getOrUndefined(refreshed))
 		})
@@ -795,6 +864,7 @@ export class OrgClickHouseSettingsService extends Context.Service<
 					db.delete(orgClickHouseSettings).where(eq(orgClickHouseSettings.orgId, orgId)),
 				)
 				.pipe(Effect.mapError(toPersistenceError))
+			yield* invalidateRuntimeConfigCache(orgId)
 			return new OrgClickHouseSettingsDeleteResponse({ configured: false })
 		})
 
@@ -816,9 +886,48 @@ export class OrgClickHouseSettingsService extends Context.Service<
 			const config = yield* loadConfigForRow(row)
 			const actual = yield* fetchActualSchema(config)
 			const entries = computeSchemaDiff({ tables: yield* getDesiredTables }, actual)
+
+			// Self-heal the recorded schema version. The ingest gateway only routes an
+			// org's frames directly to its ClickHouse when the stored `schema_version`
+			// equals the running `clickHouseSchemaVersion`. But a credential re-save
+			// *preserves* the old value and the standalone CLI never writes D1, so an org
+			// whose CH is already in sync can be stuck "not ready" forever — with no way to
+			// re-stamp, because the Apply action is disabled when there is no diff. When the
+			// live schema matches what we expect, record the current schema version so the
+			// read (dashboard) and write (gateway) paths agree on routing to ClickHouse
+			// instead of silently splitting writes to Tinybird.
+			let appliedSchemaVersion = row.schemaVersion ?? null
+			if (shouldHealSchemaVersion(entries, row.schemaVersion ?? null, clickHouseSchemaVersion)) {
+				const now = yield* Clock.currentTimeMillis
+				yield* database
+					.execute((db) =>
+						db
+							.update(orgClickHouseSettings)
+							.set({
+								schemaVersion: clickHouseSchemaVersion,
+								syncStatus: "connected",
+								lastSyncAt: new Date(now),
+								lastSyncError: null,
+								updatedAt: new Date(now),
+							})
+							.where(eq(orgClickHouseSettings.orgId, orgId)),
+					)
+					.pipe(Effect.mapError(toPersistenceError))
+				yield* invalidateRuntimeConfigCache(orgId)
+				appliedSchemaVersion = clickHouseSchemaVersion
+				yield* Effect.annotateCurrentSpan("clickhouse.schemaVersion.healed", true)
+				yield* Effect.logInfo("Self-healed ClickHouse schema_version to current version").pipe(
+					Effect.annotateLogs({
+						orgId,
+						previousSchemaVersion: row.schemaVersion ?? "(none)",
+						schemaVersion: clickHouseSchemaVersion,
+					}),
+				)
+			}
+
 			return new OrgClickHouseSchemaDiffResponse({
-				expectedSchemaVersion: clickHouseProjectRevision,
-				appliedSchemaVersion: row.schemaVersion ?? null,
+				expectedSchemaVersion: clickHouseSchemaVersion,
+				appliedSchemaVersion,
 				entries,
 			})
 		})
@@ -869,8 +978,8 @@ export class OrgClickHouseSettingsService extends Context.Service<
 							errorMessage: null,
 							startedAt: null,
 							finishedAt: null,
-							createdAt: now,
-							updatedAt: now,
+							createdAt: new Date(now),
+							updatedAt: new Date(now),
 						})
 						.onConflictDoUpdate({
 							target: orgClickHouseSchemaApplyRuns.orgId,
@@ -885,7 +994,7 @@ export class OrgClickHouseSettingsService extends Context.Service<
 								errorMessage: null,
 								startedAt: null,
 								finishedAt: null,
-								updatedAt: now,
+								updatedAt: new Date(now),
 							},
 						}),
 				)
@@ -943,13 +1052,8 @@ export class OrgClickHouseSettingsService extends Context.Service<
 				})
 			}
 			let appliedVersions: ReadonlyArray<number> = []
-			if (row.appliedVersions) {
-				try {
-					const parsed = JSON.parse(row.appliedVersions) as unknown
-					if (Array.isArray(parsed)) appliedVersions = parsed.map((v) => Number(v))
-				} catch {
-					appliedVersions = []
-				}
+			if (Array.isArray(row.appliedVersions)) {
+				appliedVersions = row.appliedVersions.map((v) => Number(v))
 			}
 			const status =
 				row.status === "queued" ||
@@ -966,24 +1070,64 @@ export class OrgClickHouseSettingsService extends Context.Service<
 				stepsDone: row.stepsDone ?? null,
 				appliedVersions,
 				errorMessage: row.errorMessage ?? null,
-				startedAt: row.startedAt ?? null,
-				finishedAt: row.finishedAt ?? null,
+				startedAt: dateToMs(row.startedAt),
+				finishedAt: dateToMs(row.finishedAt),
 			})
 		})
 
 		const resolveRuntimeConfig = Effect.fn("OrgClickHouseSettingsService.resolveRuntimeConfig")(
 			function* (orgId: OrgId) {
-				const row = yield* selectActiveRow(orgId)
-				if (Option.isNone(row)) {
+				// `selectActiveRow` is a Postgres round-trip on the hot path of EVERY
+				// warehouse SQL execution, and the bucket-cache fan-out re-runs it once
+				// per missing range. Wrap it in the shared edge cache: its in-flight
+				// single-flight collapses the concurrent fan-out into one lookup, and the
+				// 5-min KV entry removes the cold round-trip on repeat loads. We cache the
+				// ENCRYPTED row projection (or `null`) and decrypt per-request below, so
+				// plaintext credentials never enter the cache.
+				const edgeCache = yield* Effect.serviceOption(EdgeCacheService)
+				const lookup = selectActiveRow(orgId).pipe(
+					Effect.map((row) => (Option.isSome(row) ? toCachedChSettings(row.value) : null)),
+				)
+				const cached = Option.isNone(edgeCache)
+					? yield* lookup
+					: yield* edgeCache.value
+							.getOrCompute(
+								{
+									bucket: ORG_CH_CONFIG_BUCKET,
+									key: orgId,
+									ttlSeconds: ORG_CH_CONFIG_TTL_SECONDS,
+									schema: CachedChSettingsOrNull,
+								},
+								lookup,
+							)
+							.pipe(
+								Effect.tap((result) =>
+									Effect.annotateCurrentSpan("clickhouse.config.cacheHit", result.hit),
+								),
+								Effect.map((result) => result.value),
+							)
+
+				if (cached === null) {
 					return Option.none<RuntimeBackendConfig>()
 				}
-				const password = yield* decryptStoredPassword(row.value)
+				// Reads always use the org's ClickHouse when configured — we must NOT fall
+				// back to Tinybird here, or we'd hide data already written to CH. But the
+				// ingest gateway only *writes* to CH when `schema_version` matches the running
+				// `clickHouseSchemaVersion`, so a stale value means ingest is silently landing
+				// in Tinybird while we read CH. Surface that split as a span attribute for
+				// alerting; the schemaDiff path self-heals the value when the live schema is
+				// in sync.
+				yield* Effect.annotateCurrentSpan(
+					"clickhouse.schemaDrift",
+					cached.schemaVersion !== clickHouseSchemaVersion,
+				)
+				const password = yield* decryptStoredPassword(cached)
 				return Option.some<RuntimeBackendConfig>({
 					backend: "clickhouse",
-					url: row.value.chUrl,
-					user: row.value.chUser,
+					url: cached.chUrl,
+					user: cached.chUser,
 					password,
-					database: row.value.chDatabase,
+					database: cached.chDatabase,
 				})
 			},
 		)

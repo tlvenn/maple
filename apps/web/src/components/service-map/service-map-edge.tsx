@@ -71,12 +71,8 @@ export const ServiceMapEdge = memo(function ServiceMapEdge({
 		borderRadius: 12,
 	})
 
-	const sourceColor = isDbNodeId(source)
-		? dbEndpointColor(source)
-		: getServiceLegendColor(source, services)
-	const targetColor = isDbNodeId(target)
-		? dbEndpointColor(target)
-		: getServiceLegendColor(target, services)
+	const sourceColor = isDbNodeId(source) ? dbEndpointColor(source) : getServiceLegendColor(source, services)
+	const targetColor = isDbNodeId(target) ? dbEndpointColor(target) : getServiceLegendColor(target, services)
 	const sw = getStrokeWidth(callCount)
 	const i = getEdgeIntensity(callsPerSecond)
 

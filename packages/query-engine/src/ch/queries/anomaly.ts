@@ -13,18 +13,14 @@
 // query; the caller splits rows on `hour === currentHourStart`.
 // ---------------------------------------------------------------------------
 
-import * as CH from "../expr"
-import { param } from "../param"
-import { from, fromQuery } from "../query"
+import * as CH from "@maple-dev/clickhouse-builder/expr"
+import { param } from "@maple-dev/clickhouse-builder"
+import { from, fromQuery } from "@maple-dev/clickhouse-builder"
 import { ErrorEventsByTime, LogsAggregatesHourly, TracesAggregatesHourly } from "../tables"
 
 /** Hour-of-day values matching the current hour ±1, wrapping at midnight. */
 export function matchedHoursOfDay(currentHourOfDay: number): readonly number[] {
-	return [
-		(currentHourOfDay + 23) % 24,
-		currentHourOfDay,
-		(currentHourOfDay + 1) % 24,
-	]
+	return [(currentHourOfDay + 23) % 24, currentHourOfDay, (currentHourOfDay + 1) % 24]
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +257,7 @@ export function anomalyErrorSpikeTimeseriesQuery() {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			CH.toString_($.FingerprintHash).eq(param.string("fingerprintHash")),
+			$.FingerprintHash.eq(CH.toUInt64(param.string("fingerprintHash"))),
 			$.DeploymentEnv.eq(param.string("deploymentEnv")),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),

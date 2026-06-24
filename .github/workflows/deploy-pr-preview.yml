@@ -14,6 +14,7 @@ concurrency:
 
 permissions:
     contents: read
+    deployments: write
 
 jobs:
     deploy-pr-preview:
@@ -22,7 +23,11 @@ jobs:
         # `pr-preview` environment must require manual approval in repo settings.
         # This blocks PR-controlled code (install scripts, build steps) from
         # accessing Doppler secrets until a maintainer reviews the diff.
-        environment: pr-preview
+        # `url` surfaces the deployed web app as a clickable deployment on the PR
+        # (empty on `closed`, when the deploy step is skipped).
+        environment:
+            name: pr-preview
+            url: ${{ steps.deploy.outputs.web_url }}
         env:
             DOPPLER_PROJECT: maple
             DOPPLER_CONFIG: pr
@@ -34,7 +39,7 @@ jobs:
             VITE_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         steps:
             - name: Checkout
-              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -63,13 +68,43 @@ jobs:
               if: ${{ github.event.action != 'closed' }}
               run: bun scripts/tinybird-pr-branch.ts up "$PR_NUMBER"
 
+            - name: Install PlanetScale CLI
+              if: ${{ env.PLANETSCALE_SERVICE_TOKEN != '' }}
+              uses: planetscale/setup-pscale-action@v1
+
+            # The PlanetScale + Alchemy steps below are gated on
+            # PLANETSCALE_SERVICE_TOKEN: until the `pr` Doppler config carries the
+            # PlanetScale service token (+ PLANETSCALE_SERVICE_TOKEN_ID,
+            # PLANETSCALE_ORG), PR previews can't provision a Postgres branch, so
+            # they SKIP cleanly (the check stays green) rather than fail every PR.
+            # Adding the token activates per-PR preview deploys automatically.
+
+            # Create/refresh the ephemeral PlanetScale Postgres branch `pr-<n>`
+            # (created empty — parity with the old per-PR empty D1), mint a
+            # credential, and export MAPLE_PG_URL to GITHUB_ENV so the migrate +
+            # Alchemy steps below bind to the branch.
+            - name: Create/refresh PlanetScale PR branch
+              if: ${{ github.event.action != 'closed' && env.PLANETSCALE_SERVICE_TOKEN != '' }}
+              run: bun scripts/planetscale-pr-branch.ts up "$PR_NUMBER"
+
+            - name: Run database migrations
+              if: ${{ github.event.action != 'closed' && env.PLANETSCALE_SERVICE_TOKEN != '' }}
+              run: DATABASE_URL="$MAPLE_PG_URL" bun run --cwd packages/db db:migrate
+
             - name: Deploy PR preview stack with Alchemy
-              if: ${{ github.event.action != 'closed' }}
+              id: deploy
+              if: ${{ github.event.action != 'closed' && env.PLANETSCALE_SERVICE_TOKEN != '' }}
               run: bun run alchemy:deploy:pr
 
             - name: Destroy PR preview stack with Alchemy
-              if: ${{ github.event.action == 'closed' }}
+              if: ${{ github.event.action == 'closed' && env.PLANETSCALE_SERVICE_TOKEN != '' }}
               run: bun run alchemy:destroy:pr
+
+            # After the stack (and its Hyperdrive config) is destroyed. PS-DEV
+            # branches bill for time used — this must run on every PR close.
+            - name: Remove PlanetScale PR branch
+              if: ${{ github.event.action == 'closed' && env.PLANETSCALE_SERVICE_TOKEN != '' }}
+              run: bun scripts/planetscale-pr-branch.ts down "$PR_NUMBER"
 
             # Tear the branch down after the stack — branches share compute with
             # production, so this must run on every PR close.

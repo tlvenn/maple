@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto"
 import type { AiTriageResult, IssueSeverity } from "@maple/domain/http"
 import { ActorId, ErrorIssueEventId, ErrorIssueId, OrgId } from "@maple/domain/primitives"
 import { actors, errorIssues, errorIssueEvents, issueEscalations } from "@maple/db"
-import type { MapleD1Client } from "@maple/db/client"
+import type { MaplePgClient } from "@maple/db/client"
 import { and, eq, ne, isNull, or } from "drizzle-orm"
 import { Schema } from "effect"
 
@@ -37,7 +37,7 @@ export const escalationDedupeKey = (orgId: string, issueId: string, severity: Is
  * id and the primary key (+ onConflictDoNothing) absorbs the duplicate.
  * Same construction as the ai_triage timeline event id in AiTriageWorkflow.run.
  */
-export const deterministicUuid = (seed: string): string => {
+const deterministicUuid = (seed: string): string => {
 	const hex = createHash("sha256").update(seed).digest("hex")
 	return [
 		hex.slice(0, 8),
@@ -63,7 +63,7 @@ export const escalationReasonFor = (
 }
 
 const ensureTriageAgentActor = async (
-	db: MapleD1Client,
+	db: MaplePgClient,
 	orgId: OrgId,
 	timestamp: number,
 ): Promise<ActorId> => {
@@ -72,7 +72,11 @@ const ensureTriageAgentActor = async (
 			.select()
 			.from(actors)
 			.where(
-				and(eq(actors.orgId, orgId), eq(actors.type, "agent"), eq(actors.agentName, TRIAGE_AGENT_NAME)),
+				and(
+					eq(actors.orgId, orgId),
+					eq(actors.type, "agent"),
+					eq(actors.agentName, TRIAGE_AGENT_NAME),
+				),
 			)
 			.limit(1)
 	const existing = await select()
@@ -86,10 +90,10 @@ const ensureTriageAgentActor = async (
 			userId: null,
 			agentName: TRIAGE_AGENT_NAME,
 			model: null,
-			capabilitiesJson: JSON.stringify(["auto-triage"]),
+			capabilitiesJson: ["auto-triage"],
 			createdBy: null,
-			createdAt: timestamp,
-			lastActiveAt: timestamp,
+			createdAt: new Date(timestamp),
+			lastActiveAt: new Date(timestamp),
 		})
 		.onConflictDoNothing()
 	const after = await select()
@@ -120,7 +124,7 @@ export interface ApplyTriageSeverityOutcome {
  * escalation-outbox row when the severity newly sets or strictly escalates.
  */
 export const applyTriageSeverity = async (
-	db: MapleD1Client,
+	db: MaplePgClient,
 	input: ApplyTriageSeverityInput,
 ): Promise<ApplyTriageSeverityOutcome> => {
 	const issueRows = await db
@@ -142,7 +146,7 @@ export const applyTriageSeverity = async (
 	// and this update still wins.
 	const updated = await db
 		.update(errorIssues)
-		.set({ severity: input.severity, severitySource: "ai", updatedAt: input.timestamp })
+		.set({ severity: input.severity, severitySource: "ai", updatedAt: new Date(input.timestamp) })
 		.where(
 			and(
 				eq(errorIssues.orgId, input.orgId),
@@ -150,7 +154,10 @@ export const applyTriageSeverity = async (
 				or(isNull(errorIssues.severitySource), ne(errorIssues.severitySource, "manual")),
 			),
 		)
-	if (((updated as { rowsAffected?: number }).rowsAffected ?? 0) === 0) {
+		// The returned row is the guard outcome: empty means a concurrent
+		// manual severity write won.
+		.returning({ id: errorIssues.id })
+	if (updated.length === 0) {
 		return { applied: false, actorId }
 	}
 
@@ -165,14 +172,14 @@ export const applyTriageSeverity = async (
 				type: "severity_change",
 				fromState: null,
 				toState: null,
-				payloadJson: JSON.stringify({
+				payloadJson: {
 					from,
 					to: input.severity,
 					source: "ai",
 					runId: input.runId,
 					confidence: input.confidence,
-				}),
-				createdAt: input.timestamp,
+				},
+				createdAt: new Date(input.timestamp),
 			})
 			.onConflictDoNothing()
 	}
@@ -189,15 +196,15 @@ export const applyTriageSeverity = async (
 				source: "ai",
 				reason,
 				runId: input.runId,
-				payloadJson: JSON.stringify({
+				payloadJson: {
 					confidence: input.confidence,
 					...(input.result ? { triage: input.result } : {}),
-				}),
+				},
 				status: "queued",
 				attempts: 0,
 				dedupeKey: escalationDedupeKey(input.orgId, input.issueId, input.severity),
 				error: null,
-				createdAt: input.timestamp,
+				createdAt: new Date(input.timestamp),
 				processedAt: null,
 			})
 			.onConflictDoNothing()
@@ -205,7 +212,7 @@ export const applyTriageSeverity = async (
 
 	await db
 		.update(actors)
-		.set({ lastActiveAt: input.timestamp })
+		.set({ lastActiveAt: new Date(input.timestamp) })
 		.where(eq(actors.id, actorId))
 
 	return { applied: true, actorId }

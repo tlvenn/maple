@@ -5,8 +5,8 @@
 // These define the ClickHouse table schemas used by the query DSL.
 // ---------------------------------------------------------------------------
 
-import * as T from "./types"
-import { table } from "./table"
+import * as T from "@maple-dev/clickhouse-builder/types"
+import { table } from "@maple-dev/clickhouse-builder"
 
 export const Traces = table("traces", {
 	OrgId: T.string,
@@ -226,6 +226,19 @@ export const MetricCatalog = table("metric_catalog", {
 	DataPointCount: T.uint64,
 	FirstSeen: T.dateTime,
 	LastSeen: T.dateTime,
+})
+
+export const SpanMetricsCallsHourly = table("span_metrics_calls_hourly", {
+	OrgId: T.string,
+	Hour: T.dateTime,
+	ServiceName: T.string,
+	MetricName: T.string,
+	SpanKind: T.string,
+	AttrFingerprint: T.uint64,
+	ResourceFingerprint: T.uint64,
+	StartTimeUnix: T.dateTime64,
+	// The aggregate state column is typed by its finalized scalar value.
+	LastValue: T.float64,
 })
 
 export const AttributeKeysHourly = table("attribute_keys_hourly", {

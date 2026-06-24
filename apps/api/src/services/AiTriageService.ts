@@ -23,7 +23,6 @@ import {
 	anomalyIncidents,
 	errorIncidents,
 	errorIssues,
-	orgOpenrouterSettings,
 } from "@maple/db"
 import { WorkerEnvironment } from "@maple/effect-cloudflare/worker-environment"
 import { and, desc, eq } from "drizzle-orm"
@@ -99,10 +98,10 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 
 			const isoFromEpoch = (ms: number) => decodeIsoSync(new Date(ms).toISOString())
 
-			const parseResult = (raw: string | null): AiTriageResult | null => {
+			const parseResult = (raw: unknown): AiTriageResult | null => {
 				if (raw == null) return null
 				try {
-					return decodeResultSync(JSON.parse(raw))
+					return decodeResultSync(raw)
 				} catch {
 					return null
 				}
@@ -120,9 +119,9 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 					inputTokens: row.inputTokens ?? null,
 					outputTokens: row.outputTokens ?? null,
 					error: row.error ?? null,
-					createdAt: isoFromEpoch(row.createdAt),
-					startedAt: row.startedAt ? isoFromEpoch(row.startedAt) : null,
-					completedAt: row.completedAt ? isoFromEpoch(row.completedAt) : null,
+					createdAt: isoFromEpoch(row.createdAt.getTime()),
+					startedAt: row.startedAt ? isoFromEpoch(row.startedAt.getTime()) : null,
+					completedAt: row.completedAt ? isoFromEpoch(row.completedAt.getTime()) : null,
 				})
 
 			const loadSettingsRow = Effect.fn("AiTriageService.loadSettingsRow")(function* (orgId: OrgId) {
@@ -134,10 +133,9 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 
 			const settingsToDocument = (row: AiTriageSettingsRow | undefined): AiTriageSettingsDocument =>
 				new AiTriageSettingsDocument({
-					enabled: row?.enabled === 1,
-					modelOverride: row?.modelOverride ?? null,
+					enabled: row?.enabled ?? false,
 					maxRunsPerDay: row?.maxRunsPerDay ?? 20,
-					updatedAt: row?.updatedAt ? isoFromEpoch(row.updatedAt) : null,
+					updatedAt: row?.updatedAt ? isoFromEpoch(row.updatedAt.getTime()) : null,
 					updatedBy: row?.updatedBy ?? null,
 				})
 
@@ -148,17 +146,6 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 				},
 			)
 
-			const hasOpenRouterKey = Effect.fn("AiTriageService.hasOpenRouterKey")(function* (orgId: OrgId) {
-				const rows = yield* dbExecute((db) =>
-					db
-						.select({ orgId: orgOpenrouterSettings.orgId })
-						.from(orgOpenrouterSettings)
-						.where(eq(orgOpenrouterSettings.orgId, orgId))
-						.limit(1),
-				)
-				return rows.length > 0
-			})
-
 			const updateSettings: AiTriageServiceShape["updateSettings"] = Effect.fn(
 				"AiTriageService.updateSettings",
 			)(function* (orgId, userId, request) {
@@ -166,25 +153,16 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 				const nowMs = yield* Clock.currentTimeMillis
 				const existing = yield* loadSettingsRow(orgId)
 
+				// Triage runs on the chat-flue Flue workflow (Cloudflare Workers AI) since
+				// the Flue cutover — it no longer needs a per-org OpenRouter key, so
+				// enabling it is unconditional.
 				const nextEnabled =
-					request.enabled === undefined ? (existing?.enabled ?? 0) : request.enabled ? 1 : 0
-				if (nextEnabled === 1 && !(yield* hasOpenRouterKey(orgId))) {
-					return yield* Effect.fail(
-						new AiTriageValidationError({
-							message:
-								"AI triage needs an OpenRouter API key. Configure one under AI settings first.",
-						}),
-					)
-				}
+					request.enabled === undefined ? (existing?.enabled ?? false) : request.enabled
 
 				const next = {
 					enabled: nextEnabled,
-					modelOverride:
-						request.modelOverride === undefined
-							? (existing?.modelOverride ?? null)
-							: request.modelOverride,
 					maxRunsPerDay: request.maxRunsPerDay ?? existing?.maxRunsPerDay ?? 20,
-					updatedAt: nowMs,
+					updatedAt: new Date(nowMs),
 					updatedBy: userId,
 				}
 				yield* dbExecute((db) =>
@@ -263,8 +241,8 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 							baselineMedian: incident.baselineMedian,
 							baselineSigma: incident.baselineSigma,
 							thresholdValue: incident.thresholdValue,
-							firstTriggeredAt: new Date(incident.firstTriggeredAt).toISOString(),
-							lastTriggeredAt: new Date(incident.lastTriggeredAt).toISOString(),
+							firstTriggeredAt: incident.firstTriggeredAt.toISOString(),
+							lastTriggeredAt: incident.lastTriggeredAt.toISOString(),
 							status: incident.status,
 						},
 					}
@@ -313,8 +291,8 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 						topFrame: issue?.topFrame,
 						fingerprintHash: issue?.fingerprintHash,
 						occurrenceCount: incident.occurrenceCount,
-						firstTriggeredAt: new Date(incident.firstTriggeredAt).toISOString(),
-						lastTriggeredAt: new Date(incident.lastTriggeredAt).toISOString(),
+						firstTriggeredAt: incident.firstTriggeredAt.toISOString(),
+						lastTriggeredAt: incident.lastTriggeredAt.toISOString(),
 						issueId: incident.issueId,
 					},
 				}
@@ -329,15 +307,8 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 					})
 					const nowMs = yield* Clock.currentTimeMillis
 
-					if (!(yield* hasOpenRouterKey(orgId))) {
-						return yield* Effect.fail(
-							new AiTriageValidationError({
-								message:
-									"AI triage needs an OpenRouter API key. Configure one under AI settings first.",
-							}),
-						)
-					}
-
+					// No OpenRouter-key gate since the Flue cutover — triage runs on
+					// chat-flue (Cloudflare Workers AI).
 					const { issueId, context } = yield* buildContext(orgId, request)
 
 					// Manual re-run: replace any prior run for this incident.
@@ -362,9 +333,9 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 							incidentId: request.incidentId,
 							issueId: request.issueId ?? issueId ?? null,
 							status: "queued",
-							contextJson: JSON.stringify(context),
-							createdAt: nowMs,
-							updatedAt: nowMs,
+							contextJson: context,
+							createdAt: new Date(nowMs),
+							updatedAt: new Date(nowMs),
 						}),
 					)
 
@@ -382,7 +353,7 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 								.set({
 									status: "failed",
 									error: "workflow_binding_unavailable",
-									updatedAt: nowMs,
+									updatedAt: new Date(nowMs),
 								})
 								.where(eq(aiTriageRuns.id, runId)),
 						)
@@ -417,7 +388,7 @@ export class AiTriageService extends Context.Service<AiTriageService, AiTriageSe
 										.set({
 											status: "failed",
 											error: `workflow_create_failed: ${error.message}`,
-											updatedAt: nowMs,
+											updatedAt: new Date(nowMs),
 										})
 										.where(eq(aiTriageRuns.id, runId)),
 								).pipe(Effect.ignore),

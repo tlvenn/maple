@@ -27,8 +27,14 @@ import {
 import type { OrgId } from "@maple/domain"
 import { Array as Arr, Duration, Effect, Match, Option, Result, Schema } from "effect"
 import { LOGS_BODY_SEARCH_SETTINGS, type QueryProfileName, type WarehouseQuerySettings } from "../profiles"
+import { computeBucketSeconds } from "../datetime"
 import { makeExpandMacros } from "./raw-sql"
-import { decodeEvalPoints, encodeEvalPoints, type BucketGroupObs } from "./evaluate-bucket-codec"
+import { encodeEvalPoints, type BucketGroupObs } from "./evaluate-bucket-codec"
+
+// Re-exported so `@maple/query-engine/runtime` consumers (apps/api) keep importing
+// `computeBucketSeconds` from here; the implementation now lives in the pure
+// `../datetime` module so the web app and the engine share one definition.
+export { computeBucketSeconds } from "../datetime"
 
 /** Minimal tenant surface the lowering needs — only the org scope. */
 export interface QueryTenant {
@@ -107,10 +113,7 @@ export interface QueryEngineRawSqlEvaluateRequest {
 	readonly windowMinutes: number
 }
 
-export type QueryEngineDirectError =
-	| QueryEngineExecutionError
-	| QueryEngineTimeoutError
-	| WarehouseError
+export type QueryEngineDirectError = QueryEngineExecutionError | QueryEngineTimeoutError | WarehouseError
 
 export type QueryEngineRouteError = QueryEngineValidationError | QueryEngineDirectError
 
@@ -179,13 +182,16 @@ export function snapWindowForQueryKind(kind: string): number {
 		case "attributeValues":
 			return 60 // 1 min
 		case "facets":
-			// 5 min — environments / commit SHAs / service names rarely change,
-			// and the dashboard route now reuses this cache for demo-detection
-			// (was a heavy `serviceOverview` probe). Wider snap also collapses
+			// 15 min — environments / commit SHAs / service names rarely change,
+			// and the dashboard route reuses this cache for demo-detection + the
+			// environment dropdown (was a heavy `serviceOverview` probe). This is
+			// the gate on the dashboard critical path, so a wider window cuts
+			// cold-miss frequency ~3× vs 5 min; a new service/env appearing up to
+			// 15 min late in the dropdown is fine. Wider snap also collapses
 			// near-simultaneous calls whose `startTime` ISO strings drift by
 			// milliseconds between renders (useEffectiveTimeRange recomputes
 			// `new Date()` per render).
-			return 300
+			return 900
 		default:
 			return CACHE_SNAP_S
 	}
@@ -203,7 +209,7 @@ export function cacheTtlForQueryKind(kind: string): number {
 		case "attributeValues":
 			return 60
 		case "facets":
-			return 300 // matches snapWindowForQueryKind — see comment above
+			return 900 // matches snapWindowForQueryKind — see comment above
 		default:
 			return 15
 	}
@@ -247,18 +253,6 @@ function normalizeDirectCacheValue(value: unknown, parentKey?: string): unknown 
 
 export function buildDirectRouteCacheKey(orgId: string, routeName: string, payload: unknown): string {
 	return `direct:${orgId}:${routeName}:${JSON.stringify(normalizeDirectCacheValue(payload))}`
-}
-
-export const computeBucketSeconds = (startMs: number, endMs: number): number => {
-	const targetPoints = 40
-	const rangeSeconds = Math.max((endMs - startMs) / 1000, 1)
-	const raw = Math.ceil(rangeSeconds / targetPoints)
-	if (raw <= 60) return 60
-	if (raw <= 300) return 300
-	if (raw <= 900) return 900
-	if (raw <= 3600) return 3600
-	if (raw <= 14400) return 14400
-	return 86400
 }
 
 const floorToBucketMs = (epochMs: number, bucketSeconds: number): number => {
@@ -679,7 +673,10 @@ const executeCHUnionQuery = Effect.fnUntraced(function* <
 	profile: QueryProfileName = "aggregation",
 ) {
 	const compiled = CH.compileUnion(query, params)
-	return yield* annotateWarehouseError(warehouse.compiledQuery(tenant, compiled, { profile, context }), context)
+	return yield* annotateWarehouseError(
+		warehouse.compiledQuery(tenant, compiled, { profile, context }),
+		context,
+	)
 })
 
 const tracesMetricFieldMap = {
@@ -908,9 +905,7 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 		request: QueryEngineExecuteRequest,
 	): Effect.fn.Return<
 		QueryEngineExecuteResponse,
-		| QueryEngineValidationError
-		| QueryEngineExecutionError
-		| WarehouseError
+		QueryEngineValidationError | QueryEngineExecutionError | WarehouseError
 	> {
 		yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
 		yield* Effect.annotateCurrentSpan("query.source", request.query.source)
@@ -959,6 +954,7 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 						apdexThresholdMs:
 							request.query.metric === "apdex" ? request.query.apdexThresholdMs : undefined,
 						bucketSeconds: bucketSeconds!,
+						seriesLimit: request.query.seriesLimit,
 					}),
 					{
 						orgId: tenant.orgId,
@@ -989,6 +985,7 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 					apdexThresholdMs:
 						request.query.metric === "apdex" ? request.query.apdexThresholdMs : undefined,
 					bucketSeconds: bucketSeconds!,
+					seriesLimit: request.query.seriesLimit,
 				}),
 				{
 					orgId: tenant.orgId,
@@ -1021,6 +1018,7 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 					matchModes: logsMatchModes(request.query.filters),
 					groupBy: request.query.groupBy as string[] | undefined,
 					bucketSeconds: bucketSeconds!,
+					seriesLimit: request.query.seriesLimit,
 				}),
 				{
 					orgId: tenant.orgId,
@@ -1052,6 +1050,8 @@ export const makeQueryEngineExecute = <T extends QueryTenant>(warehouse: QueryEn
 			if (isRateOrIncrease) {
 				const compiled = CH.compile(
 					CH.metricsTimeseriesRateQuery({
+						metricName: request.query.filters.metricName,
+						bucketSeconds: bucketSeconds!,
 						serviceName: request.query.filters.serviceName,
 						groupByAttributeKey,
 						attributeKey: attributeFilter?.key,
@@ -1719,9 +1719,7 @@ export const makeQueryEngineEvaluate = <T extends QueryTenant>(warehouse: QueryE
 		request: QueryEngineEvaluateRequest,
 	): Effect.fn.Return<
 		ReadonlyArray<GroupedAlertObservation>,
-		| QueryEngineValidationError
-		| QueryEngineExecutionError
-		| WarehouseError
+		QueryEngineValidationError | QueryEngineExecutionError | WarehouseError
 	> {
 		yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
 		yield* Effect.annotateCurrentSpan("query.source", request.query.source)
@@ -1903,16 +1901,11 @@ const RawSqlAlertRowSchema = Schema.Struct({
  * and an optional `samples` column carries the sample count (else each row
  * counts as 1). Per group, `value` rows are collapsed with the reducer.
  */
-export const makeQueryEngineEvaluateRawSql = <T extends QueryTenant>(
-	warehouse: QueryEngineWarehouse<T>,
-) =>
+export const makeQueryEngineEvaluateRawSql = <T extends QueryTenant>(warehouse: QueryEngineWarehouse<T>) =>
 	Effect.fn("QueryEngineService.evaluateRawSql")(function* (
 		tenant: T,
 		request: QueryEngineRawSqlEvaluateRequest,
-	): Effect.fn.Return<
-		ReadonlyArray<GroupedAlertObservation>,
-		QueryEngineValidationError | WarehouseError
-	> {
+	): Effect.fn.Return<ReadonlyArray<GroupedAlertObservation>, QueryEngineValidationError | WarehouseError> {
 		yield* Effect.annotateCurrentSpan("orgId", tenant.orgId)
 		yield* Effect.annotateCurrentSpan("query.reducer", request.reducer)
 

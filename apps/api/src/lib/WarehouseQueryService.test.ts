@@ -12,26 +12,22 @@ import { makeWarehouseExecutor } from "@maple/query-engine/execution"
 import { __testables, WarehouseQueryService } from "./WarehouseQueryService"
 import { OrgClickHouseSettingsService } from "../services/OrgClickHouseSettingsService"
 import type { TenantContext } from "../services/AuthService"
-import { DatabaseLibsqlLive } from "./DatabaseLibsqlLive"
 import { Env } from "./Env"
-import { cleanupTempDirs, createTempDbUrl as makeTempDb } from "./test-sqlite"
+import { cleanupTestDbs, createTestDb, type TestDb } from "./test-pglite"
 
-const createdTempDirs: string[] = []
+const trackedDbs: TestDb[] = []
 
-afterEach(() => {
+afterEach(async () => {
 	__testables.reset()
-	cleanupTempDirs(createdTempDirs)
+	await cleanupTestDbs(trackedDbs)
 })
 
-const createTempDbUrl = () => makeTempDb("maple-warehouse-", createdTempDirs)
-
-const makeConfig = (url: string, extra: Record<string, string> = {}) =>
+const makeConfig = (extra: Record<string, string> = {}) =>
 	ConfigProvider.layer(
 		ConfigProvider.fromUnknown({
 			PORT: "3472",
 			TINYBIRD_HOST: "https://maple-managed.tinybird.co",
 			TINYBIRD_TOKEN: "managed-token",
-			MAPLE_DB_URL: url,
 			MAPLE_AUTH_MODE: "self_hosted",
 			MAPLE_ROOT_PASSWORD: "test-root-password",
 			MAPLE_DEFAULT_ORG_ID: "default",
@@ -43,16 +39,14 @@ const makeConfig = (url: string, extra: Record<string, string> = {}) =>
 		}),
 	)
 
-const buildLayer = (url: string, extra: Record<string, string> = {}) => {
-	const configLive = makeConfig(url, extra)
+const buildLayer = (testDb: TestDb, extra: Record<string, string> = {}) => {
+	const configLive = makeConfig(extra)
 	const envLive = Env.layer.pipe(Layer.provide(configLive))
-	const databaseLive = DatabaseLibsqlLive.pipe(Layer.provide(envLive))
+	const databaseLive = testDb.layer
 	const orgSettingsLive = OrgClickHouseSettingsService.layer.pipe(
 		Layer.provide(Layer.mergeAll(envLive, databaseLive)),
 	)
-	return WarehouseQueryService.layer.pipe(
-		Layer.provide(Layer.mergeAll(envLive, orgSettingsLive)),
-	)
+	return WarehouseQueryService.layer.pipe(Layer.provide(Layer.mergeAll(envLive, orgSettingsLive)))
 }
 
 const getError = <A, E>(exit: Exit.Exit<A, E>): unknown => {
@@ -74,8 +68,7 @@ const makeTenant = (): TenantContext => ({
 	authMode: "self_hosted",
 })
 
-const transient503 = () =>
-	new Error("HTTP status 503 service temporarily unavailable")
+const transient503 = () => new Error("HTTP status 503 service temporarily unavailable")
 
 describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", () => {
 	// Runs under it.live: the retry schedule uses real exponential backoff
@@ -91,8 +84,7 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 
 		return Effect.gen(function* () {
@@ -115,8 +107,7 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 
 		return Effect.gen(function* () {
@@ -142,8 +133,7 @@ describe("WarehouseQueryService.sqlQuery retry on transient upstream failures", 
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 
 		return Effect.gen(function* () {
@@ -173,8 +163,7 @@ describe("WarehouseQueryService.compiledQuery", () => {
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const compiled = unsafeCompiledQuery<{ readonly serviceName: string; readonly count: number }>({
 			sql: "SELECT ServiceName AS serviceName, count() AS count FROM traces WHERE OrgId = 'org_test'",
@@ -196,8 +185,7 @@ describe("WarehouseQueryService.compiledQuery", () => {
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
 			sql: "SELECT count() AS count FROM traces WHERE OrgId = 'org_test'",
@@ -221,8 +209,7 @@ describe("WarehouseQueryService.compiledQuery", () => {
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
 			sql: "SELECT count() AS count FROM traces",
@@ -249,12 +236,16 @@ describe("WarehouseQueryService.compiledQueryFirst", () => {
 
 	it.effect("returns Some with the decoded first row", () => {
 		__testables.setClientFactory(() => ({
-			sql: async () => ({ data: [{ serviceName: "api", count: "42" }, { serviceName: "worker", count: "9" }] }),
+			sql: async () => ({
+				data: [
+					{ serviceName: "api", count: "42" },
+					{ serviceName: "worker", count: "9" },
+				],
+			}),
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const compiled = unsafeCompiledQuery<{ readonly serviceName: string; readonly count: number }>({
 			sql: "SELECT ServiceName AS serviceName, count() AS count FROM traces WHERE OrgId = 'org_test'",
@@ -279,8 +270,7 @@ describe("WarehouseQueryService.compiledQueryFirst", () => {
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
 			sql: "SELECT count() AS count FROM traces WHERE OrgId = 'org_test'",
@@ -302,8 +292,7 @@ describe("WarehouseQueryService.compiledQueryFirst", () => {
 			insert: async () => {},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const compiled = unsafeCompiledQuery<{ readonly count: number }>({
 			sql: "SELECT count() AS count FROM traces WHERE OrgId = 'org_test'",
@@ -332,8 +321,7 @@ describe("WarehouseQueryService.ingest writes through the SQL client", () => {
 			},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 		const rows = [{ trace_id: "a" }, { trace_id: "b" }]
 
@@ -355,8 +343,7 @@ describe("WarehouseQueryService.ingest writes through the SQL client", () => {
 			},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 
 		return Effect.gen(function* () {
@@ -373,15 +360,12 @@ describe("WarehouseQueryService.ingest writes through the SQL client", () => {
 			},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url)
+		const layer = buildLayer(createTestDb(trackedDbs))
 		const tenant = makeTenant()
 
 		return Effect.gen(function* () {
 			const exit = yield* Effect.exit(
-				WarehouseQueryService.use((service) =>
-					service.ingest(tenant, "traces", [{ trace_id: "a" }]),
-				),
+				WarehouseQueryService.use((service) => service.ingest(tenant, "traces", [{ trace_id: "a" }])),
 			)
 
 			assert.isTrue(Exit.isFailure(exit))
@@ -572,8 +556,7 @@ describe("ingest pins writes to Tinybird even when CLICKHOUSE_URL makes managed 
 			},
 		}))
 
-		const { url } = createTempDbUrl()
-		const layer = buildLayer(url, {
+		const layer = buildLayer(createTestDb(trackedDbs), {
 			CLICKHOUSE_URL: "https://readonly-ch.example.com",
 			CLICKHOUSE_USER: "reader",
 			CLICKHOUSE_DATABASE: "default",

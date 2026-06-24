@@ -1,13 +1,18 @@
 import path from "node:path"
 import { Vite } from "alchemy/cloudflare"
-import { resolveWorkerName, type MapleDomains, type MapleStage } from "@maple/infra/cloudflare"
+import {
+	CLOUDFLARE_WORKER_PLACEMENT,
+	resolveWorkerName,
+	type MapleDomains,
+	type MapleStage,
+} from "@maple/infra/cloudflare"
 
 export interface CreateMapleWebOptions {
 	stage: MapleStage
 	domains: MapleDomains
 	apiUrl: string
 	ingestUrl: string
-	chatAgentUrl: string
+	flueChatUrl: string
 }
 
 export const createMapleWeb = async ({
@@ -15,7 +20,7 @@ export const createMapleWeb = async ({
 	domains,
 	apiUrl,
 	ingestUrl,
-	chatAgentUrl,
+	flueChatUrl,
 }: CreateMapleWebOptions) => {
 	if (!process.env.VITE_MAPLE_AUTH_MODE) {
 		process.env.VITE_MAPLE_AUTH_MODE = process.env.MAPLE_AUTH_MODE?.trim() || "self_hosted"
@@ -31,13 +36,14 @@ export const createMapleWeb = async ({
 
 	process.env.VITE_API_BASE_URL = apiUrl
 	process.env.VITE_INGEST_URL = ingestUrl
-	process.env.VITE_CHAT_AGENT_URL = chatAgentUrl
+	process.env.VITE_FLUE_CHAT_URL = flueChatUrl
 
 	const website = await Vite("app", {
 		name: resolveWorkerName("web", stage),
 		adopt: true,
 		cwd: import.meta.dirname,
 		entrypoint: path.join(import.meta.dirname, "src", "worker.ts"),
+		placement: CLOUDFLARE_WORKER_PLACEMENT,
 		domains: domains.web ? [{ domainName: domains.web, adopt: true }] : undefined,
 	})
 
