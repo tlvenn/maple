@@ -35,10 +35,13 @@ RUN apt-get update && \
 RUN bun install
 COPY --from=pruner /app/out/full/ ./
 
-# The SDK package only exposes pre-built `dist/` via its subpath exports —
-# build it first so wrangler can resolve `@maple-dev/effect-sdk/cloudflare`
-# during the worker bundle step.
-RUN bunx turbo build --filter=@maple-dev/effect-sdk
+# These workspace packages only publish via pre-built `dist/` (their exports
+# map points at `dist/` files only). Build them first so wrangler can resolve
+# them during the worker bundle step. Mirrors upstream's `alchemy:build-deps`
+# script in the root package.json.
+RUN bunx turbo build \
+      --filter=@maple-dev/effect-sdk \
+      --filter=@maple-dev/clickhouse-builder
 
 # Bundle each worker via wrangler dry-run. Each emits a self-contained
 # module bundle at <outdir>/<entry>.js.

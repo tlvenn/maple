@@ -1,5 +1,10 @@
 # Build context: monorepo root (.)
-FROM oven/bun:1.3.11 AS base
+#
+# Self-host fork: bumped Bun 1.3.11 → 1.3.31. Vite 8's config loader uses
+# `Module.registerHooks` (Node 22.15+) which Bun's node:module shim didn't
+# implement in 1.3.11. Upstream's Dockerfile is stale on this point —
+# they deploy via Alchemy/CF Workers, not via this Dockerfile.
+FROM oven/bun:1.3.31 AS base
 WORKDIR /app
 
 FROM base AS pruner
@@ -15,9 +20,12 @@ RUN apt-get update && \
 RUN bun install
 COPY --from=pruner /app/out/full/ ./
 
-# Build workspace dependencies that publish from dist/
+# Build workspace dependencies that publish from dist/. Matches the root
+# `alchemy:build-deps` script — upstream's web Dockerfile is missing
+# clickhouse-builder here.
 RUN bun run --cwd packages/browser build && \
-    bun run --cwd lib/effect-sdk build
+    bun run --cwd lib/effect-sdk build && \
+    bun run --cwd lib/clickhouse-builder build
 
 # Build-time env vars (baked into the SPA bundle)
 ARG VITE_API_BASE_URL
