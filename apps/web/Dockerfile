@@ -4,7 +4,7 @@
 # `Module.registerHooks` (Node 22.15+) which Bun's node:module shim didn't
 # implement in 1.3.11. Upstream's Dockerfile is stale on this point —
 # they deploy via Alchemy/CF Workers, not via this Dockerfile.
-FROM oven/bun:1.3.31 AS base
+FROM oven/bun:1.3.14 AS base
 WORKDIR /app
 
 FROM base AS pruner
