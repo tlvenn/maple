@@ -59,5 +59,6 @@ jobs:
           build-args: |
             VITE_API_BASE_URL=/api
             VITE_MAPLE_AUTH_MODE=self_hosted
+            VITE_ELECTRIC_SYNC_URL=https://maple.nojatrade.io/sync
           cache-from: type=gha,scope=maple-web
           cache-to: type=gha,mode=max,scope=maple-web

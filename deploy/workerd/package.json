@@ -3,8 +3,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "miniflare": "4.20260424.0",
+    "miniflare": "5.20260730.0-alpha",
     "drizzle-orm": "^0.45.1",
+    "postgres": "^3.4.9",
     "cron": "^4.3.0"
   },
   "devDependencies": {

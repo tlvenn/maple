@@ -1,10 +1,11 @@
 # Build context: monorepo root (.)
 #
 # Combined workerd container hosting the three Maple workers (api, alerting,
-# chat-agent) in a single Miniflare process for self-hosted deploys outside
-# Cloudflare. Persists D1, KV, and Durable Object state to /data.
+# electric-sync) in a single Miniflare process for self-hosted deploys outside
+# Cloudflare. The control-plane database is external Postgres (MAPLE_PG_URL);
+# KV / Durable Object / queue / workflow state persists to /data.
 
-FROM oven/bun:1.3.8 AS base
+FROM oven/bun:1.3.11 AS base
 WORKDIR /app
 
 # ---- pruner: extract the relevant workspaces from the monorepo ----
@@ -13,7 +14,7 @@ COPY . .
 RUN bunx turbo prune \
       @maple/api \
       @maple/alerting \
-      @maple/chat-agent \
+      @maple/electric-sync \
       @maple-dev/effect-sdk \
       @maple/clickhouse-cli \
       --docker --out-dir /app/out
@@ -28,16 +29,17 @@ RUN apt-get update && \
 RUN bun install
 COPY --from=pruner /app/out/full/ ./
 
-# The SDK package only exposes pre-built `dist/` via its subpath exports —
-# build it first so wrangler can resolve `@maple-dev/effect-sdk/cloudflare`
-# and `@maple-dev/effect-sdk/client` during the worker bundle step.
-RUN bunx turbo build --filter=@maple-dev/effect-sdk
+# These packages only expose pre-built `dist/` via their subpath exports —
+# build them first so wrangler can resolve them during the worker bundle
+# step (effect-sdk for the api entry, clickhouse-builder for the
+# domain/query-engine imports).
+RUN bunx turbo build --filter=@maple-dev/effect-sdk --filter=@maple-dev/clickhouse-builder
 
 # Bundle each worker via wrangler dry-run. Each emits a self-contained
 # module bundle at <outdir>/<entry>.js.
 RUN cd apps/api && bunx wrangler deploy --dry-run --outdir=/build/api
 RUN cd apps/alerting && bunx wrangler deploy --dry-run --outdir=/build/alerting
-RUN cd apps/chat-agent && bunx wrangler deploy --dry-run --outdir=/build/chat-agent
+RUN cd apps/electric-sync && bunx wrangler deploy --dry-run --outdir=/build/electric-sync
 
 # Bundle the ClickHouse schema CLI from this same source tree. Baking it in
 # pins the CLI to whatever Maple commit our fork was synced to, so schema
@@ -52,11 +54,12 @@ FROM base AS runner
 WORKDIR /app
 
 # Worker bundles
-COPY --from=builder /build/api/         /app/bundles/api/
-COPY --from=builder /build/alerting/    /app/bundles/alerting/
-COPY --from=builder /build/chat-agent/  /app/bundles/chat-agent/
+COPY --from=builder /build/api/           /app/bundles/api/
+COPY --from=builder /build/alerting/      /app/bundles/alerting/
+COPY --from=builder /build/electric-sync/ /app/bundles/electric-sync/
 
-# Drizzle migrations applied to D1 on boot
+# Drizzle migrations (Postgres) applied to MAPLE_PG_URL on boot — includes
+# meta/_journal.json, which the drizzle migrator requires.
 COPY --from=builder /app/packages/db/drizzle /app/migrations
 
 # Baked ClickHouse schema CLI — invoked by the `maple-ch-migrate` init
@@ -70,8 +73,8 @@ RUN bun install --production
 ENV NODE_ENV=production
 ENV MAPLE_DATA_DIR=/data
 ENV API_PORT=3472
-ENV CHAT_AGENT_PORT=3473
+ENV ELECTRIC_SYNC_PORT=3476
 
-EXPOSE 3472 3473
+EXPOSE 3472 3476
 
 CMD ["bun", "runtime.ts"]
