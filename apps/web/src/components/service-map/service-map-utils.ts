@@ -1,18 +1,64 @@
 import type { Node, Edge } from "@xyflow/react"
-import type { ServiceDbEdge, ServiceEdge, ServicePlatform } from "@/api/warehouse/service-map"
+import { HYPERDRIVE_DB_NAMESPACE } from "@maple/domain/tinybird/db-query-shape-sql"
+import type {
+	CloudflareService,
+	PlanetScaleDatabaseStat,
+	ServiceDbEdge,
+	ServiceEdge,
+	ServicePlatform,
+} from "@/api/warehouse/service-map"
 import type { ServiceOverview } from "@/api/warehouse/services"
 import type { ServiceWorkload } from "@/api/warehouse/service-infra"
-import { getServiceLegendColor } from "@maple/ui/colors"
-import { getDbColor } from "./service-map-db"
+import { getServiceColor, getValueHue } from "@maple/ui/lib/colors"
+import { getDbNodeColor, PLANETSCALE_COLOR, resolveDbNodePresentation } from "./service-map-db"
+import {
+	matchHyperdriveConfigs,
+	type HyperdriveConfigInput,
+	type HyperdriveNodeInfo,
+} from "./service-map-hyperdrive"
 
-export interface ServiceNodeInfra {
+interface ServiceNodeInfra {
 	podCount: number
 	workloadCount: number
 }
 
-export type ServiceNodeKind = "service" | "database"
+type ServiceNodeKind = "service" | "database" | "namespaceAggregate"
 
 export type ServiceMapColorMode = "service" | "health" | "platform"
+
+/** Cloudflare brand orange — accent for the detail-panel overlay section. */
+export const CLOUDFLARE_COLOR = "oklch(0.7 0.16 50)"
+
+/**
+ * Cloudflare direct-integration analytics overlaid onto an instrumented Worker
+ * node whose script name matched (by service name or `faas.name`).
+ */
+export interface CloudflareNodeMetrics {
+	kind: "worker"
+	requests: number
+	errorRate: number
+	/** Wall-time duration p99. */
+	latencyP99Ms: number
+	/** CPU time p99. */
+	cpuP99Ms?: number
+}
+
+/**
+ * PlanetScale integration data overlaid onto a trace-derived DB node whose
+ * namespace matched a database in the org's polled PlanetScale inventory.
+ * `stats` is absent when the inventory matched but no scraped metrics landed
+ * in the window (branding still applies).
+ */
+export interface PlanetScaleNodeMetrics {
+	/** Product kind from the inventory: "mysql" (Vitess) or "postgresql". */
+	kind: string
+	/** Inventory database name (canonical casing). */
+	database: string
+	branchCount: number
+	/** Branch identities from the inventory (name + production/ready flags). */
+	branches: ReadonlyArray<{ name: string; production: boolean; ready: boolean }>
+	stats?: PlanetScaleDatabaseStat
+}
 
 export interface ServiceNodeData {
 	label: string
@@ -24,19 +70,32 @@ export interface ServiceNodeData {
 	errorRate: number
 	avgLatencyMs: number
 	p95LatencyMs?: number
-	services: string[]
 	selected: boolean
 	infra?: ServiceNodeInfra
 	platform?: ServicePlatform
 	runtime?: string
 	dbSystem?: string
+	/** Database identity (db.namespace et al.); "" for the generic per-system node. */
+	dbNamespace?: string
+	/** Overlaid onto matched instrumented Workers from the direct integration. */
+	cloudflare?: CloudflareNodeMetrics
+	/** Overlaid onto DB nodes matched against the org's PlanetScale inventory. */
+	planetscale?: PlanetScaleNodeMetrics
+	/** On the collapsed Hyperdrive node: the org's configs resolved against the PlanetScale inventory. */
+	hyperdrive?: ReadonlyArray<HyperdriveNodeInfo>
 	colorMode?: ServiceMapColorMode
+	/** OTel `service.namespace`, when defined. Drives namespace-cluster layout + dotted boxes. */
+	namespace?: string
+	/** For `namespaceAggregate` nodes: number of services collapsed into this node. */
+	nsMemberCount?: number
+	/** Rendered at reduced opacity (focus mode dims non-neighbors). */
+	dimmed?: boolean
 	[key: string]: unknown
 }
 
 const PLATFORM_COLORS: Record<ServicePlatform | "unknown", string> = {
 	kubernetes: "oklch(0.62 0.16 250)",
-	cloudflare: "oklch(0.7 0.16 50)",
+	cloudflare: CLOUDFLARE_COLOR,
 	lambda: "oklch(0.7 0.18 60)",
 	web: "oklch(0.65 0.15 145)",
 	unknown: "oklch(0.55 0.02 270)",
@@ -59,11 +118,21 @@ export function getHealthColor(errorRate: number): string {
  * the "color by" affordance is for slicing service nodes only.
  */
 export function getServiceMapNodeColor(
-	data: Pick<ServiceNodeData, "label" | "kind" | "errorRate" | "platform" | "dbSystem">,
-	services: string[],
+	data: Pick<
+		ServiceNodeData,
+		"label" | "kind" | "errorRate" | "platform" | "dbSystem" | "dbNamespace" | "planetscale"
+	>,
 	mode: ServiceMapColorMode,
 ): string {
-	if (data.kind === "database") return getDbColor(data.dbSystem)
+	if (data.kind === "database") {
+		return data.planetscale ? PLANETSCALE_COLOR : getDbNodeColor(data.dbSystem, data.dbNamespace ?? "")
+	}
+	if (data.kind === "namespaceAggregate") {
+		// Match the dotted namespace box's hue so the collapsed node reads as
+		// "that box, folded up" — except in health mode, where health wins.
+		if (mode === "health") return getHealthColor(data.errorRate)
+		return `oklch(0.66 0.12 ${getValueHue(data.label) ?? 0})`
+	}
 	switch (mode) {
 		case "health":
 			return getHealthColor(data.errorRate)
@@ -71,7 +140,7 @@ export function getServiceMapNodeColor(
 			return getPlatformColor(data.platform)
 		case "service":
 		default:
-			return getServiceLegendColor(data.label, services)
+			return getServiceColor(data.label)
 	}
 }
 
@@ -84,22 +153,47 @@ export interface ServiceEdgeData {
 	avgDurationMs: number
 	p95DurationMs: number
 	hasSampling: boolean
-	services: string[]
+	/** Rendered near-invisible (focus mode dims edges leaving the neighborhood). */
+	dimmed?: boolean
+	/**
+	 * Synthetic structural relation (no traffic): a dashed "fronts this database"
+	 * edge from the Hyperdrive node to its matched PlanetScale node.
+	 */
+	relation?: "hyperdrive-origin"
 	[key: string]: unknown
 }
 
 export const DB_NODE_PREFIX = "db:"
-export const SERVICE_NODE_PREFIX = "svc:"
-export const EDGE_ID_PREFIX = "edge:"
+const EDGE_ID_PREFIX = "edge:"
 
 const encodeIdComponent = (raw: string): string => encodeURIComponent(raw)
 
-export const dbNodeId = (system: string) => `${DB_NODE_PREFIX}${encodeIdComponent(system)}`
-export const svcNodeId = (service: string) => `${SERVICE_NODE_PREFIX}${encodeIdComponent(service)}`
+export const dbNodeId = (system: string, namespace: string) =>
+	`${DB_NODE_PREFIX}${encodeIdComponent(system)}:${encodeIdComponent(namespace)}`
 export const edgeIdFor = (source: string, target: string) =>
 	`${EDGE_ID_PREFIX}${encodeIdComponent(source)}:${encodeIdComponent(target)}`
 
 export const isDbNodeId = (id: string) => id.startsWith(DB_NODE_PREFIX)
+
+/** Synthetic node id prefix for a collapsed namespace's aggregate node. */
+export const NS_AGGREGATE_PREFIX = "nsagg:"
+export const nsAggregateId = (namespace: string) => `${NS_AGGREGATE_PREFIX}${encodeIdComponent(namespace)}`
+export const isNsAggregateId = (id: string) => id.startsWith(NS_AGGREGATE_PREFIX)
+
+/**
+ * Inverse of {@link dbNodeId}. Both components are URI-encoded, so the first
+ * `:` after the prefix is the separator. Legacy single-component ids (from a
+ * stale layout snapshot) decode with `dbNamespace: ""` — the generic node.
+ */
+export const parseDbNodeId = (id: string): { dbSystem: string; dbNamespace: string } => {
+	const rest = id.slice(DB_NODE_PREFIX.length)
+	const sep = rest.indexOf(":")
+	if (sep === -1) return { dbSystem: decodeURIComponent(rest), dbNamespace: "" }
+	return {
+		dbSystem: decodeURIComponent(rest.slice(0, sep)),
+		dbNamespace: decodeURIComponent(rest.slice(sep + 1)),
+	}
+}
 
 // Layout constants (defaults)
 export const DEFAULT_LAYOUT_CONFIG = {
@@ -116,10 +210,18 @@ export type LayoutConfig = {
 	[K in keyof typeof DEFAULT_LAYOUT_CONFIG]: number
 }
 
+// Namespace-cluster spacing. These only set the DEFAULT spacing so the dotted
+// boxes (whose geometry is recomputed in the view from live node positions)
+// have breathing room — they are not the box geometry itself.
+export const NS_PADDING_X = 28
+export const NS_PADDING_Y = 24
+export const NS_LABEL_HEIGHT = 28
+const NS_CLUSTER_GAP = 80
+
 /**
  * Derive the unique list of services from edges + service overview data
  */
-export function deriveServiceList(edges: ServiceEdge[], serviceOverviews: ServiceOverview[]): string[] {
+function deriveServiceList(edges: ServiceEdge[], serviceOverviews: ServiceOverview[]): string[] {
 	const services = new Set<string>()
 	for (const edge of edges) {
 		services.add(edge.sourceService)
@@ -139,6 +241,24 @@ export interface BuildFlowElementsInput {
 	serviceWorkloads?: ServiceWorkload[]
 	platforms?: Map<string, ServicePlatform>
 	runtimes?: Map<string, string>
+	/** Cloudflare direct-integration Worker analytics (instrumented-Worker overlay). */
+	cloudflareServices?: CloudflareService[]
+	/** service.name → faas.name, so a `cloudflare-worker/{script}` can match its instrumented node. */
+	faasNames?: Map<string, string>
+	/** PlanetScale inventory: lowercased database name → identity + branches. */
+	planetscaleDatabases?: Map<
+		string,
+		{
+			name: string
+			kind: string
+			branchCount: number
+			branches: ReadonlyArray<{ name: string; production: boolean; ready: boolean }>
+		}
+	>
+	/** PlanetScale scraped-metric rollups, one per database. */
+	planetscaleStats?: PlanetScaleDatabaseStat[]
+	/** Cloudflare Hyperdrive config inventory (resolves the collapsed Hyperdrive node's origins). */
+	hyperdriveConfigs?: ReadonlyArray<HyperdriveConfigInput>
 }
 
 /**
@@ -156,6 +276,11 @@ export function buildFlowElements({
 	serviceWorkloads = [],
 	platforms,
 	runtimes,
+	cloudflareServices = [],
+	faasNames,
+	planetscaleDatabases,
+	planetscaleStats = [],
+	hyperdriveConfigs = [],
 }: BuildFlowElementsInput): { nodes: Node<ServiceNodeData>[]; edges: Edge<ServiceEdgeData>[] } {
 	const services = deriveServiceList(edges, serviceOverviews)
 
@@ -181,15 +306,28 @@ export function buildFlowElements({
 		infraMap.set(wl.serviceName, existing)
 	}
 
-	// Aggregate by `db.system` so multiple services calling the same database
-	// land on a single node. Sum of call/error counts; weighted-average latency.
+	// Aggregate by database identity — (db.system, db.namespace) — so services
+	// calling the SAME database share a node while distinct databases of the
+	// same system stay separate. Namespace-less edges ("" — legacy rows or
+	// unidentified instrumentation) collapse into one generic per-system node.
+	// Sum of call/error counts; weighted-average latency.
 	const dbAgg = new Map<
 		string,
-		{ callCount: number; errorCount: number; durationSumMs: number; maxP95: number }
+		{
+			dbSystem: string
+			dbNamespace: string
+			callCount: number
+			errorCount: number
+			durationSumMs: number
+			maxP95: number
+		}
 	>()
 	for (const e of dbEdges) {
 		if (!e.dbSystem) continue
-		const existing = dbAgg.get(e.dbSystem) ?? {
+		const nodeId = dbNodeId(e.dbSystem, e.dbNamespace)
+		const existing = dbAgg.get(nodeId) ?? {
+			dbSystem: e.dbSystem,
+			dbNamespace: e.dbNamespace,
 			callCount: 0,
 			errorCount: 0,
 			durationSumMs: 0,
@@ -199,7 +337,7 @@ export function buildFlowElements({
 		existing.errorCount += e.errorCount
 		existing.durationSumMs += e.avgDurationMs * e.callCount
 		existing.maxP95 = Math.max(existing.maxP95, e.p95DurationMs)
-		dbAgg.set(e.dbSystem, existing)
+		dbAgg.set(nodeId, existing)
 	}
 
 	const safeDuration = Math.max(durationSeconds, 1)
@@ -220,22 +358,60 @@ export function buildFlowElements({
 				samplingWeight: overview?.samplingWeight ?? 1,
 				errorRate: overview?.errorRate ?? 0,
 				avgLatencyMs: overview?.p50LatencyMs ?? 0,
-				services,
 				selected: false,
 				infra,
 				platform: platforms?.get(service),
 				runtime: runtimes?.get(service),
+				namespace: overview?.serviceNamespace || undefined,
 			},
 		}
 	})
 
-	for (const [dbSystem, agg] of dbAgg) {
+	// PlanetScale inventory match: a DB node whose namespace equals a database
+	// name in the org's polled inventory (and whose system is a PlanetScale
+	// product) gets the integration's data OVERLAID — branding plus, when the
+	// scraper delivered metrics in the window, live health numbers. Like the
+	// Cloudflare overlay, PlanetScale data never creates nodes of its own.
+	const planetscaleStatsByName = new Map(planetscaleStats.map((s) => [s.database.toLowerCase(), s]))
+	const PLANETSCALE_SYSTEMS = new Set(["mysql", "mariadb", "postgresql", "postgres"])
+	const planetscaleFor = (dbSystem: string, dbNamespace: string): PlanetScaleNodeMetrics | undefined => {
+		if (!planetscaleDatabases || dbNamespace === "") return undefined
+		if (!PLANETSCALE_SYSTEMS.has(dbSystem.toLowerCase())) return undefined
+		const match = planetscaleDatabases.get(dbNamespace.toLowerCase())
+		if (!match) return undefined
+		return {
+			kind: match.kind,
+			database: match.name,
+			branchCount: match.branchCount,
+			branches: match.branches,
+			stats: planetscaleStatsByName.get(dbNamespace.toLowerCase()),
+		}
+	}
+
+	// Hyperdrive config inventory resolved against the PlanetScale inventory —
+	// attached to the collapsed Hyperdrive node(s) so the detail panel can show
+	// what actually sits behind the proxy. Computed once; empty stays undefined.
+	const hyperdriveInfo =
+		hyperdriveConfigs.length > 0
+			? matchHyperdriveConfigs(hyperdriveConfigs, planetscaleDatabases ?? new Map())
+			: []
+
+	for (const [nodeId, agg] of dbAgg) {
+		const planetscale = planetscaleFor(agg.dbSystem, agg.dbNamespace)
+		const hyperdrive =
+			agg.dbNamespace === HYPERDRIVE_DB_NAMESPACE && hyperdriveInfo.length > 0
+				? hyperdriveInfo
+				: undefined
 		flowNodes.push({
-			id: dbNodeId(dbSystem),
+			id: nodeId,
 			type: "serviceNode",
 			position: { x: 0, y: 0 },
 			data: {
-				label: dbSystem,
+				planetscale,
+				hyperdrive,
+				// Named databases show their identity; the generic node keeps the system;
+				// Hyperdrive-fronted databases collapse to a single "Hyperdrive" node.
+				label: resolveDbNodePresentation(agg.dbSystem, agg.dbNamespace).title,
 				kind: "database",
 				throughput: agg.callCount / safeDuration,
 				tracedThroughput: agg.callCount / safeDuration,
@@ -244,11 +420,39 @@ export function buildFlowElements({
 				errorRate: agg.callCount > 0 ? agg.errorCount / agg.callCount : 0,
 				avgLatencyMs: agg.callCount > 0 ? agg.durationSumMs / agg.callCount : 0,
 				p95LatencyMs: agg.maxP95,
-				services,
 				selected: false,
-				dbSystem,
+				dbSystem: agg.dbSystem,
+				dbNamespace: agg.dbNamespace,
 			},
 		})
+	}
+
+	// Cloudflare direct-integration analytics. A Worker whose script matches an
+	// instrumented service (by service name or faas.name) gets its analytics
+	// OVERLAID onto that node's detail; anything without a matching real service
+	// is dropped — Cloudflare data never creates nodes of its own.
+	const nodeById = new Map(flowNodes.map((n) => [n.id, n]))
+	const serviceNameSet = new Set(services)
+	const scriptToInstrumented = new Map<string, string>()
+	if (faasNames) {
+		for (const [serviceName, faasName] of faasNames) {
+			if (faasName) scriptToInstrumented.set(faasName, serviceName)
+		}
+	}
+	const matchInstrumented = (script: string): string | undefined =>
+		serviceNameSet.has(script) ? script : scriptToInstrumented.get(script)
+
+	for (const cf of cloudflareServices) {
+		const matchedService = matchInstrumented(cf.displayName)
+		const overlayTarget = matchedService ? nodeById.get(matchedService) : undefined
+		if (!overlayTarget) continue
+		overlayTarget.data.cloudflare = {
+			kind: cf.kind,
+			requests: cf.requests,
+			errorRate: cf.errorRate,
+			latencyP99Ms: cf.latencyP99Ms,
+			cpuP99Ms: cf.cpuP99Ms,
+		}
 	}
 
 	const flowEdges: Edge<ServiceEdgeData>[] = edges.map((edge) => ({
@@ -265,16 +469,15 @@ export function buildFlowElements({
 			avgDurationMs: edge.avgDurationMs,
 			p95DurationMs: edge.p95DurationMs,
 			hasSampling: edge.hasSampling,
-			services,
 		},
 	}))
 
 	for (const e of dbEdges) {
 		if (!e.dbSystem || !e.sourceService) continue
 		flowEdges.push({
-			id: edgeIdFor(e.sourceService, dbNodeId(e.dbSystem)),
+			id: edgeIdFor(e.sourceService, dbNodeId(e.dbSystem, e.dbNamespace)),
 			source: e.sourceService,
-			target: dbNodeId(e.dbSystem),
+			target: dbNodeId(e.dbSystem, e.dbNamespace),
 			type: "serviceEdge",
 			data: {
 				callCount: e.callCount,
@@ -285,9 +488,53 @@ export function buildFlowElements({
 				avgDurationMs: e.avgDurationMs,
 				p95DurationMs: e.p95DurationMs,
 				hasSampling: e.hasSampling,
-				services,
 			},
 		})
+	}
+
+	// Synthetic dashed "fronts this database" edges: a Hyperdrive node connects to
+	// each PlanetScale node its matched configs resolve to — purely structural
+	// (zero traffic), and only when BOTH nodes already exist on the map.
+	if (hyperdriveInfo.some((info) => info.matched !== undefined)) {
+		const psNodeByName = new Map<string, string>()
+		for (const [nodeId, agg] of dbAgg) {
+			if (
+				agg.dbNamespace !== "" &&
+				agg.dbNamespace !== HYPERDRIVE_DB_NAMESPACE &&
+				PLANETSCALE_SYSTEMS.has(agg.dbSystem.toLowerCase())
+			) {
+				psNodeByName.set(agg.dbNamespace.toLowerCase(), nodeId)
+			}
+		}
+		const seenOriginEdges = new Set<string>()
+		for (const [nodeId, agg] of dbAgg) {
+			if (agg.dbNamespace !== HYPERDRIVE_DB_NAMESPACE) continue
+			for (const info of hyperdriveInfo) {
+				if (info.matched === undefined) continue
+				const target = psNodeByName.get(info.matched.name.toLowerCase())
+				if (target === undefined || target === nodeId) continue
+				const edgeId = edgeIdFor(nodeId, target)
+				if (seenOriginEdges.has(edgeId)) continue
+				seenOriginEdges.add(edgeId)
+				flowEdges.push({
+					id: edgeId,
+					source: nodeId,
+					target,
+					type: "serviceEdge",
+					data: {
+						callCount: 0,
+						callsPerSecond: 0,
+						estimatedCallsPerSecond: 0,
+						errorCount: 0,
+						errorRate: 0,
+						avgDurationMs: 0,
+						p95DurationMs: 0,
+						hasSampling: false,
+						relation: "hyperdrive-origin",
+					},
+				})
+			}
+		}
 	}
 
 	return { nodes: flowNodes, edges: flowEdges }
@@ -488,10 +735,10 @@ export function topologyKey(nodes: Node[], edges: Edge[]): string {
 }
 
 /**
- * Compute node positions using pure hierarchical layout.
+ * Compute node positions using pure hierarchical layout, ignoring namespaces.
  * Positions are deterministic: same input always produces same output.
  */
-export function computeNodePositions(
+export function computeFlatPositions(
 	nodes: Node<ServiceNodeData>[],
 	edges: Edge<ServiceEdgeData>[],
 	config: LayoutConfig = DEFAULT_LAYOUT_CONFIG,
@@ -590,31 +837,103 @@ export function computeNodePositions(
 	return positions
 }
 
+/** A service node's namespace, or undefined for db nodes / no namespace. */
+export function nodeNamespace(node: Node<ServiceNodeData>): string | undefined {
+	if (node.data.kind !== "service") return undefined
+	const ns = node.data.namespace
+	return ns && ns.length > 0 ? ns : undefined
+}
+
 /**
- * Check if the topology (set of node IDs + edge pairs) has changed
+ * Compute node positions. When at least one service node carries a
+ * `service.namespace`, the graph is laid out as horizontal **swimlanes** — one
+ * lane per namespace, plus an unboxed lane at the bottom for databases and
+ * namespace-less services. Crucially, the column (x) of every node comes from a
+ * SINGLE global hierarchical layering over the whole graph (call depth), so
+ * cross-namespace edges keep flowing left→right instead of looping backward the
+ * way per-cluster layouts (each restarting x at 0) make them. Each lane occupies
+ * a disjoint vertical band so the dotted boxes never overlap. When no node has a
+ * namespace, this is identical to {@link computeFlatPositions} (today's layout).
+ *
+ * Positions are deterministic: same input always produces same output.
  */
-export function topologyChanged(
-	prevNodes: Node[],
-	nextNodes: Node[],
-	prevEdges: Edge[],
-	nextEdges: Edge[],
-): boolean {
-	if (prevNodes.length !== nextNodes.length) return true
-	if (prevEdges.length !== nextEdges.length) return true
+export function computeNodePositions(
+	nodes: Node<ServiceNodeData>[],
+	edges: Edge<ServiceEdgeData>[],
+	config: LayoutConfig = DEFAULT_LAYOUT_CONFIG,
+): Map<string, { x: number; y: number }> {
+	if (nodes.length === 0) return new Map<string, { x: number; y: number }>()
 
-	const prevNodeIds = new Set(prevNodes.map((n) => n.id))
-	const nextNodeIds = new Set(nextNodes.map((n) => n.id))
-	if (prevNodeIds.size !== nextNodeIds.size) return true
-	for (const id of prevNodeIds) {
-		if (!nextNodeIds.has(id)) return true
+	// Gate: only switch to swimlanes when the user has defined namespaces.
+	const hasNamespaces = nodes.some((n) => nodeNamespace(n) !== undefined)
+	if (!hasNamespaces) return computeFlatPositions(nodes, edges, config)
+
+	const { nodeHeight, layerGapX, nodeGapY } = config
+	const cellHeight = nodeHeight + nodeGapY
+
+	// One global layering over the WHOLE graph → shared column (x) per node, plus a
+	// crossing-minimized within-column order (indexInLayer) we reuse inside lanes.
+	const layers = computeLayers(nodes, edges)
+
+	// Partition into one lane per namespace + an ungrouped lane (db nodes and
+	// namespace-less services).
+	const lanes = new Map<string, Node<ServiceNodeData>[]>()
+	const ungrouped: Node<ServiceNodeData>[] = []
+	for (const node of nodes) {
+		const ns = nodeNamespace(node)
+		if (ns === undefined) {
+			ungrouped.push(node)
+			continue
+		}
+		const lane = lanes.get(ns)
+		if (lane) lane.push(node)
+		else lanes.set(ns, [node])
 	}
 
-	const prevEdgeIds = new Set(prevEdges.map((e) => e.id))
-	const nextEdgeIds = new Set(nextEdges.map((e) => e.id))
-	if (prevEdgeIds.size !== nextEdgeIds.size) return true
-	for (const id of prevEdgeIds) {
-		if (!nextEdgeIds.has(id)) return true
+	const positions = new Map<string, { x: number; y: number }>()
+
+	// Place one lane's nodes at global columns, stacking same-column nodes
+	// vertically (centered within the lane) and ordering them by the global
+	// barycenter index to keep crossings down. Returns the lane's pixel height.
+	const placeLane = (laneNodes: Node<ServiceNodeData>[], top: number): number => {
+		const byColumn = new Map<number, Node<ServiceNodeData>[]>()
+		for (const node of laneNodes) {
+			const col = layers.get(node.id)?.layer ?? 0
+			const group = byColumn.get(col)
+			if (group) group.push(node)
+			else byColumn.set(col, [node])
+		}
+		let maxColumnCount = 0
+		for (const group of byColumn.values()) {
+			group.sort(
+				(a, b) => (layers.get(a.id)?.indexInLayer ?? 0) - (layers.get(b.id)?.indexInLayer ?? 0),
+			)
+			maxColumnCount = Math.max(maxColumnCount, group.length)
+		}
+		const laneHeight = Math.max(1, maxColumnCount) * cellHeight
+		for (const [col, group] of byColumn) {
+			const columnOffset = (laneHeight - group.length * cellHeight) / 2
+			group.forEach((node, i) => {
+				positions.set(node.id, {
+					x: NS_PADDING_X + col * layerGapX,
+					y: top + columnOffset + i * cellHeight,
+				})
+			})
+		}
+		return laneHeight
 	}
 
-	return false
+	let yOffset = 0
+	for (const ns of Array.from(lanes.keys()).sort()) {
+		const laneTop = yOffset + NS_LABEL_HEIGHT + NS_PADDING_Y
+		const laneHeight = placeLane(lanes.get(ns)!, laneTop)
+		yOffset = laneTop + laneHeight + NS_PADDING_Y + NS_CLUSTER_GAP
+	}
+
+	// Ungrouped (databases + namespace-less services) below all lanes, no box.
+	if (ungrouped.length > 0) {
+		placeLane(ungrouped, yOffset + NS_CLUSTER_GAP)
+	}
+
+	return positions
 }

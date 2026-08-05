@@ -1,55 +1,33 @@
-import { useMemo, useState } from "react"
 import { Link } from "@tanstack/react-router"
 
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@maple/ui/components/ui/tooltip"
 import { cn } from "@maple/ui/lib/utils"
 
-import { ArrowUpDownIcon } from "@/components/icons"
+import type { ListPodsResponse } from "@maple/domain/http"
+import type { PodSortKey, SortDirection } from "@/api/warehouse/infra"
+
 import { HostStatusBadge } from "./status-badge"
-import { UsageBar } from "./usage-bar"
-import { deriveHostStatus, formatRelative, type HostStatus } from "./format"
+import { ColumnHead, DataTable, MetaChip, ROW_LINK_CLASS } from "./primitives/data-table"
+import { severityLevel } from "./format"
+import { BAR_FILL, BAR_VALUE_TONE } from "./severity-tokens"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
 
-export interface PodRow {
-	podName: string
-	namespace: string
-	nodeName: string
-	clusterName: string
-	environment: string
-	deploymentName: string
-	statefulsetName: string
-	daemonsetName: string
-	jobName: string
-	qosClass: string
-	podUid: string
-	computeType: string
-	lastSeen: string
-	cpuUsage: number
-	cpuLimitPct: number
-	memoryLimitPct: number
-	cpuRequestPct: number
-	memoryRequestPct: number
-}
-
-type SortKey =
-	| "podName"
-	| "namespace"
-	| "cpuRequestPct"
-	| "cpuLimitPct"
-	| "cpuUsage"
-	| "memoryRequestPct"
-	| "memoryLimitPct"
-	| "lastSeen"
-type SortDir = "asc" | "desc"
-
-const STRIPE_COLOR: Record<HostStatus, string> = {
-	active: "bg-[color-mix(in_oklab,var(--severity-info)_75%,transparent)]",
-	idle: "bg-border",
-	down: "bg-[color-mix(in_oklab,var(--severity-error)_80%,transparent)]",
-}
+export type PodRow = ListPodsResponse["data"][number]
 
 interface PodTableProps {
 	pods: ReadonlyArray<PodRow>
+	/**
+	 * Sorting is server-side: the list is paged, so sorting the page in the
+	 * browser would only ever reorder the rows that already came back — which is
+	 * how "worst CPU" used to mean "worst of the 200 most recently seen".
+	 *
+	 * Omit `onSortChange` for embedded lists (pods-on-a-node, pods-in-a-workload)
+	 * that just render the server's worst-first order without their own controls.
+	 */
+	sortBy?: PodSortKey
+	sortDir?: SortDirection
+	onSortChange?: (key: PodSortKey) => void
 	waiting?: boolean
 	referenceTime?: string
 }
@@ -58,287 +36,213 @@ function workloadOf(pod: PodRow): { kind: string; name: string } | null {
 	if (pod.deploymentName) return { kind: "deploy", name: pod.deploymentName }
 	if (pod.statefulsetName) return { kind: "sts", name: pod.statefulsetName }
 	if (pod.daemonsetName) return { kind: "ds", name: pod.daemonsetName }
+	if (pod.jobName) return { kind: "job", name: pod.jobName }
 	return null
 }
 
-function MetaChip({ children }: { children: React.ReactNode }) {
-	return <span className="font-mono text-[10px] text-muted-foreground/80">{children}</span>
+const formatPct = (fraction: number) => (Number.isFinite(fraction) ? `${Math.round(fraction * 100)}%` : "—")
+
+/** Cores read at very different magnitudes across a fleet; keep them comparable. */
+const formatCores = (cores: number) => {
+	if (!Number.isFinite(cores) || cores === 0) return "0"
+	if (cores >= 10) return cores.toFixed(0)
+	if (cores >= 1) return cores.toFixed(2)
+	return cores.toFixed(3)
 }
 
-function ColumnHead({
-	label,
-	sortKey,
-	currentKey,
-	dir,
-	onSort,
-	align = "left",
-	width,
-	hidden,
-}: {
-	label: string
-	sortKey?: SortKey
-	currentKey?: SortKey
-	dir?: SortDir
-	onSort?: (k: SortKey) => void
-	align?: "left" | "right"
-	width: string
-	hidden?: string
-}) {
-	const active = sortKey && currentKey === sortKey
-	const sortable = !!sortKey
+/** avg → peak. One number can't distinguish a steady 60% from a spike to 100%. */
+function AvgPeak({ avg, peak, format }: { avg: number; peak: number; format: (n: number) => string }) {
 	return (
-		<div
-			className={cn(
-				"flex items-center text-[11px] font-medium",
-				align === "right" && "justify-end",
-				width,
-				hidden,
-			)}
-		>
-			{sortable ? (
-				<button
-					type="button"
-					onClick={() => sortKey && onSort?.(sortKey)}
-					className={cn(
-						"inline-flex items-center gap-1 transition-colors",
-						active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
-					)}
-				>
-					{label}
-					<ArrowUpDownIcon
-						size={10}
-						className={cn(
-							"transition-opacity",
-							active ? "opacity-100" : "opacity-40",
-							active && dir === "asc" && "rotate-180",
-						)}
-					/>
-				</button>
-			) : (
-				<span className="text-muted-foreground">{label}</span>
-			)}
+		<span className="font-mono text-[11px] tabular-nums text-foreground">
+			<span className="text-muted-foreground">{format(avg)}</span>
+			<span className="mx-1 text-foreground/30">→</span>
+			{format(peak)}
+		</span>
+	)
+}
+
+function MiniBar({ label, fraction }: { label: string; fraction: number }) {
+	const level = severityLevel(fraction)
+	const width = Math.min(Math.max(fraction, 0), 1) * 100
+	return (
+		<div className="flex items-center gap-1.5">
+			<span className="w-6 shrink-0 font-mono text-[9px] text-muted-foreground">{label}</span>
+			<div className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+				<div className={cn("h-full rounded-full", BAR_FILL[level])} style={{ width: `${width}%` }} />
+			</div>
+			<span
+				className={cn(
+					"w-8 shrink-0 text-right font-mono text-[10px] tabular-nums",
+					BAR_VALUE_TONE[level],
+				)}
+			>
+				{formatPct(fraction)}
+			</span>
 		</div>
 	)
 }
 
 export function PodTableLoading() {
 	return (
-		<div className="border-y border-border/70">
-			<div className="flex items-center gap-4 border-b border-border/60 px-4 py-2">
-				<ColumnHead label="Pod" width="flex-1 min-w-[280px]" />
-				<ColumnHead label="CPU req" align="right" width="w-[140px]" hidden="hidden md:flex" />
-				<ColumnHead label="CPU limit" align="right" width="w-[140px]" hidden="hidden md:flex" />
-				<ColumnHead label="Mem req" align="right" width="w-[140px]" hidden="hidden lg:flex" />
-				<ColumnHead label="Mem limit" align="right" width="w-[140px]" hidden="hidden lg:flex" />
+		<DataTable.Root ariaLabel="Pods">
+			<DataTable.Head>
+				<ColumnHead label="Pod" width="flex-1 min-w-[260px]" />
+				<ColumnHead label="Peak saturation" width="w-[176px]" hidden="hidden md:flex" />
+				<ColumnHead label="CPU cores" align="right" width="w-[132px]" hidden="hidden lg:flex" />
+				<ColumnHead label="Mem of limit" align="right" width="w-[120px]" hidden="hidden lg:flex" />
 				<ColumnHead label="Last seen" align="right" width="w-[100px]" />
-			</div>
-			{Array.from({ length: 6 }).map((_, i) => (
-				<div
-					key={i}
-					className="flex items-center gap-4 border-b border-border/40 px-4 py-3 last:border-0"
-				>
-					<div className="flex flex-1 min-w-[280px] gap-3">
-						<span className="w-[2px] self-stretch bg-muted/50" />
-						<div className="flex-1">
-							<Skeleton className="h-4 w-48" />
-							<Skeleton className="mt-1.5 h-3 w-40" />
-						</div>
-					</div>
-					<Skeleton className="hidden md:block h-3 w-[140px]" />
-					<Skeleton className="hidden md:block h-3 w-[140px]" />
-					<Skeleton className="hidden lg:block h-3 w-[140px]" />
-					<Skeleton className="hidden lg:block h-3 w-[140px]" />
-					<Skeleton className="h-3 w-16" />
+			</DataTable.Head>
+			<DataTable.SkeletonRows count={6}>
+				<div className="min-w-[260px] flex-1">
+					<Skeleton className="h-4 w-48" />
+					<Skeleton className="mt-1.5 h-3 w-40" />
 				</div>
-			))}
-		</div>
+				<div className="hidden w-[176px] space-y-1.5 md:block">
+					<Skeleton className="h-2.5 w-[176px]" />
+					<Skeleton className="h-2.5 w-[176px]" />
+				</div>
+				<Skeleton className="hidden h-3 w-[132px] lg:block" />
+				<Skeleton className="hidden h-3 w-[120px] lg:block" />
+				<Skeleton className="h-3 w-[100px]" />
+			</DataTable.SkeletonRows>
+		</DataTable.Root>
 	)
 }
 
-export function PodTable({ pods, waiting, referenceTime }: PodTableProps) {
-	const [sortKey, setSortKey] = useState<SortKey>("cpuLimitPct")
-	const [sortDir, setSortDir] = useState<SortDir>("desc")
-
-	function handleSort(k: SortKey) {
-		if (k === sortKey) {
-			setSortDir((d) => (d === "asc" ? "desc" : "asc"))
-		} else {
-			setSortKey(k)
-			setSortDir(k === "podName" || k === "namespace" ? "asc" : "desc")
-		}
-	}
-
-	const sorted = useMemo(() => {
-		const copy = [...pods]
-		copy.sort((a, b) => {
-			const av = a[sortKey]
-			const bv = b[sortKey]
-			if (typeof av === "number" && typeof bv === "number") {
-				return sortDir === "asc" ? av - bv : bv - av
-			}
-			const as = String(av)
-			const bs = String(bv)
-			return sortDir === "asc" ? as.localeCompare(bs) : bs.localeCompare(as)
-		})
-		return copy
-	}, [pods, sortKey, sortDir])
-
+export function PodTable({
+	pods,
+	sortBy = "saturation",
+	sortDir = "desc",
+	onSortChange,
+	waiting,
+	referenceTime,
+}: PodTableProps) {
 	return (
-		<div
-			className={cn("border-y border-border/70 transition-opacity", waiting && "opacity-60")}
-			aria-label="Pods"
-		>
-			<div className="flex items-center gap-4 border-b border-border/60 px-4 py-2">
-				<ColumnHead
+		<DataTable.Root ariaLabel="Pods" waiting={waiting}>
+			<DataTable.Head>
+				<ColumnHead<PodSortKey>
 					label="Pod"
 					sortKey="podName"
-					currentKey={sortKey}
+					currentKey={sortBy}
 					dir={sortDir}
-					onSort={handleSort}
-					width="flex-1 min-w-[280px]"
+					onSort={onSortChange}
+					width="flex-1 min-w-[260px]"
 				/>
-				<ColumnHead
-					label="CPU req"
-					sortKey="cpuRequestPct"
-					currentKey={sortKey}
+				<ColumnHead<PodSortKey>
+					label="Peak saturation"
+					sortKey="saturation"
+					currentKey={sortBy}
 					dir={sortDir}
-					onSort={handleSort}
-					align="right"
-					width="w-[140px]"
+					onSort={onSortChange}
+					width="w-[176px]"
 					hidden="hidden md:flex"
 				/>
-				<ColumnHead
-					label="CPU limit"
-					sortKey="cpuLimitPct"
-					currentKey={sortKey}
+				<ColumnHead<PodSortKey>
+					label="CPU cores"
+					sortKey="cpuUsage"
+					currentKey={sortBy}
 					dir={sortDir}
-					onSort={handleSort}
+					onSort={onSortChange}
 					align="right"
-					width="w-[140px]"
-					hidden="hidden md:flex"
-				/>
-				<ColumnHead
-					label="Mem req"
-					sortKey="memoryRequestPct"
-					currentKey={sortKey}
-					dir={sortDir}
-					onSort={handleSort}
-					align="right"
-					width="w-[140px]"
+					width="w-[132px]"
 					hidden="hidden lg:flex"
 				/>
-				<ColumnHead
-					label="Mem limit"
+				<ColumnHead<PodSortKey>
+					label="Mem of limit"
 					sortKey="memoryLimitPct"
-					currentKey={sortKey}
+					currentKey={sortBy}
 					dir={sortDir}
-					onSort={handleSort}
+					onSort={onSortChange}
 					align="right"
-					width="w-[140px]"
+					width="w-[120px]"
 					hidden="hidden lg:flex"
 				/>
-				<ColumnHead
+				<ColumnHead<PodSortKey>
 					label="Last seen"
 					sortKey="lastSeen"
-					currentKey={sortKey}
+					currentKey={sortBy}
 					dir={sortDir}
-					onSort={handleSort}
+					onSort={onSortChange}
 					align="right"
 					width="w-[100px]"
 				/>
-			</div>
+			</DataTable.Head>
+			{pods.length === 0 && <DataTable.Empty>No pods match your filter.</DataTable.Empty>}
 
-			{sorted.length === 0 ? (
-				<div className="px-4 py-12 text-center text-[12px] text-muted-foreground">
-					No pods match your filter.
-				</div>
-			) : (
-				sorted.map((pod) => {
-					const workload = workloadOf(pod)
-					const status = deriveHostStatus(pod.lastSeen, referenceTime ?? Date.now())
-					return (
-						<Link
-							key={`${pod.namespace}/${pod.podName}`}
-							to="/infra/kubernetes/pods/$podName"
-							params={{ podName: pod.podName }}
-							search={pod.namespace ? { namespace: pod.namespace } : {}}
-							className="group flex items-center gap-4 border-b border-border/40 px-4 py-3 transition-colors last:border-0 hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none"
-						>
-							<div className="flex flex-1 min-w-[280px] gap-3">
-								<span
-									className={cn(
-										"w-[2px] self-stretch transition-all",
-										STRIPE_COLOR[status],
-										"group-hover:w-[3px] group-hover:bg-primary",
-									)}
-								/>
-								<div className="min-w-0 flex-1">
-									<div className="flex items-center gap-2">
-										<span className="truncate font-mono text-[13px] font-medium text-foreground transition-colors group-hover:text-primary">
-											{pod.podName}
-										</span>
-										<HostStatusBadge
-											lastSeen={pod.lastSeen}
-											referenceTime={referenceTime}
-										/>
-									</div>
-									<div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-										{pod.namespace && <MetaChip>ns {pod.namespace}</MetaChip>}
-										{workload && (
-											<>
-												<span className="text-foreground/20">·</span>
-												<MetaChip>
-													{workload.kind} {workload.name}
-												</MetaChip>
-											</>
-										)}
-										{pod.nodeName && (
-											<>
-												<span className="text-foreground/20">·</span>
-												<MetaChip>node {pod.nodeName}</MetaChip>
-											</>
-										)}
-										{pod.qosClass && (
-											<>
-												<span className="text-foreground/20">·</span>
-												<MetaChip>qos {pod.qosClass}</MetaChip>
-											</>
-										)}
-										{pod.computeType === "fargate" && (
-											<span className="font-mono text-[10px] text-[var(--severity-warn)]">
-												fargate
-											</span>
-										)}
-									</div>
-								</div>
+			{pods.map((pod) => {
+				const workload = workloadOf(pod)
+				return (
+					<Link
+						key={`${pod.namespace}/${pod.podName}`}
+						to="/infra/kubernetes/pods/$podName"
+						params={{ podName: pod.podName }}
+						search={pod.namespace ? { namespace: pod.namespace } : {}}
+						className={ROW_LINK_CLASS}
+					>
+						<div className="min-w-[260px] flex-1">
+							<div className="flex items-center gap-2">
+								<span className="truncate font-mono text-[13px] font-medium text-foreground transition-colors group-hover:text-primary">
+									{pod.podName}
+								</span>
+								<HostStatusBadge lastSeen={pod.lastSeen} referenceTime={referenceTime} />
 							</div>
-							<div className="hidden md:block w-[140px]">
-								<UsageBar fraction={pod.cpuRequestPct} />
+							<div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+								{pod.namespace && <MetaChip>ns {pod.namespace}</MetaChip>}
+								{workload && (
+									<>
+										<span className="text-foreground/20">·</span>
+										<MetaChip>
+											{workload.kind} {workload.name}
+										</MetaChip>
+									</>
+								)}
+								{pod.nodeName && (
+									<>
+										<span className="text-foreground/20">·</span>
+										<MetaChip>node {pod.nodeName}</MetaChip>
+									</>
+								)}
+								{pod.qosClass && (
+									<>
+										<span className="text-foreground/20">·</span>
+										<MetaChip>qos {pod.qosClass}</MetaChip>
+									</>
+								)}
+								{pod.computeType === "fargate" && (
+									<span className="font-mono text-[10px] text-[var(--severity-warn)]">
+										fargate
+									</span>
+								)}
 							</div>
-							<div className="hidden md:block w-[140px]">
-								<UsageBar fraction={pod.cpuLimitPct} />
-							</div>
-							<div className="hidden lg:block w-[140px]">
-								<UsageBar fraction={pod.memoryRequestPct} />
-							</div>
-							<div className="hidden lg:block w-[140px]">
-								<UsageBar fraction={pod.memoryLimitPct} />
-							</div>
-							<div className="w-[100px] text-right">
-								<Tooltip>
-									<TooltipTrigger
-										render={<span />}
-										className="cursor-default font-mono text-[11px] text-muted-foreground"
-									>
-										{formatRelative(pod.lastSeen)}
-									</TooltipTrigger>
-									<TooltipContent>{pod.lastSeen}</TooltipContent>
-								</Tooltip>
-							</div>
-						</Link>
-					)
-				})
-			)}
-		</div>
+						</div>
+						<div className="hidden w-[176px] space-y-1 md:block">
+							<MiniBar label="CPU" fraction={pod.cpuLimitPctPeak} />
+							<MiniBar label="MEM" fraction={pod.memoryLimitPctPeak} />
+						</div>
+						<div className="hidden w-[132px] text-right lg:block">
+							<AvgPeak avg={pod.cpuUsage} peak={pod.cpuUsagePeak} format={formatCores} />
+						</div>
+						<div className="hidden w-[120px] text-right lg:block">
+							<AvgPeak
+								avg={pod.memoryLimitPct}
+								peak={pod.memoryLimitPctPeak}
+								format={formatPct}
+							/>
+						</div>
+						<div className="w-[100px] text-right">
+							<Tooltip>
+								<TooltipTrigger
+									render={<span />}
+									className="cursor-default font-mono text-[11px] text-muted-foreground"
+								>
+									{formatRelativeTime(pod.lastSeen)}
+								</TooltipTrigger>
+								<TooltipContent>{pod.lastSeen}</TooltipContent>
+							</Tooltip>
+						</div>
+					</Link>
+				)
+			})}
+		</DataTable.Root>
 	)
 }

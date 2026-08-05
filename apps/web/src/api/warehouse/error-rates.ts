@@ -3,17 +3,7 @@ import { ErrorRateByServiceRequest } from "@maple/domain/http"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import { WarehouseDateTimeString, decodeInput, runWarehouseQuery } from "@/api/warehouse/effect-utils"
 
-export interface ErrorRateByService {
-	serviceName: string
-	totalLogs: number
-	errorLogs: number
-	errorRate: number
-}
-
-export interface ErrorRateByServiceResponse {
-	data: ErrorRateByService[]
-}
-
+import { formatWarehouseDateTime } from "@maple/query-engine"
 const GetErrorRateByServiceInput = Schema.Struct({
 	startTime: Schema.optional(WarehouseDateTimeString),
 	endTime: Schema.optional(WarehouseDateTimeString),
@@ -22,8 +12,10 @@ const GetErrorRateByServiceInput = Schema.Struct({
 export type GetErrorRateByServiceInput = Schema.Schema.Type<typeof GetErrorRateByServiceInput>
 
 const defaultTimeRange = (nowMillis: number) => {
-	const fmt = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 19)
-	return { startTime: fmt(nowMillis - 24 * 60 * 60 * 1000), endTime: fmt(nowMillis) }
+	return {
+		startTime: formatWarehouseDateTime(nowMillis - 24 * 60 * 60 * 1000),
+		endTime: formatWarehouseDateTime(nowMillis),
+	}
 }
 
 export const getErrorRateByService = Effect.fn("QueryEngine.getErrorRateByService")(function* ({

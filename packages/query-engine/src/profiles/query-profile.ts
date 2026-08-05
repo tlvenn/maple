@@ -8,8 +8,11 @@
  *
  * Tinybird restricts row/byte caps (`max_rows_to_read`, `max_result_rows`,
  * `max_bytes_to_read`) — they error with "restricted" if used. `maxBlockSize`
- * is also Tinybird-restricted; the executor strips it on the Tinybird backend
- * (see `stripTinybirdRestrictedSettings`).
+ * is also Tinybird-restricted; the executor strips it on the managed Tinybird
+ * backend — whether reached via the Tinybird SDK or its ClickHouse-compatible
+ * gateway (`CLICKHOUSE_URL`) — and keeps it only for a genuine per-org BYO
+ * ClickHouse (see `stripTinybirdRestrictedSettings` and the strip gate in the
+ * executor, which keys on the config `source`, not its `_tag`).
  */
 export type WarehouseQuerySettings = {
 	maxExecutionTime?: number
@@ -22,11 +25,17 @@ export type WarehouseQuerySettings = {
 	 * ~100KB) the default 65536 produces ~256MB chunks × 9 read threads — an
 	 * instant `max_memory_usage` breach for any query whose filter has to read
 	 * the column (`Body ILIKE '%…%'`). Capping rows-per-block bounds peak
-	 * memory while keeping full read parallelism: benchmarked on the superwall
+	 * memory while keeping full read parallelism: benchmarked on the maple
 	 * cluster, `512` turned both OOMing log-search shapes into sub-2s queries
-	 * at ~260-420MB peak. ClickHouse-only — stripped for Tinybird.
+	 * at ~260-420MB peak. BYO-ClickHouse-only — stripped for the managed Tinybird
+	 * backend (Tinybird SDK or its ClickHouse-compatible gateway).
 	 */
 	maxBlockSize?: number
+	/**
+	 * Enables ClickHouse's text index query functions. Added only after the
+	 * executor verifies that the live server exposes this setting.
+	 */
+	enableFullTextIndex?: number
 }
 
 /**
@@ -35,16 +44,58 @@ export type WarehouseQuerySettings = {
  */
 export const LOGS_BODY_SEARCH_SETTINGS: WarehouseQuerySettings = { maxBlockSize: 512 }
 
-export type QueryProfileName = "discovery" | "list" | "aggregation" | "explain" | "unbounded"
+export type QueryProfileName =
+	| "discovery"
+	| "list"
+	| "aggregation"
+	| "rawInteractive"
+	| "rawAlert"
+	| "explain"
+	| "unbounded"
 
 /**
  * The shared profile/settings selector carried by every warehouse query path
- * (the `WarehouseExecutor` interface, `WarehouseQueryService.sqlQuery`, and the
+ * (the `WarehouseExecutor` interface, `WarehouseQueryService.compiledQuery`, and the
  * CLI executors). Profile defaults are overridden by explicit `settings`.
  */
 export type WarehouseQueryOptions = {
 	profile?: QueryProfileName
 	settings?: WarehouseQuerySettings
+}
+
+/**
+ * The single per-call option type shared by every warehouse query surface
+ * (`WarehouseQueryServiceShape`, the `WarehouseExecutor` facade, the runtime
+ * `QueryEngineWarehouse` port, and the CLI executors). It lives next to the
+ * profiles because it is a pure type with no execution-layer dependency.
+ */
+export type SqlQueryOptions = WarehouseQueryOptions & {
+	/**
+	 * Semantic name for the query (e.g. "errorsByType", "spanHierarchy").
+	 * Annotated on the executeSql span as `query.context` so traces can be
+	 * filtered and grouped by call site without re-running the SQL.
+	 */
+	context?: string
+	/**
+	 * Route this query to the INGEST backend (managed Tinybird) instead of the
+	 * per-org read config. Prefer declaring this at the query definition via
+	 * `.routing("ingest")` (carried on `CompiledQuery.routing`); use this option
+	 * only for hand-written SQL or when the pin depends on runtime state (e.g.
+	 * reads of gateway-written data gated on write-readiness).
+	 */
+	route?: "ingest"
+	/**
+	 * Abort the read once the encoded response crosses these bounds, failing with
+	 * `WarehouseResponseLimitError` instead of buffering the rest.
+	 *
+	 * ClickHouse settings cap what the *warehouse* spends; this caps what *we*
+	 * are willing to materialize in a 128 MB Worker. Set it for queries whose
+	 * result size is driven by user data rather than by the query shape — without
+	 * it an oversized response dies as a platform abort, which the transient
+	 * classifier reads as a flaky upstream and retries. Reach for it via
+	 * `compiledQueryBounded`, which surfaces the error in its signature.
+	 */
+	responseLimits?: { readonly maxRows: number; readonly maxBytes: number }
 }
 
 /**
@@ -59,6 +110,8 @@ export const QueryProfile: Record<QueryProfileName, WarehouseQuerySettings> = {
 	discovery: { maxExecutionTime: 5, maxMemoryUsage: 512_000_000 },
 	list: { maxExecutionTime: 15, maxMemoryUsage: 1_500_000_000 },
 	aggregation: { maxExecutionTime: 30, maxMemoryUsage: 4_000_000_000 },
+	rawInteractive: { maxExecutionTime: 10, maxMemoryUsage: 512_000_000, maxThreads: 2 },
+	rawAlert: { maxExecutionTime: 5, maxMemoryUsage: 256_000_000, maxThreads: 2 },
 	explain: { maxExecutionTime: 2, maxMemoryUsage: 128_000_000 },
 	unbounded: {},
 }
@@ -68,14 +121,20 @@ const settingToCh: Record<keyof WarehouseQuerySettings, string> = {
 	maxMemoryUsage: "max_memory_usage",
 	maxThreads: "max_threads",
 	maxBlockSize: "max_block_size",
+	enableFullTextIndex: "enable_full_text_index",
 }
 
 /**
  * Settings Tinybird's `/v0/sql` rejects with "Usage of setting '…' is
- * restricted". The executor drops them when the resolved backend is Tinybird
- * so the same call site works against both backends.
+ * restricted". The executor drops them for the managed Tinybird backend
+ * (reached via the Tinybird SDK or its ClickHouse-compatible gateway) and keeps
+ * them only for a genuine per-org BYO ClickHouse, so the same call site works
+ * against both backends.
  */
-const TINYBIRD_RESTRICTED_SETTINGS: ReadonlyArray<keyof WarehouseQuerySettings> = ["maxBlockSize"]
+const TINYBIRD_RESTRICTED_SETTINGS: ReadonlyArray<keyof WarehouseQuerySettings> = [
+	"maxBlockSize",
+	"enableFullTextIndex",
+]
 
 export const stripTinybirdRestrictedSettings = (
 	settings: WarehouseQuerySettings | undefined,
@@ -88,8 +147,16 @@ export const stripTinybirdRestrictedSettings = (
 }
 
 /**
- * Append a ClickHouse `SETTINGS` clause to a SQL string. Returns the
- * input unchanged when no settings are provided.
+ * Matches a trailing `FORMAT <name>` clause (the DSL compiler terminates every
+ * query with `FORMAT JSON`). `SETTINGS` must precede `FORMAT` — Tinybird's
+ * ClickHouse rejects `FORMAT JSON SETTINGS …` with a syntax error.
+ */
+const trailingFormatRe = /\s+FORMAT\s+\w+\s*$/i
+
+/**
+ * Add a ClickHouse `SETTINGS` clause to a SQL string, inserting it before a
+ * trailing `FORMAT <name>` clause when present. Returns the input unchanged
+ * when no settings are provided.
  *
  * Caller must guarantee the SQL doesn't already contain a SETTINGS
  * clause — none of maple's DSL queries do today.
@@ -104,7 +171,14 @@ export const appendSettings = (sql: string, settings: WarehouseQuerySettings | u
 		}
 	}
 	if (parts.length === 0) return sql
-	return `${sql.replace(/;\s*$/, "")} SETTINGS ${parts.join(", ")}`
+	const clause = `SETTINGS ${parts.join(", ")}`
+	const trimmed = sql.replace(/;\s*$/, "")
+	const formatMatch = trimmed.match(trailingFormatRe)
+	if (formatMatch) {
+		const body = trimmed.slice(0, formatMatch.index)
+		return `${body} ${clause}${formatMatch[0]}`
+	}
+	return `${trimmed} ${clause}`
 }
 
 /**

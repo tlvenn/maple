@@ -1,20 +1,20 @@
 import { McpQueryError, requiredStringParam, validationError, type McpToolRegistrar } from "./types"
-import { Effect, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { DashboardWidgetSchema } from "@maple/domain/http"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import {
 	defaultSizeForVisualization,
 	findNextWidgetPosition,
 	generateWidgetId,
 	withDashboardMutation,
 	type DashboardWidget,
-} from "../lib/dashboard-mutations"
+} from "@/mcp/lib/dashboard-mutations"
 import {
 	collectBlockingBuilderWarnings,
 	formatValidationSummary,
 	inspectWidgetsAfterMutation,
-} from "../lib/inspect-widget"
-import { resolveTenant } from "../lib/query-warehouse"
+} from "@/mcp/lib/inspect-widget"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 
 const TOOL = "replace_dashboard_widgets"
 
@@ -29,19 +29,23 @@ export function registerReplaceDashboardWidgetsTool(server: McpToolRegistrar) {
 				"ID of the dashboard whose widgets to replace (use list_dashboards to find IDs)",
 			),
 			widgets_json: requiredStringParam(
-				"JSON array of widget objects: [{ id?, visualization, dataSource, display, layout? }, ...]. `id` and `layout` are optional (auto-generated/auto-placed). This REPLACES the entire widget list.",
+				'JSON array of widget objects: [{ id?, visualization, dataSource, display, layout?, timeRange? }, ...]. `id` and `layout` are optional (auto-generated/auto-placed). `timeRange` pins one widget to its own window (`{"type":"relative","value":"30m"}` or `{"type":"absolute","startTime":"...","endTime":"..."}`); omit it and the widget follows the dashboard range, which is right for almost every widget. This REPLACES the entire widget list.',
 			),
 		}),
 		Effect.fn("McpTool.replaceDashboardWidgets")(function* ({ dashboard_id, widgets_json }) {
-			let parsed: unknown
-			try {
-				parsed = JSON.parse(widgets_json)
-			} catch (e) {
+			const parseResult = yield* Effect.result(
+				Effect.try({
+					try: () => JSON.parse(widgets_json) as unknown,
+					catch: (e) => e,
+				}),
+			)
+			if (Result.isFailure(parseResult)) {
 				return validationError(
-					`widgets_json is not valid JSON: ${String(e)}`,
+					`widgets_json is not valid JSON: ${String(parseResult.failure)}`,
 					'[{ "visualization": "stat", "dataSource": { ... }, "display": { ... } }]',
 				)
 			}
+			const parsed = parseResult.success
 			if (!Array.isArray(parsed)) {
 				return validationError("widgets_json must be a JSON array of widget objects.")
 			}
@@ -77,7 +81,7 @@ export function registerReplaceDashboardWidgetsTool(server: McpToolRegistrar) {
 						(cause) =>
 							new McpQueryError({
 								message: `widgets_json[${i}] is not a valid widget: ${String(cause)}`,
-								pipe: TOOL,
+								pipeName: TOOL,
 								cause,
 							}),
 					),
@@ -97,11 +101,11 @@ export function registerReplaceDashboardWidgetsTool(server: McpToolRegistrar) {
 
 			// Validate every widget's query before persisting anything — an atomic,
 			// all-or-nothing guard so a single bad widget can't corrupt the board.
-			const blocking: string[] = []
-			for (const w of widgets) {
-				const warns = yield* collectBlockingBuilderWarnings(w.dataSource)
-				for (const warn of warns) blocking.push(`[${w.id}] ${warn}`)
-			}
+			const blocking = yield* Effect.forEach(widgets, (w) =>
+				collectBlockingBuilderWarnings(w.dataSource).pipe(
+					Effect.map((warns) => warns.map((warn) => `[${w.id}] ${warn}`)),
+				),
+			).pipe(Effect.map((nested) => nested.flat()))
 			if (blocking.length > 0) {
 				return validationError(
 					`Some widgets have clauses the engine can't honor — NOTHING was saved:\n- ${blocking.join("\n- ")}\n\nFix and retry. Span/resource attributes work automatically but cap at 5 attr filters; logs/metrics accept only a fixed set of filter/groupBy keys.`,

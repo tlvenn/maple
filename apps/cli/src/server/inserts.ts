@@ -6,7 +6,7 @@
 import insertMappings from "./schema/local-inserts.json"
 
 /** Pinned single-tenant org id; every row is written under it. */
-export const LOCAL_ORG_ID = "local"
+const LOCAL_ORG_ID = "local"
 
 interface DatasourceMapping {
 	readonly table: string
@@ -44,8 +44,6 @@ const templates: Map<string, InsertTemplate> = (() => {
 	return out
 })()
 
-export const KNOWN_DATASOURCES: ReadonlySet<string> = new Set(templates.keys())
-
 /**
  * Build an `INSERT … SELECT … FROM format(JSONEachRow, '<schema>', '<data>')`
  * statement for one datasource's NDJSON batch.
@@ -54,4 +52,49 @@ export function buildInsertSql(datasource: string, ndjson: string): string {
 	const template = templates.get(datasource)
 	if (!template) throw new Error(`no insert mapping for datasource '${datasource}'`)
 	return template.prefix + escapeSqlLiteral(ndjson) + template.suffix
+}
+
+/**
+ * chDB parses the entire statement — inlined data literal included — against
+ * its default `max_query_size` (~256KB), so a large batch in one statement
+ * fails with "Code: 62 … Max query size exceeded". Budget for the escaped
+ * payload per statement, leaving headroom for the template prefix/suffix.
+ */
+const MAX_ESCAPED_PAYLOAD_BYTES = 200_000
+
+export interface InsertStatement {
+	readonly sql: string
+	readonly rowCount: number
+}
+
+/**
+ * Like {@link buildInsertSql}, but splits the NDJSON batch on line boundaries
+ * into as many statements as needed so each stays under chDB's query-size
+ * limit. A single line larger than the budget is emitted as its own statement
+ * (never split mid-line).
+ */
+export function buildInsertStatements(datasource: string, ndjson: string): InsertStatement[] {
+	const template = templates.get(datasource)
+	if (!template) throw new Error(`no insert mapping for datasource '${datasource}'`)
+	const out: InsertStatement[] = []
+	let chunk: string[] = []
+	let chunkBytes = 0
+	const flush = () => {
+		if (chunk.length === 0) return
+		out.push({ sql: template.prefix + chunk.join("\n") + template.suffix, rowCount: chunk.length })
+		chunk = []
+		chunkBytes = 0
+	}
+	for (const line of ndjson.split("\n")) {
+		if (line.length === 0) continue
+		// Escaping is per-character, so escaping line-by-line and joining with
+		// "\n" is identical to escaping the whole batch at once.
+		const escaped = escapeSqlLiteral(line)
+		const bytes = Buffer.byteLength(escaped, "utf8") + 1
+		if (chunkBytes > 0 && chunkBytes + bytes > MAX_ESCAPED_PAYLOAD_BYTES) flush()
+		chunk.push(escaped)
+		chunkBytes += bytes
+	}
+	flush()
+	return out
 }

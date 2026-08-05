@@ -1,13 +1,11 @@
 import { useMemo } from "react"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { Result } from "@/lib/effect-atom"
 import { useRetainedRefreshableResultValue } from "@/hooks/use-retained-refreshable-result-value"
-import {
-	getServiceMapForServiceResultAtom,
-	getServiceMapDbEdgesForServiceResultAtom,
-	getServiceExternalEdgesResultAtom,
-} from "@/lib/services/atoms/warehouse-query-atoms"
-import { formatLatency } from "@/lib/format"
+import { getServiceDependenciesBundleResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
+import { toSingleDeploymentEnv } from "@/lib/services/environments"
+import { latencyToneClass } from "@maple/ui/lib/latency-tone"
+import { formatLatency } from "@maple/ui/lib/format"
 import { normalizeTimestampInput } from "@/lib/timezone-format"
 import { DependencyTable, type DependencyRow } from "./dependency-table"
 import type { DependencyKind } from "./dependency-type-badge"
@@ -19,12 +17,15 @@ interface ServiceDependenciesTabProps {
 	timePreset?: string
 	effectiveStartTime: string
 	effectiveEndTime: string
+	/** Page-level env filter (single-element by convention, see the route). */
+	environments?: string[]
 }
 
 interface RawEdge {
 	sourceService?: string
 	targetService?: string
 	dbSystem?: string
+	dbNamespace?: string
 	targetType?: "http" | "messaging" | "rpc"
 	targetSystem?: string
 	targetName?: string
@@ -60,23 +61,19 @@ export function ServiceDependenciesTab({
 	timePreset,
 	effectiveStartTime,
 	effectiveEndTime,
+	environments,
 }: ServiceDependenciesTabProps) {
-	const servicesResult = useRetainedRefreshableResultValue(
-		getServiceMapForServiceResultAtom({
-			data: { serviceName, startTime: effectiveStartTime, endTime: effectiveEndTime },
-		}),
-	)
-	const dbsResult = useRetainedRefreshableResultValue(
-		getServiceMapDbEdgesForServiceResultAtom({
-			data: { serviceName, startTime: effectiveStartTime, endTime: effectiveEndTime },
-		}),
-	)
-	const externalResult = useRetainedRefreshableResultValue(
-		getServiceExternalEdgesResultAtom({
+	// One fetch for the whole Dependencies tab — service, DB, and external edges in
+	// a single round-trip (was three separate atoms). The atom key (incl. the
+	// derived deploymentEnv) matches ServiceDependencyStrip's, so switching from
+	// the Overview strip to this tab is a cache hit.
+	const bundleResult = useRetainedRefreshableResultValue(
+		getServiceDependenciesBundleResultAtom({
 			data: {
 				serviceName,
 				startTime: effectiveStartTime,
 				endTime: effectiveEndTime,
+				deploymentEnv: toSingleDeploymentEnv(environments),
 			},
 		}),
 	)
@@ -86,18 +83,22 @@ export function ServiceDependenciesTab({
 		const e = new Date(normalizeTimestampInput(effectiveEndTime)).getTime()
 		return s > 0 && e > 0 ? Math.max((e - s) / 1000, 1) : 3600
 	}, [effectiveStartTime, effectiveEndTime])
+	const traceDetailLimited = durationSeconds > 30 * 24 * 60 * 60
+	const traceDetailStartTime = traceDetailLimited
+		? new Date(Date.parse(effectiveEndTime) - 30 * 24 * 60 * 60 * 1000).toISOString()
+		: startTime
 
 	const rows = useMemo<DependencyRow[]>(() => {
 		const out: DependencyRow[] = []
 
-		const serviceEdges = Result.builder(servicesResult)
-			.onSuccess((r) => r.edges as RawEdge[])
+		const serviceEdges = Result.builder(bundleResult)
+			.onSuccess((r) => r.serviceEdges as RawEdge[])
 			.orElse(() => [] as RawEdge[])
-		const dbEdges = Result.builder(dbsResult)
-			.onSuccess((r) => r.edges as RawEdge[])
+		const dbEdges = Result.builder(bundleResult)
+			.onSuccess((r) => r.dbEdges as RawEdge[])
 			.orElse(() => [] as RawEdge[])
-		const externalEdges = Result.builder(externalResult)
-			.onSuccess((r) => r.edges as RawEdge[])
+		const externalEdges = Result.builder(bundleResult)
+			.onSuccess((r) => r.externalEdges as RawEdge[])
 			.orElse(() => [] as RawEdge[])
 
 		for (const edge of serviceEdges) {
@@ -131,10 +132,16 @@ export function ServiceDependenciesTab({
 			const callCount = Number(edge.callCount ?? 0)
 			const estimated = Number(edge.estimatedCallCount ?? callCount)
 			const target = String(edge.dbSystem)
+			// Edges are per database identity (db.namespace et al.) — surface it as
+			// the row name so two databases of the same system stay distinguishable.
+			// The drill-down stays scoped by system only: the identity can originate
+			// from any of four span attributes, so an exact-attribute predicate here
+			// could silently match nothing.
+			const namespace = String(edge.dbNamespace ?? "")
 			out.push({
-				id: `database:${target}`,
+				id: `database:${target}:${namespace}`,
 				kind: "database",
-				name: target,
+				name: namespace ? `${target} · ${namespace}` : target,
 				callsPerSec: estimated / durationSeconds,
 				tracedCallsPerSec: callCount / durationSeconds,
 				totalCalls: callCount,
@@ -152,11 +159,7 @@ export function ServiceDependenciesTab({
 			const target = String(edge.targetName ?? "")
 			if (!target) continue
 			const kind: DependencyKind =
-				edge.targetType === "messaging"
-					? "messaging"
-					: edge.targetType === "rpc"
-						? "rpc"
-						: "http"
+				edge.targetType === "messaging" ? "messaging" : edge.targetType === "rpc" ? "rpc" : "http"
 			const callCount = Number(edge.callCount ?? 0)
 			const estimated = Number(edge.estimatedCallCount ?? callCount)
 			const system = edge.targetSystem ? String(edge.targetSystem) : ""
@@ -186,7 +189,7 @@ export function ServiceDependenciesTab({
 		}
 
 		return out
-	}, [servicesResult, dbsResult, externalResult, durationSeconds])
+	}, [bundleResult, durationSeconds])
 
 	// Fold HTTP rows that look like a known internal service into that service's
 	// row. The address-resolutions rollup eventually catches this server-side
@@ -239,10 +242,7 @@ export function ServiceDependenciesTab({
 		})
 	}, [rows])
 
-	const isWaiting =
-		(Result.isSuccess(servicesResult) && servicesResult.waiting) ||
-		(Result.isSuccess(dbsResult) && dbsResult.waiting) ||
-		(Result.isSuccess(externalResult) && externalResult.waiting)
+	const isWaiting = Result.isSuccess(bundleResult) && bundleResult.waiting
 
 	// Aggregate facts for the summary strip. Each datum gets its own muted
 	// label + sharp value so the eye lands on the numbers first, the labels
@@ -274,42 +274,55 @@ export function ServiceDependenciesTab({
 	return (
 		<div className={cn("flex flex-col gap-3 transition-opacity", isWaiting && "opacity-60")}>
 			{summary ? (
-				<div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
-					<span className="text-foreground">
-						<span className="tabular-nums font-mono font-medium">{dedupedRows.length}</span>{" "}
-						<span className="text-muted-foreground">downstream</span>
-					</span>
-					<span className="text-muted-foreground/60">{summary.breakdown}</span>
-					<span className="grow" />
-					<HeadlineFact
-						label="Busiest"
-						name={summary.topByCalls.name}
-						value={`${summary.topByCalls.hasSampling ? "~" : ""}${formatRate(summary.topByCalls.callsPerSec)}/s`}
-					/>
-					{summary.topByErrors ? (
+				<div className="flex flex-col gap-2 text-[11px] text-muted-foreground sm:flex-row sm:flex-wrap sm:items-baseline sm:gap-x-5 sm:gap-y-1">
+					<div className="flex items-baseline gap-x-3">
+						<span className="text-foreground">
+							<span className="tabular-nums font-mono font-medium">{dedupedRows.length}</span>{" "}
+							<span className="text-muted-foreground">downstream</span>
+						</span>
+						<span className="text-muted-foreground/60">{summary.breakdown}</span>
+					</div>
+					<span className="hidden grow sm:block" />
+					{/* On mobile the facts stack as their own rows; sm:contents dissolves
+					    this wrapper so they rejoin the parent's single-line flow on desktop. */}
+					<div className="flex flex-col gap-1 sm:contents">
 						<HeadlineFact
-							label="Most errors"
-							name={summary.topByErrors.name}
-							value={formatErrorRate(summary.topByErrors.errorRate)}
-							tone="error"
+							label="Busiest"
+							name={summary.topByCalls.name}
+							value={`${summary.topByCalls.hasSampling ? "~" : ""}${formatRate(summary.topByCalls.callsPerSec)}/s`}
 						/>
-					) : (
-						<HeadlineFact label="Errors" name="none" value="0%" />
-					)}
-					<HeadlineFact
-						label="Slowest p95"
-						name={summary.topByLatency.name}
-						value={formatLatency(summary.topByLatency.p95DurationMs)}
-					/>
+						{summary.topByErrors ? (
+							<HeadlineFact
+								label="Most errors"
+								name={summary.topByErrors.name}
+								value={formatErrorRate(summary.topByErrors.errorRate)}
+								tone="error"
+							/>
+						) : (
+							<HeadlineFact label="Errors" name="none" value="0%" />
+						)}
+						<HeadlineFact
+							label="Slowest p95"
+							name={summary.topByLatency.name}
+							value={formatLatency(summary.topByLatency.p95DurationMs)}
+							valueClassName={latencyToneClass(summary.topByLatency.p95DurationMs, "p95")}
+						/>
+					</div>
 				</div>
 			) : null}
 
+			{traceDetailLimited && (
+				<p className="text-xs text-muted-foreground">
+					Dependency summaries cover the selected range; individual trace drill-downs show the
+					latest 30 days.
+				</p>
+			)}
 			<DependencyTable
 				serviceName={serviceName}
 				rows={dedupedRows}
-				startTime={startTime}
-				endTime={endTime}
-				timePreset={timePreset}
+				startTime={traceDetailStartTime}
+				endTime={traceDetailLimited ? effectiveEndTime : endTime}
+				timePreset={traceDetailLimited ? undefined : timePreset}
 			/>
 		</div>
 	)
@@ -320,17 +333,22 @@ interface HeadlineFactProps {
 	name: string
 	value: string
 	tone?: "error"
+	/** Overrides the default value color — e.g. a magnitude tone for latency. */
+	valueClassName?: string
 }
 
-function HeadlineFact({ label, name, value, tone }: HeadlineFactProps) {
+function HeadlineFact({ label, name, value, tone, valueClassName }: HeadlineFactProps) {
 	return (
-		<span className="inline-flex items-baseline gap-1.5">
-			<span className="text-[10px] uppercase tracking-wider text-muted-foreground/60">{label}</span>
-			<span className="max-w-[140px] truncate text-foreground">{name}</span>
+		<span className="flex w-full items-baseline justify-between gap-1.5 sm:inline-flex sm:w-auto sm:justify-start">
+			<span className="flex min-w-0 items-baseline gap-1.5">
+				<span className="text-[10px] uppercase tracking-wider text-muted-foreground/60">{label}</span>
+				<span className="max-w-[60vw] truncate text-foreground sm:max-w-[140px]">{name}</span>
+			</span>
 			<span
 				className={cn(
-					"tabular-nums font-mono",
+					"shrink-0 tabular-nums font-mono",
 					tone === "error" ? "text-severity-error" : "text-foreground",
+					valueClassName,
 				)}
 			>
 				{value}

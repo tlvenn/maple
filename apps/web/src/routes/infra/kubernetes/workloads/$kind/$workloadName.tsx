@@ -1,22 +1,29 @@
 import { useState } from "react"
+import { DetailRail } from "@maple/ui/components/detail-rail"
 import { Navigate, createFileRoute } from "@tanstack/react-router"
-import { Result, useAtomValue } from "@/lib/effect-atom"
+import { Result, useAtomRefresh, useAtomValue } from "@/lib/effect-atom"
 import { Schema } from "effect"
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
 import { Card, CardContent, CardHeader, CardTitle } from "@maple/ui/components/ui/card"
 import { cn } from "@maple/ui/lib/utils"
+import { Skeleton } from "@maple/ui/components/ui/skeleton"
 
+import { QueryErrorState } from "@/components/common/query-error-state"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { GridIcon } from "@/components/icons"
 import { useInfraEnabled } from "@/hooks/use-infra-enabled"
 import { WorkloadDetailChart } from "@/components/infra/k8s-detail-chart"
-import { PodTable, type PodRow } from "@/components/infra/pod-table"
+import { PodTable } from "@/components/infra/pod-table"
 import { PageHero, HeroChip } from "@/components/infra/primitives/page-hero"
+import { StatRail, StatRailItem } from "@/components/infra/primitives/stat-rail"
 import {
 	listPodsResultAtom,
 	workloadDetailSummaryResultAtom,
 } from "@/lib/services/atoms/warehouse-query-atoms"
+import { TIME_PRESETS, bucketSecondsFor } from "@/components/infra/constants"
+import { severityLevel } from "@/components/infra/format"
+import { formatPercent } from "@maple/ui/lib/format"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
 import type { WorkloadInfraMetric, WorkloadKind } from "@/api/warehouse/infra"
 
@@ -40,39 +47,11 @@ export const Route = createFileRoute("/infra/kubernetes/workloads/$kind/$workloa
 	},
 })
 
-const TIME_PRESETS = [
-	{ value: "15m", label: "Last 15 minutes" },
-	{ value: "1h", label: "Last hour" },
-	{ value: "6h", label: "Last 6 hours" },
-	{ value: "12h", label: "Last 12 hours" },
-	{ value: "24h", label: "Last 24 hours" },
-	{ value: "7d", label: "Last 7 days" },
-]
-
 const METRIC_TABS = [
 	{ value: "cpu_limit", label: "CPU / limit" },
 	{ value: "memory_limit", label: "Mem / limit" },
 	{ value: "cpu_usage", label: "CPU cores" },
 ] as const
-
-function bucketSecondsFor(preset: string): number {
-	switch (preset) {
-		case "15m":
-			return 15
-		case "1h":
-			return 60
-		case "6h":
-			return 300
-		case "12h":
-			return 600
-		case "24h":
-			return 900
-		case "7d":
-			return 3600
-		default:
-			return 60
-	}
-}
 
 const KIND_LABEL: Record<WorkloadKind, string> = {
 	deployment: "Deployment",
@@ -86,14 +65,9 @@ function WorkloadDetailPage() {
 	return <WorkloadDetailContent />
 }
 
-function formatPercent(v: number): string {
-	if (!Number.isFinite(v)) return "—"
-	return `${(v * 100).toFixed(0)}%`
-}
-
 function WorkloadDetailContent() {
-	const params = Route.useParams() as { kind: WorkloadKind; workloadName: string }
-	const search = Route.useSearch() as { namespace?: string }
+	const params = Route.useParams()
+	const search = Route.useSearch()
 	const namespace = search.namespace
 	const [preset, setPreset] = useState("1h")
 	const [metric, setMetric] = useState<WorkloadInfraMetric>("cpu_limit")
@@ -102,30 +76,29 @@ function WorkloadDetailContent() {
 	const { startTime, endTime } = useEffectiveTimeRange(undefined, undefined, preset)
 	const bucketSeconds = bucketSecondsFor(preset)
 
-	const summaryResult = useAtomValue(
-		workloadDetailSummaryResultAtom({
-			data: {
-				kind: params.kind,
-				workloadName: params.workloadName,
-				namespace,
-				startTime,
-				endTime,
-			},
-		}),
-	)
-
-	const podsResult = useAtomValue(
-		listPodsResultAtom({
-			data: {
-				workloadKind: params.kind,
-				workloadName: params.workloadName,
-				namespaces: namespace ? [namespace] : undefined,
-				startTime,
-				endTime,
-				limit: 200,
-			},
-		}),
-	)
+	const summaryAtom = workloadDetailSummaryResultAtom({
+		data: {
+			kind: params.kind,
+			workloadName: params.workloadName,
+			namespace,
+			startTime,
+			endTime,
+		},
+	})
+	const podsAtom = listPodsResultAtom({
+		data: {
+			workloadKind: params.kind,
+			workloadName: params.workloadName,
+			namespaces: namespace ? [namespace] : undefined,
+			startTime,
+			endTime,
+			limit: 200,
+		},
+	})
+	const summaryResult = useAtomValue(summaryAtom)
+	const podsResult = useAtomValue(podsAtom)
+	const refreshSummary = useAtomRefresh(summaryAtom)
+	const refreshPods = useAtomRefresh(podsAtom)
 
 	const summary = Result.builder(summaryResult)
 		.onSuccess((r) => r.data)
@@ -155,146 +128,159 @@ function WorkloadDetailContent() {
 				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-1">
-				<MetaRow label="kind" value={KIND_LABEL[params.kind]} />
-				<MetaRow label={`k8s.${params.kind}.name`} value={summary.workloadName} />
-				<MetaRow label="k8s.namespace.name" value={summary.namespace} />
-				<MetaRow label="pods" value={String(summary.podCount)} />
+				<DetailRail.MetaRow label="kind" value={KIND_LABEL[params.kind]} />
+				<DetailRail.MetaRow label={`k8s.${params.kind}.name`} value={summary.workloadName} />
+				<DetailRail.MetaRow label="k8s.namespace.name" value={summary.namespace} />
+				<DetailRail.MetaRow label="pods" value={String(summary.podCount)} />
 			</CardContent>
 		</Card>
 	) : null
 
 	return (
-		<DashboardLayout
-			breadcrumbs={[
-				{ label: "Infrastructure", href: "/infra" },
-				{ label: "Kubernetes" },
-				{ label: "Workloads", href: "/infra/kubernetes/workloads" },
-				{ label: params.workloadName },
-			]}
-			headerActions={toolbar}
-			rightSidebar={rightSidebar}
-		>
-			<div className="space-y-6">
-				<PageHero
-					title={<span className="font-mono">{params.workloadName}</span>}
-					description={`${KIND_LABEL[params.kind]}${
-						namespace ? ` in namespace ${namespace}` : ""
-					} — aggregated from pod metrics.`}
-					meta={
-						<>
-							{namespace && <HeroChip>ns {namespace}</HeroChip>}
-							<HeroChip>kind {params.kind}</HeroChip>
-							{summary && <HeroChip>{summary.podCount} pods</HeroChip>}
-						</>
-					}
-				/>
-
-				{summary ? (
-					<div className="grid grid-cols-2 divide-x divide-y divide-border rounded-md border bg-card lg:grid-cols-4 lg:divide-y-0">
-						<Kpi label="Pods" value={String(summary.podCount)} />
-						<Kpi label="Avg CPU vs limit" value={formatPercent(summary.avgCpuLimitPct)} />
-						<Kpi label="Avg memory vs limit" value={formatPercent(summary.avgMemoryLimitPct)} />
-						<Kpi
-							label="Avg CPU cores"
-							value={
-								Number.isFinite(summary.avgCpuUsage) ? summary.avgCpuUsage.toFixed(3) : "—"
-							}
-						/>
-					</div>
-				) : (
-					<div className="rounded-md border border-dashed px-4 py-12 text-center text-sm text-muted-foreground">
-						No metrics arrived for this workload in the selected window.
-					</div>
-				)}
-
-				<div className="space-y-3">
-					<div className="flex items-center justify-between gap-3">
-						<div className="flex items-center gap-1 rounded-md border bg-background p-0.5">
-							{METRIC_TABS.map((tab) => {
-								const active = metric === tab.value
-								return (
-									<button
-										key={tab.value}
-										type="button"
-										onClick={() => setMetric(tab.value)}
-										className={cn(
-											"rounded-sm px-2.5 py-1 text-[11px] font-medium transition-colors",
-											active
-												? "bg-foreground text-background"
-												: "text-muted-foreground hover:text-foreground",
-										)}
-									>
-										{tab.label}
-									</button>
-								)
-							})}
-						</div>
-						<label className="inline-flex items-center gap-2 text-[11px] text-muted-foreground">
-							<input
-								type="checkbox"
-								checked={groupByPod}
-								onChange={(e) => setGroupByPod(e.target.checked)}
-								className="size-3 accent-primary"
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[
+					{ label: "Infrastructure", href: "/infra" },
+					{ label: "Kubernetes" },
+					{ label: "Workloads", href: "/infra/kubernetes/workloads" },
+					{ label: params.workloadName },
+				]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header>{toolbar}</DashboardLayout.Header>
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>
+						<div className="space-y-6">
+							<PageHero
+								title={<span className="font-mono">{params.workloadName}</span>}
+								description={`${KIND_LABEL[params.kind]}${
+									namespace ? ` in namespace ${namespace}` : ""
+								} — aggregated from pod metrics.`}
+								meta={
+									<>
+										{namespace && <HeroChip>ns {namespace}</HeroChip>}
+										<HeroChip>kind {params.kind}</HeroChip>
+										{summary && <HeroChip>{summary.podCount} pods</HeroChip>}
+									</>
+								}
 							/>
-							Per-pod breakdown
-						</label>
-					</div>
 
-					<WorkloadDetailChart
-						kind={params.kind}
-						workloadName={params.workloadName}
-						namespace={namespace}
-						metric={metric}
-						groupByPod={groupByPod}
-						startTime={startTime}
-						endTime={endTime}
-						bucketSeconds={bucketSeconds}
-					/>
-				</div>
+							{Result.isInitial(summaryResult) ? (
+								<Skeleton className="h-24 w-full rounded-md" />
+							) : Result.isFailure(summaryResult) ? (
+								<QueryErrorState
+									error={summaryResult.cause}
+									titleOverride="Failed to load workload metrics"
+									onRetry={refreshSummary}
+								/>
+							) : summary ? (
+								<StatRail>
+									<StatRailItem eyebrow="Pods" value={String(summary.podCount)} compact />
+									<StatRailItem
+										eyebrow="Avg CPU vs limit"
+										value={formatPercent(summary.avgCpuLimitPct)}
+										tone={severityLevel(summary.avgCpuLimitPct)}
+										compact
+									/>
+									<StatRailItem
+										eyebrow="Avg memory vs limit"
+										value={formatPercent(summary.avgMemoryLimitPct)}
+										tone={severityLevel(summary.avgMemoryLimitPct)}
+										compact
+									/>
+									<StatRailItem
+										eyebrow="Avg CPU cores"
+										value={
+											Number.isFinite(summary.avgCpuUsage)
+												? summary.avgCpuUsage.toFixed(3)
+												: "—"
+										}
+										compact
+									/>
+								</StatRail>
+							) : (
+								<div className="rounded-md border border-dashed px-4 py-12 text-center text-sm text-muted-foreground">
+									No metrics arrived for this workload in the selected window.
+								</div>
+							)}
 
-				<div className="space-y-3">
-					<h3 className="text-sm font-medium">Pods</h3>
-					{Result.builder(podsResult)
-						.onSuccess((r) => {
-							const pods = r.data as ReadonlyArray<PodRow>
-							if (pods.length === 0) {
-								return (
-									<div className="rounded-md border border-dashed px-4 py-12 text-center text-sm text-muted-foreground">
-										No pods reporting for this workload in the selected window.
+							<div className="space-y-3">
+								<div className="flex items-center justify-between gap-3">
+									<div className="flex items-center gap-1 rounded-md border bg-background p-0.5">
+										{METRIC_TABS.map((tab) => {
+											const active = metric === tab.value
+											return (
+												<button
+													key={tab.value}
+													type="button"
+													onClick={() => setMetric(tab.value)}
+													className={cn(
+														"rounded-sm px-2.5 py-1 text-[11px] font-medium transition-colors",
+														active
+															? "bg-foreground text-background"
+															: "text-muted-foreground hover:text-foreground",
+													)}
+												>
+													{tab.label}
+												</button>
+											)
+										})}
 									</div>
-								)
-							}
-							return <PodTable pods={pods} />
-						})
-						.orElse(() => null)}
-				</div>
-			</div>
-		</DashboardLayout>
-	)
-}
+									<label className="inline-flex items-center gap-2 text-[11px] text-muted-foreground">
+										<input
+											type="checkbox"
+											checked={groupByPod}
+											onChange={(e) => setGroupByPod(e.target.checked)}
+											className="size-3 accent-primary"
+										/>
+										Per-pod breakdown
+									</label>
+								</div>
 
-function Kpi({ label, value }: { label: string; value: string }) {
-	return (
-		<div className="px-5 py-4">
-			<div className="text-[11px] font-medium text-muted-foreground">{label}</div>
-			<div
-				className="mt-2 font-mono text-[26px] font-semibold tabular-nums leading-none tracking-[-0.01em] text-foreground"
-				style={{ fontFeatureSettings: "'tnum' 1" }}
-			>
-				{value}
-			</div>
-		</div>
-	)
-}
+								<WorkloadDetailChart
+									kind={params.kind}
+									workloadName={params.workloadName}
+									namespace={namespace}
+									metric={metric}
+									groupByPod={groupByPod}
+									startTime={startTime}
+									endTime={endTime}
+									bucketSeconds={bucketSeconds}
+								/>
+							</div>
 
-function MetaRow({ label, value }: { label: string; value: string | null | undefined }) {
-	if (!value) return null
-	return (
-		<div className="flex items-baseline justify-between gap-3 border-b border-border/60 py-1.5 last:border-0">
-			<span className="font-mono text-[11px] text-muted-foreground">{label}</span>
-			<span className="break-all text-right font-mono text-[11px] tabular-nums text-foreground/85">
-				{value}
-			</span>
-		</div>
+							<div className="space-y-3">
+								<h3 className="text-sm font-medium">Pods</h3>
+								{Result.builder(podsResult)
+									.onInitial(() => <Skeleton className="h-28 w-full rounded-md" />)
+									.onError((error) => (
+										<QueryErrorState
+											error={error}
+											titleOverride="Failed to load workload pods"
+											onRetry={refreshPods}
+										/>
+									))
+									.onSuccess((r) => {
+										const pods = r.data
+										if (pods.length === 0) {
+											return (
+												<div className="rounded-md border border-dashed px-4 py-12 text-center text-sm text-muted-foreground">
+													No pods reporting for this workload in the selected
+													window.
+												</div>
+											)
+										}
+										return <PodTable pods={pods} />
+									})
+									.render()}
+							</div>
+						</div>
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+				<DashboardLayout.RightPanel>{rightSidebar}</DashboardLayout.RightPanel>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
 	)
 }

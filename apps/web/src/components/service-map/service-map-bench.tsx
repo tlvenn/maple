@@ -1,9 +1,11 @@
-import { useEffect, useMemo } from "react"
+import { Profiler, useCallback, useMemo, useState, type ProfilerOnRenderCallback } from "react"
 import { ReactFlowProvider, useReactFlow, useStoreApi } from "@xyflow/react"
+import type { DeclutterFocus } from "./service-map-declutter"
 import type { ServiceDbEdge, ServiceEdge, ServicePlatform } from "@/api/warehouse/service-map"
 import type { ServiceOverview } from "@/api/warehouse/services"
 import type { ServiceWorkload } from "@/api/warehouse/service-infra"
 import { ServiceMapCanvas } from "./service-map-view"
+import { useMountEffect } from "@/hooks/use-mount-effect"
 
 /**
  * Synthetic, API-free service-map bench harness.
@@ -28,9 +30,38 @@ export interface BenchParams {
 	edges: number
 	rps: BenchRps
 	seed: number
+	/** Number of `service.namespace` groups to spread services across (0 = none). */
+	groups: number
+	/** Low-traffic filter threshold (% of peak edge rate; 0 = off). */
+	minTraffic: number
+	/** Service to focus (dim non-neighbors); "" = no focus. */
+	focus: string
 }
 
-export const DEFAULT_BENCH_PARAMS: BenchParams = { services: 120, edges: 400, rps: "high", seed: 1 }
+export const DEFAULT_BENCH_PARAMS: BenchParams = {
+	services: 120,
+	edges: 400,
+	rps: "high",
+	seed: 1,
+	groups: 0,
+	minTraffic: 0,
+	focus: "",
+}
+
+// Realistic-ish namespace names; falls back to `team-<n>` past the pool length.
+const NAMESPACE_POOL = [
+	"payments",
+	"checkout",
+	"platform",
+	"identity",
+	"search",
+	"growth",
+	"billing",
+	"notifications",
+	"inventory",
+	"shipping",
+]
+const namespaceName = (group: number): string => NAMESPACE_POOL[group] ?? `team-${group}`
 
 // --- deterministic PRNG (mulberry32) ---
 function makeRng(seed: number): () => number {
@@ -58,6 +89,37 @@ interface BenchGraph {
 	workloads: ServiceWorkload[]
 	platforms: Map<string, ServicePlatform>
 	runtimes: Map<string, string>
+}
+
+function refreshBenchMetrics(graph: BenchGraph, revision: number): BenchGraph {
+	const callScale = 1 + ((revision % 7) - 3) * 0.01
+	const latencyScale = 1 + ((revision % 5) - 2) * 0.015
+
+	return {
+		...graph,
+		edges: graph.edges.map((edge) => ({
+			...edge,
+			callCount: Math.max(1, Math.round(edge.callCount * callScale)),
+			estimatedCallCount: Math.max(1, Math.round(edge.estimatedCallCount * callScale)),
+			avgDurationMs: edge.avgDurationMs * latencyScale,
+			p95DurationMs: edge.p95DurationMs * latencyScale,
+		})),
+		dbEdges: graph.dbEdges.map((edge) => ({
+			...edge,
+			callCount: Math.max(1, Math.round(edge.callCount * callScale)),
+			estimatedCallCount: Math.max(1, Math.round(edge.estimatedCallCount * callScale)),
+			avgDurationMs: edge.avgDurationMs * latencyScale,
+			p95DurationMs: edge.p95DurationMs * latencyScale,
+		})),
+		overviews: graph.overviews.map((overview) => ({
+			...overview,
+			throughput: overview.throughput * callScale,
+			tracedThroughput: overview.tracedThroughput * callScale,
+			p50LatencyMs: overview.p50LatencyMs * latencyScale,
+			p95LatencyMs: overview.p95LatencyMs * latencyScale,
+			p99LatencyMs: overview.p99LatencyMs * latencyScale,
+		})),
+	}
 }
 
 function generateBenchGraph(params: BenchParams): BenchGraph {
@@ -120,6 +182,7 @@ function generateBenchGraph(params: BenchParams): BenchGraph {
 		dbEdges.push({
 			sourceService: name,
 			dbSystem: DB_SYSTEMS[Math.floor(rng() * DB_SYSTEMS.length)],
+			dbNamespace: `bench_db_${Math.floor(rng() * 3)}`,
 			callCount,
 			estimatedCallCount: callCount,
 			errorCount: Math.round(callCount * errorRate),
@@ -131,14 +194,22 @@ function generateBenchGraph(params: BenchParams): BenchGraph {
 		})
 	}
 
-	const overviews: ServiceOverview[] = names.map((name) => {
+	// Assign a `service.namespace` per service. Deterministic and rng-free so the
+	// generated topology is identical regardless of `groups` (only namespaces
+	// change) — and `groups=0` reproduces the original namespace-less graph exactly.
+	// ~1 in 7 services is left ungrouped to exercise the unboxed region.
+	const groupCount = Math.max(0, Math.floor(params.groups))
+	const namespaceFor = (i: number): string =>
+		groupCount <= 0 || i % 7 === 6 ? "" : namespaceName(i % groupCount)
+
+	const overviews: ServiceOverview[] = names.map((name, i) => {
 		const errorRate = rng() < 0.15 ? rng() * 0.1 : rng() * 0.004
 		const throughput = rpsLo + rng() * (rpsHi - rpsLo)
 		const hasSampling = rng() < 0.3
 		const samplingWeight = hasSampling ? 1 + Math.floor(rng() * 9) : 1
 		return {
 			serviceName: name,
-			serviceNamespace: "",
+			serviceNamespace: namespaceFor(i),
 			environment: "prod",
 			commits: [],
 			p50LatencyMs: 2 + rng() * 50,
@@ -186,12 +257,55 @@ interface BenchMetrics {
 	longTasks: number
 	totalBlockingMs: number
 	params: BenchParams
+	react: ReactRenderMetrics
+}
+
+interface ReactCommitSample {
+	phase: "mount" | "update" | "nested-update"
+	actualDurationMs: number
+	baseDurationMs: number
+	startTimeMs: number
+	commitTimeMs: number
+}
+
+export interface ReactRenderMetrics {
+	commits: number
+	mountCommits: number
+	updateCommits: number
+	nestedUpdateCommits: number
+	totalActualDurationMs: number
+	actualDurationP50Ms: number
+	actualDurationP95Ms: number
+	maxActualDurationMs: number
+	lastBaseDurationMs: number
+}
+
+export interface ReactRenderReport {
+	initial: ReactRenderMetrics
+	metricRefresh: ReactRenderMetrics
+	topologyChange: ReactRenderMetrics
+	viewportPan: ReactRenderMetrics
+	viewportPanFrames: number
+	viewportPanDurationMs: number
+	viewportPanCommitsPerFrame: number
+	viewportPanActualDurationPerFrameMs: number
+	metricRefreshes: number
+	topologyChanges: number
+}
+
+interface ReactRecorder {
+	onRender: ProfilerOnRenderCallback
+	reset: () => void
+	snapshot: () => ReactRenderMetrics
 }
 
 interface SmBench {
 	ready: boolean
+	/** Time from harness install to ready (nodes measured + edges in the DOM) — includes the async ELK layout. */
+	readyMs: number | null
 	last: BenchMetrics | null
 	run: (opts?: { durationMs?: number; pan?: boolean }) => Promise<BenchMetrics>
+	runReact: (opts?: { metricRefreshes?: number; topologyChanges?: number }) => Promise<ReactRenderReport>
 }
 
 declare global {
@@ -206,17 +320,76 @@ function percentile(sorted: number[], p: number): number {
 	return sorted[idx]
 }
 
+function createReactRecorder(): ReactRecorder {
+	let samples: ReactCommitSample[] = []
+	return {
+		onRender: (_id, phase, actualDuration, baseDuration, startTime, commitTime) => {
+			samples.push({
+				phase,
+				actualDurationMs: actualDuration,
+				baseDurationMs: baseDuration,
+				startTimeMs: startTime,
+				commitTimeMs: commitTime,
+			})
+		},
+		reset: () => {
+			samples = []
+		},
+		snapshot: () => {
+			const captured = samples.map((sample) => ({ ...sample }))
+			const durations = captured.map((sample) => sample.actualDurationMs).sort((a, b) => a - b)
+			return {
+				commits: captured.length,
+				mountCommits: captured.filter((sample) => sample.phase === "mount").length,
+				updateCommits: captured.filter((sample) => sample.phase === "update").length,
+				nestedUpdateCommits: captured.filter((sample) => sample.phase === "nested-update").length,
+				totalActualDurationMs: durations.reduce((sum, duration) => sum + duration, 0),
+				actualDurationP50Ms: percentile(durations, 50),
+				actualDurationP95Ms: percentile(durations, 95),
+				maxActualDurationMs: durations.at(-1) ?? 0,
+				lastBaseDurationMs: captured.at(-1)?.baseDurationMs ?? 0,
+			}
+		},
+	}
+}
+
+const nextPaint = () =>
+	new Promise<void>((resolve) => {
+		requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+	})
+
 /**
  * Sibling of ServiceMapCanvas inside the shared ReactFlowProvider. Drives
  * pan/zoom via the flow instance and installs the window.__smBench API.
  */
-function BenchDriver({ params }: { params: BenchParams }) {
+function BenchDriver({
+	params,
+	recorder,
+	onMetricRefresh,
+	onTopologyChange,
+}: {
+	params: BenchParams
+	recorder: ReactRecorder
+	onMetricRefresh: () => void
+	onTopologyChange: () => void
+}) {
 	const flow = useReactFlow()
 	const store = useStoreApi()
 
-	useEffect(() => {
+	useMountEffect(() => {
+		const measureUpdates = async (count: number, update: () => void | Promise<void>) => {
+			recorder.reset()
+			for (let index = 0; index < count; index++) {
+				// oxlint-disable-next-line react-doctor/async-await-in-loop -- Each measured React update must commit before the next sample starts.
+				await update()
+				await nextPaint()
+			}
+			return recorder.snapshot()
+		}
+
 		const harness: SmBench = {
 			ready: false,
+			readyMs: null,
 			last: null,
 			run: ({ durationMs = 5000, pan = true } = {}) =>
 				new Promise<BenchMetrics>((resolve) => {
@@ -235,6 +408,7 @@ function BenchDriver({ params }: { params: BenchParams }) {
 					const deltas: number[] = []
 					let prev = performance.now()
 					const start = prev
+					recorder.reset()
 
 					const tick = (now: number) => {
 						deltas.push(now - prev)
@@ -274,12 +448,48 @@ function BenchDriver({ params }: { params: BenchParams }) {
 							longTasks: longTaskEntries.length,
 							totalBlockingMs,
 							params,
+							react: recorder.snapshot(),
 						}
 						harness.last = metrics
 						resolve(metrics)
 					}
 					requestAnimationFrame(tick)
 				}),
+			runReact: async ({ metricRefreshes = 12, topologyChanges = 2 } = {}) => {
+				// Readiness means the graph is visible and measured; a few deferred
+				// ReactFlow bookkeeping commits can still follow. Include those in the
+				// initial scenario instead of leaking them into the first refresh.
+				await new Promise((resolve) => setTimeout(resolve, 500))
+				await nextPaint()
+				const initial = recorder.snapshot()
+				const metricRefresh = await measureUpdates(metricRefreshes, onMetricRefresh)
+				// oxlint-disable-next-line react-doctor/server-sequential-independent-await -- Scenarios share the graph and recorder, so they must not overlap.
+				const topologyChange = await measureUpdates(topologyChanges, async () => {
+					onTopologyChange()
+					// The graph remains visible while the worker computes the next ELK
+					// layout. Give that asynchronous layout enough time to commit before
+					// taking the scenario snapshot.
+					await new Promise((resolve) => setTimeout(resolve, 1500))
+				})
+				await new Promise((resolve) => setTimeout(resolve, 500))
+				await nextPaint()
+				const viewportRun = await harness.run({ durationMs: 2000, pan: true })
+				const viewportPan = viewportRun.react
+				return {
+					initial,
+					metricRefresh,
+					topologyChange,
+					viewportPan,
+					viewportPanFrames: viewportRun.frames,
+					viewportPanDurationMs: viewportRun.durationMs,
+					viewportPanCommitsPerFrame:
+						viewportRun.frames === 0 ? 0 : viewportPan.commits / viewportRun.frames,
+					viewportPanActualDurationPerFrameMs:
+						viewportRun.frames === 0 ? 0 : viewportPan.totalActualDurationMs / viewportRun.frames,
+					metricRefreshes,
+					topologyChanges,
+				}
+			},
 		}
 		window.__smBench = harness
 
@@ -291,6 +501,7 @@ function BenchDriver({ params }: { params: BenchParams }) {
 			const measured = nodes.length > 0 && nodes.every((n) => n.measured?.width)
 			const domEdges = document.querySelectorAll(".react-flow__edge").length
 			if ((measured && domEdges > 0) || performance.now() - settleStart > 8000) {
+				harness.readyMs = Math.round(performance.now() - settleStart)
 				harness.ready = true
 				return
 			}
@@ -302,13 +513,32 @@ function BenchDriver({ params }: { params: BenchParams }) {
 			cancelAnimationFrame(raf)
 			if (window.__smBench === harness) delete window.__smBench
 		}
-	}, [flow, store, params])
+	})
 
 	return null
 }
 
 export function ServiceMapBench({ params }: { params: BenchParams }) {
-	const graph = useMemo(() => generateBenchGraph(params), [params])
+	const [metricRevision, setMetricRevision] = useState(0)
+	const [topologyRevision, setTopologyRevision] = useState(0)
+	const topologyParams = useMemo(
+		() => ({
+			...params,
+			services: params.services + topologyRevision,
+			edges: params.edges + topologyRevision,
+		}),
+		[params, topologyRevision],
+	)
+	const baseGraph = useMemo(() => generateBenchGraph(topologyParams), [topologyParams])
+	const graph = useMemo(() => refreshBenchMetrics(baseGraph, metricRevision), [baseGraph, metricRevision])
+	const recorder = useMemo(() => createReactRecorder(), [])
+	const refreshMetrics = useCallback(() => setMetricRevision((revision) => revision + 1), [])
+	const changeTopology = useCallback(() => setTopologyRevision((revision) => (revision === 0 ? 1 : 0)), [])
+	// URL-driven focus so the perf spec can exercise the declutter paths without
+	// UI automation; interactive changes via the toolbar still work on top.
+	const [focus, setFocus] = useState<DeclutterFocus | null>(
+		params.focus ? { serviceId: params.focus, hops: 1, mode: "dim" } : null,
+	)
 	// Note: animation respects `prefers-reduced-motion`. The Playwright project
 	// runs with `reducedMotion: "no-preference"` (browser default) so the harness
 	// measures the animated path.
@@ -316,20 +546,57 @@ export function ServiceMapBench({ params }: { params: BenchParams }) {
 	return (
 		<div className="h-screen w-screen bg-background" data-testid="service-map-bench">
 			<ReactFlowProvider>
-				<ServiceMapCanvas
-					edges={graph.edges}
-					dbEdges={graph.dbEdges}
-					platforms={graph.platforms}
-					runtimes={graph.runtimes}
-					overviews={graph.overviews}
-					workloads={graph.workloads}
-					showInfraTab
-					durationSeconds={DURATION_SECONDS}
-					startTime={START_TIME}
-					endTime={END_TIME}
-					layoutKey="bench"
+				<Profiler id="service-map" onRender={recorder.onRender}>
+					<ServiceMapCanvas
+						edges={graph.edges}
+						dbEdges={graph.dbEdges}
+						// Exercises the instrumented-Worker overlay: svc-000 gets CF edge
+						// analytics attached; the unmatched script must NOT create a node.
+						cloudflareServices={[
+							{
+								serviceName: "cloudflare-worker/svc-000",
+								kind: "worker",
+								displayName: "svc-000",
+								requests: 120_000,
+								throughput: 120_000 / DURATION_SECONDS,
+								errorRate: 0.004,
+								latencyP99Ms: 38,
+								cpuP99Ms: 9,
+							},
+							{
+								serviceName: "cloudflare-worker/unmatched-script",
+								kind: "worker",
+								displayName: "unmatched-script",
+								requests: 5_000,
+								throughput: 5_000 / DURATION_SECONDS,
+								errorRate: 0.2,
+								latencyP99Ms: 55,
+								cpuP99Ms: 12,
+							},
+						]}
+						faasNames={new Map()}
+						planetscaleDatabases={new Map()}
+						planetscaleStats={[]}
+						platforms={graph.platforms}
+						runtimes={graph.runtimes}
+						overviews={graph.overviews}
+						workloads={graph.workloads}
+						showInfraTab
+						durationSeconds={DURATION_SECONDS}
+						startTime={START_TIME}
+						endTime={END_TIME}
+						layoutKey="bench"
+						focus={focus}
+						onFocusChange={setFocus}
+						minTrafficPctOverride={params.minTraffic > 0 ? params.minTraffic : undefined}
+					/>
+				</Profiler>
+				<BenchDriver
+					params={params}
+					recorder={recorder}
+					onMetricRefresh={refreshMetrics}
+					onTopologyChange={changeTopology}
 				/>
-				<BenchDriver params={params} />
 			</ReactFlowProvider>
 		</div>
 	)

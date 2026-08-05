@@ -1,10 +1,10 @@
 import { ClerkProvider, useAuth } from "@clerk/clerk-react"
-import { AutumnProvider } from "autumn-js/react"
-import { Component, StrictMode, useCallback, useEffect, useRef, useState } from "react"
+import { StrictMode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactDOM from "react-dom/client"
 import { EffectRouterProvider } from "@effect-router/core/react"
 import { apiBaseUrl } from "./lib/services/common/api-base-url"
 import { ClerkAuthBridge } from "./lib/services/common/clerk-auth-bridge"
+import { purgeForeignClerkCookies } from "./lib/services/common/clerk-cookie-guard"
 import { isClerkAuthEnabled } from "./lib/services/common/auth-mode"
 import {
 	installSelfHostedAuthHeadersProvider,
@@ -12,36 +12,18 @@ import {
 	subscribeSelfHostedAuthChanges,
 } from "./lib/services/common/self-hosted-auth"
 import { router, type RouterAuthContext } from "./router"
+import { AppErrorBoundary } from "./components/app-error-boundary"
+import { BootSplash } from "./components/boot-splash"
 import { appRegistry } from "./lib/registry"
 import { clearChunkReloadGuard, shouldAttemptChunkReload } from "./lib/chunk-reload"
-import { MapleBrowser } from "@maple-dev/browser"
-import { ingestUrl } from "./lib/services/common/ingest-url"
+import { initPerfVitals } from "./lib/perf-vitals"
 import "./styles.css"
 
-// Browser session replay + tracing for the dashboard itself. The effect-sdk
-// client tracer already instruments every Effect HTTP request and feeds its
-// trace ids into the replay session sink, so auto fetch instrumentation is OFF
-// (`instrumentFetch: false`) — otherwise it would attach redundant raw network
-// spans to "Correlated traces" instead of the real Effect/backend traces.
-// Gated on the ingest key alone: present in dev (full sampling) and in prod
-// builds where VITE_MAPLE_INGEST_KEY is set. Prod self-recording is sampled
-// down to keep the self-observability ingest loop manageable.
-const replayIngestKey = import.meta.env.VITE_MAPLE_INGEST_KEY?.trim()
-if (replayIngestKey) {
-	MapleBrowser.init({
-		ingestKey: replayIngestKey,
-		serviceName: "maple-web",
-		serviceNamespace: "client",
-		serviceVersion: import.meta.env.VITE_COMMIT_SHA?.trim() || undefined,
-		endpoint: ingestUrl,
-		environment: import.meta.env.MODE,
-		tracing: { enabled: true, instrumentFetch: false },
-		// Temporarily recording 100% in prod to verify the replay pipeline
-		// end-to-end (only ~3 sessions/day, so 10% sampling captured nothing).
-		// Dial back to a fractional prod rate once a replay is confirmed landing.
-		replay: { enabled: true, sampleRate: 1 },
-	})
-}
+// Client telemetry for the dashboard itself comes from the effect-sdk client
+// alone (see lib/services/common/otel-layer.ts): it instruments every Effect
+// HTTP request, stamps `session.id` from its own bundled browser session, and
+// records the rrweb session replay via the SDK's built-in replay engine
+// (lazy-loaded chunk, on by default) — no `@maple-dev/browser` needed.
 
 window.addEventListener("vite:preloadError", (event) => {
 	if (shouldAttemptChunkReload()) {
@@ -53,6 +35,10 @@ window.addEventListener("vite:preloadError", (event) => {
 window.addEventListener("load", () => {
 	clearChunkReloadGuard()
 })
+
+// Web Vitals + long-frame RUM for the dashboard itself (prod only) — the
+// signal that makes frontend lag/freeze regressions visible in Maple.
+initPerfVitals()
 
 const root = document.getElementById("app")
 
@@ -68,83 +54,16 @@ if (import.meta.env.DEV && isClerkAuthEnabled && !clerkPublishableKey) {
 	throw new Error("VITE_CLERK_PUBLISHABLE_KEY is required when VITE_MAPLE_AUTH_MODE=clerk")
 }
 
-/**
- * Intercept fetch for Autumn API calls to inject the Clerk bearer token.
- *
- * Autumn SDK v1 removed the `getBearerToken` provider prop and doesn't expose
- * any other extension point for custom auth headers. The SDK's internal client
- * calls `window.fetch` directly, so this interceptor is the only way to attach
- * the Clerk JWT without forking the SDK.
- */
-function useAutumnFetchAuth() {
-	const { getToken } = useAuth()
-	const getTokenRef = useRef(getToken)
-	getTokenRef.current = getToken
-
-	useEffect(() => {
-		const original = window.fetch.bind(window)
-		window.fetch = async (input, init) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
-			if (url.includes("/api/autumn/")) {
-				// getToken() can transiently return null (token still settling right
-				// after sign-in / org creation) or reject; either way, don't reject the
-				// autumn fetch — fall through unauthenticated. React Query retries the
-				// listPlans query, and the backend serves the plan catalog tenant-less.
-				let token: string | null = null
-				try {
-					token = await getTokenRef.current()
-				} catch {
-					token = null
-				}
-				if (token) {
-					const headers = new Headers(init?.headers)
-					headers.set("Authorization", `Bearer ${token}`)
-					return original(input, { ...init, headers })
-				}
-			}
-			return original(input, init)
-		}
-		return () => {
-			window.fetch = original
-		}
-	}, [])
-}
-
-/**
- * Tag the self-recorded replay session with the signed-in Clerk user id once
- * Clerk reports one. `MapleBrowser.init` runs at module load (before Clerk),
- * so the session starts anonymous; `identify` is a no-op when replay isn't
- * active. Syncs to an external system (the SDK), like the other auth bridges.
- */
-function MapleIdentify() {
-	const { isSignedIn, userId } = useAuth()
-	useEffect(() => {
-		if (isSignedIn && userId) MapleBrowser.identify(userId)
-	}, [isSignedIn, userId])
-	return null
-}
-
-function AutumnProviderWithClerk({ children }: { children: React.ReactNode }) {
-	useAutumnFetchAuth()
-
-	return <AutumnProvider backendUrl={apiBaseUrl}>{children}</AutumnProvider>
-}
-
-class AutumnErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean }> {
-	state = { hasError: false }
-	static getDerivedStateFromError() {
-		return { hasError: true }
-	}
-	componentDidCatch(error: Error) {
-		console.error("[Autumn] Provider error, bypassing billing:", error)
-	}
-	render() {
-		return this.props.children
-	}
-}
-
 const AUTH_SETTLE_TIMEOUT_MS = 2000
-const PUBLIC_PATHS = ["/sign-in", "/sign-up", "/org-required", "/service-map-bench"]
+const PUBLIC_PATHS = [
+	"/sign-in",
+	"/sign-up",
+	"/org-required",
+	"/service-map-bench",
+	"/service-detail-bench",
+	"/logs-bench",
+	"/overview-bench",
+]
 
 /**
  * Wait for Clerk's auth state to settle before rendering the router.
@@ -191,6 +110,14 @@ function useClerkAuthSettled() {
 	return { settled, isSignedIn, orgId }
 }
 
+// Memoized so ClerkInnerApp's rerenders (one per Clerk-internal emit — session
+// touches, token refreshes) stop here: rerendering EffectRouterProvider
+// rerenders the entire match tree, so without this every Clerk emit was a
+// full-app render.
+const RouterShell = memo(function RouterShell({ context }: { context: { auth: RouterAuthContext } }) {
+	return <EffectRouterProvider router={router} registry={appRegistry} context={context} />
+})
+
 function ClerkInnerApp() {
 	const { settled, isSignedIn, orgId } = useClerkAuthSettled()
 	const isRouterMountedRef = useRef(false)
@@ -206,15 +133,14 @@ function ClerkInnerApp() {
 		router.invalidate()
 	}, [settled, isSignedIn, orgId])
 
-	if (!settled) return null
+	// Stable identity across Clerk session touches that don't change
+	// sign-in/org, so EffectRouterProvider doesn't see a new context prop on
+	// every Clerk-internal update.
+	const context = useMemo(() => ({ auth: { isAuthenticated: !!isSignedIn, orgId } }), [isSignedIn, orgId])
 
-	return (
-		<EffectRouterProvider
-			router={router}
-			registry={appRegistry}
-			context={{ auth: { isAuthenticated: !!isSignedIn, orgId } }}
-		/>
-	)
+	if (!settled) return <BootSplash />
+
+	return <RouterShell context={context} />
 }
 
 function SelfHostedInnerApp() {
@@ -239,11 +165,13 @@ function SelfHostedInnerApp() {
 		router.invalidate()
 	}, [auth])
 
-	if (!auth) {
-		return null
+	const context = useMemo(() => (auth ? { auth } : null), [auth])
+
+	if (!context) {
+		return <BootSplash />
 	}
 
-	return <EffectRouterProvider router={router} registry={appRegistry} context={{ auth }} />
+	return <RouterShell context={context} />
 }
 
 const app = isClerkAuthEnabled ? (
@@ -251,18 +179,30 @@ const app = isClerkAuthEnabled ? (
 		publishableKey={clerkPublishableKey}
 		signInUrl={clerkSignInUrl}
 		signUpUrl={clerkSignUpUrl}
+		signUpFallbackRedirectUrl="/quick-start"
 		afterSignOutUrl={clerkSignInUrl}
 	>
 		<ClerkAuthBridge />
-		<MapleIdentify />
-		<AutumnErrorBoundary>
-			<AutumnProviderWithClerk>
-				<ClerkInnerApp />
-			</AutumnProviderWithClerk>
-		</AutumnErrorBoundary>
+		<ClerkInnerApp />
 	</ClerkProvider>
 ) : (
 	<SelfHostedInnerApp />
 )
 
-ReactDOM.createRoot(root).render(<StrictMode>{app}</StrictMode>)
+const renderApp = () => {
+	ReactDOM.createRoot(root).render(
+		<StrictMode>
+			<AppErrorBoundary>{app}</AppErrorBoundary>
+		</StrictMode>,
+	)
+}
+
+// All deployed environments share the `maple.dev` parent domain but not the
+// same Clerk instance; purge the other instances' parent-domain cookies
+// BEFORE ClerkJS reads them, or it handshakes against the wrong instance and
+// intermittently 403s (see clerk-cookie-guard.ts). The purge never rejects.
+if (isClerkAuthEnabled && clerkPublishableKey) {
+	void purgeForeignClerkCookies(clerkPublishableKey).then(renderApp)
+} else {
+	renderApp()
+}

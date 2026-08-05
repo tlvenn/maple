@@ -1,7 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
+import { format } from "oxfmt"
 import { emitJsonPathSpec } from "../packages/domain/src/clickhouse/ddl-emitter"
+import { clickHouseSchemaVersion } from "../packages/domain/src/clickhouse/migrations"
+import { projectRevision as clickHouseProjectRevision } from "../packages/domain/src/generated/clickhouse-schema"
 import { buildTinybirdProjectManifest } from "../packages/domain/src/tinybird/project-manifest"
 
 // Datasources the local OTLP ingest path actually writes. session_* (replay
@@ -16,11 +19,21 @@ const OTLP_DATASOURCES = [
 	"metrics_exponential_histogram",
 ] as const
 
+const INGEST_DATASOURCES = [
+	...OTLP_DATASOURCES,
+	"session_replays",
+	"session_replay_events",
+	"session_events",
+] as const
+
 // Replaced by the Rust binary with the pinned, escaped org-id string literal.
 const ORG_PLACEHOLDER = "__ORG__"
 
-const outputPath = fileURLToPath(
+const localOutputPath = fileURLToPath(
 	new URL("../apps/cli/src/server/schema/local-inserts.json", import.meta.url),
+)
+const rustOutputPath = fileURLToPath(
+	new URL("../apps/ingest/src/clickhouse_insert_mappings.rs", import.meta.url),
 )
 const checkMode = process.argv.includes("--check")
 
@@ -34,47 +47,95 @@ interface DatasourceMapping {
 const manifest = await buildTinybirdProjectManifest()
 const byName = new Map(manifest.datasources.map((ds) => [ds.name, ds]))
 
-const datasources: Record<string, DatasourceMapping> = {}
+const localDatasources: Record<string, DatasourceMapping> = {}
 for (const name of OTLP_DATASOURCES) {
 	const ds = byName.get(name)
 	if (!ds) {
 		throw new Error(`OTLP datasource "${name}" not found in Tinybird manifest`)
 	}
-	datasources[name] = buildMapping(name, emitJsonPathSpec(ds))
+	localDatasources[name] = buildMapping(name, emitJsonPathSpec(ds))
 }
 
-const rendered = `${JSON.stringify(
-	{ projectRevision: manifest.projectRevision, orgPlaceholder: ORG_PLACEHOLDER, datasources },
+const ingestDatasources: Record<string, DatasourceMapping> = {}
+for (const name of INGEST_DATASOURCES) {
+	const ds = byName.get(name)
+	if (!ds) {
+		throw new Error(`ingest datasource "${name}" not found in Tinybird manifest`)
+	}
+	ingestDatasources[name] = buildMapping(name, emitJsonPathSpec(ds))
+}
+
+const renderedLocalSource = `${JSON.stringify(
+	{
+		projectRevision: clickHouseProjectRevision,
+		orgPlaceholder: ORG_PLACEHOLDER,
+		datasources: localDatasources,
+	},
 	null,
 	2,
 )}\n`
+const renderedLocalResult = await format(localOutputPath, renderedLocalSource, {
+	printWidth: 110,
+	tabWidth: 4,
+	useTabs: true,
+})
+if (renderedLocalResult.errors.length > 0) {
+	throw new Error(
+		`Failed to format generated local insert mappings: ${renderedLocalResult.errors[0]!.message}`,
+	)
+}
+const renderedLocal = renderedLocalResult.code
 
-let existing = ""
+const renderedRust = renderRustMappings(clickHouseProjectRevision, ingestDatasources)
+
+let existingLocal = ""
 try {
-	existing = readFileSync(outputPath, "utf8")
+	existingLocal = readFileSync(localOutputPath, "utf8")
 } catch {
-	existing = ""
+	existingLocal = ""
+}
+
+let existingRust = ""
+try {
+	existingRust = readFileSync(rustOutputPath, "utf8")
+} catch {
+	existingRust = ""
 }
 
 if (checkMode) {
-	if (existing !== rendered) {
+	let ok = true
+	if (existingLocal !== renderedLocal) {
 		console.error("local-inserts.json is out of date. Run `bun run clickhouse:schema`.")
+		ok = false
+	}
+	if (existingRust !== renderedRust) {
+		console.error("clickhouse_insert_mappings.rs is out of date. Run `bun run clickhouse:schema`.")
+		ok = false
+	}
+	if (!ok) {
 		process.exit(1)
 	}
 	console.log(
-		`local-inserts.json is up to date (${manifest.projectRevision}, ${OTLP_DATASOURCES.length} datasources).`,
+		`ClickHouse insert mappings are up to date (${clickHouseProjectRevision}, ${OTLP_DATASOURCES.length} local datasources, ${INGEST_DATASOURCES.length} ingest datasources).`,
 	)
 } else {
-	mkdirSync(dirname(outputPath), { recursive: true })
-	writeFileSync(outputPath, rendered)
+	mkdirSync(dirname(localOutputPath), { recursive: true })
+	writeFileSync(localOutputPath, renderedLocal)
+	mkdirSync(dirname(rustOutputPath), { recursive: true })
+	writeFileSync(rustOutputPath, renderedRust)
 	console.log(
-		`Wrote local-inserts.json (${manifest.projectRevision}, ${OTLP_DATASOURCES.length} datasources) to ${outputPath}.`,
+		`Wrote ClickHouse insert mappings (${clickHouseProjectRevision}, ${OTLP_DATASOURCES.length} local datasources, ${INGEST_DATASOURCES.length} ingest datasources).`,
 	)
 }
 
 function buildMapping(
 	table: string,
-	spec: ReadonlyArray<{ column: string; type: string; jsonPath: string | null }>,
+	spec: ReadonlyArray<{
+		column: string
+		type: string
+		jsonPath: string | null
+		hasDefaultExpression: boolean
+	}>,
 ): DatasourceMapping {
 	const columns: string[] = []
 	const selects: string[] = []
@@ -86,17 +147,17 @@ function buildMapping(
 	// the input schema only.
 	const seenLeaves = new Set<string>()
 
-	for (const { column, type, jsonPath } of spec) {
+	for (const { column, type, jsonPath, hasDefaultExpression } of spec) {
 		if (column === "OrgId") {
 			// Single-tenant local mode pins OrgId; never extracted from JSON.
 			columns.push(column)
 			selects.push(ORG_PLACEHOLDER)
 			continue
 		}
-		if (jsonPath === null || jsonPath === `$.${column}`) {
-			// No JSON path, or a PascalCase-identity path (a computed DEFAULT/
-			// MATERIALIZED column the gateway never emits, e.g. SampleRate,
-			// IsEntryPoint). Omit so the table's DEFAULT expression computes it.
+		const isComputedIdentityPath = jsonPath === `$.${column}` || jsonPath === `$.${column}[:]`
+		if (jsonPath === null || (hasDefaultExpression && isComputedIdentityPath)) {
+			// No JSON path, or a computed DEFAULT column the gateway never emits.
+			// Omit it so ClickHouse/Tinybird computes the default expression.
 			continue
 		}
 		const leaf = jsonLeaf(table, column, jsonPath)
@@ -121,4 +182,60 @@ function jsonLeaf(table: string, column: string, jsonPath: string): string {
 		)
 	}
 	return match[1] as string
+}
+
+function renderRustMappings(revision: string, datasources: Record<string, DatasourceMapping>): string {
+	const entries = Object.entries(datasources)
+	const lines: string[] = [
+		"// This file is generated by scripts/generate-clickhouse-insert-mappings.ts",
+		"// Do not edit manually.",
+		"",
+		`pub const PROJECT_REVISION: &str = ${rustString(revision)};`,
+		`// Gate for BYO-ClickHouse ingest readiness — the migration version, NOT the`,
+		`// Tinybird-coupled PROJECT_REVISION. Compared against`,
+		`// org_clickhouse_settings.schema_version. See @maple/domain/clickhouse`,
+		`// clickHouseSchemaVersion.`,
+		`pub const SCHEMA_VERSION: &str = ${rustString(clickHouseSchemaVersion)};`,
+		`pub const ORG_PLACEHOLDER: &str = ${rustString(ORG_PLACEHOLDER)};`,
+		"",
+		"#[derive(Debug)]",
+		"pub struct InsertMapping {",
+		"    pub datasource: &'static str,",
+		"    pub table: &'static str,",
+		"    pub columns: &'static [&'static str],",
+		"    pub selects: &'static [&'static str],",
+		"    pub input_schema: &'static str,",
+		"}",
+		"",
+		"pub const DATASOURCES: &[InsertMapping] = &[",
+	]
+	for (const [datasource, mapping] of entries) {
+		lines.push("    InsertMapping {")
+		lines.push(`        datasource: ${rustString(datasource)},`)
+		lines.push(`        table: ${rustString(mapping.table)},`)
+		lines.push(`        columns: ${rustStringArray(mapping.columns)},`)
+		lines.push(`        selects: ${rustStringArray(mapping.selects)},`)
+		lines.push(`        input_schema: ${rustString(mapping.inputSchema)},`)
+		lines.push("    },")
+	}
+	lines.push("];")
+	lines.push("")
+	lines.push("pub fn mapping_for(datasource: &str) -> Option<&'static InsertMapping> {")
+	lines.push("    match datasource {")
+	entries.forEach(([datasource], index) => {
+		lines.push(`        ${rustString(datasource)} => Some(&DATASOURCES[${index}]),`)
+	})
+	lines.push("        _ => None,")
+	lines.push("    }")
+	lines.push("}")
+	lines.push("")
+	return `${lines.join("\n")}\n`
+}
+
+function rustString(value: string): string {
+	return JSON.stringify(value)
+}
+
+function rustStringArray(values: ReadonlyArray<string>): string {
+	return `&[${values.map(rustString).join(", ")}]`
 }

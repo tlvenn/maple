@@ -1,5 +1,7 @@
-import { Result } from "@/lib/effect-atom"
+import { formatErrorRate, formatNumber } from "@maple/ui/lib/format"
+import { Result, useAtomRefresh } from "@/lib/effect-atom"
 import { CircleWarningIcon, CirclePercentageIcon, ServerIcon, PulseIcon } from "@/components/icons"
+import { ErrorState } from "@/components/common/error-state"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@maple/ui/components/ui/card"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
@@ -7,33 +9,14 @@ import { type GetErrorsSummaryInput } from "@/api/warehouse/errors"
 import { getErrorsSummaryResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 import { useRefreshableAtomValue } from "@/hooks/use-refreshable-atom-value"
 
-function formatNumber(num: number): string {
-	if (num >= 1_000_000) {
-		return `${(num / 1_000_000).toFixed(1)}M`
-	}
-	if (num >= 1_000) {
-		return `${(num / 1_000).toFixed(1)}K`
-	}
-	return num.toLocaleString()
-}
-
-function formatPercentage(rate: number): string {
-	const pct = rate * 100
-	if (pct < 0.01) {
-		return "0%"
-	}
-	if (pct < 1) {
-		return `${pct.toFixed(2)}%`
-	}
-	return `${pct.toFixed(1)}%`
-}
-
 interface ErrorsSummaryCardsProps {
 	filters: GetErrorsSummaryInput
 }
 
 export function ErrorsSummaryCards({ filters }: ErrorsSummaryCardsProps) {
-	const summaryResult = useRefreshableAtomValue(getErrorsSummaryResultAtom({ data: filters }))
+	const summaryAtom = getErrorsSummaryResultAtom({ data: filters })
+	const summaryResult = useRefreshableAtomValue(summaryAtom)
+	const refreshSummary = useAtomRefresh(summaryAtom)
 
 	return Result.builder(summaryResult)
 		.onInitial(() => (
@@ -52,25 +35,13 @@ export function ErrorsSummaryCards({ filters }: ErrorsSummaryCardsProps) {
 				))}
 			</div>
 		))
-		.onError(() => (
-			<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-				{[
-					{ title: "Total Errors", icon: CircleWarningIcon },
-					{ title: "Error Rate", icon: CirclePercentageIcon },
-					{ title: "Affected Services", icon: ServerIcon },
-					{ title: "Affected Traces", icon: PulseIcon },
-				].map((card) => (
-					<Card key={card.title}>
-						<CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
-							<CardTitle className="text-sm font-medium">{card.title}</CardTitle>
-							<card.icon size={16} className="text-muted-foreground" />
-						</CardHeader>
-						<CardContent>
-							<div className="text-sm text-muted-foreground">Unable to load</div>
-						</CardContent>
-					</Card>
-				))}
-			</div>
+		.onError((error) => (
+			<ErrorState
+				error={error}
+				title="Couldn't load error metrics"
+				onRetry={refreshSummary}
+				variant="row"
+			/>
 		))
 		.onSuccess((response, result) => {
 			const summary = response.data
@@ -85,7 +56,7 @@ export function ErrorsSummaryCards({ filters }: ErrorsSummaryCardsProps) {
 				{
 					title: "Error Rate",
 					value: summary?.errorRate ?? 0,
-					format: formatPercentage,
+					format: formatErrorRate,
 					icon: CirclePercentageIcon,
 					description: "Errors / total spans",
 				},

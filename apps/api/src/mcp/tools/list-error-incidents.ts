@@ -1,9 +1,9 @@
 import { McpQueryError, optionalStringParam, validationError, type McpToolRegistrar } from "./types"
-import { formatTable } from "../lib/format"
+import { formatTable } from "@/mcp/lib/format"
 import { Effect, Option, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-warehouse"
-import { ErrorsService } from "@/services/ErrorsService"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { ErrorsService } from "@/services/errors/ErrorsService"
 import { ErrorIssueId } from "@maple/domain/http"
 
 const decodeIssueId = Schema.decodeUnknownOption(ErrorIssueId)
@@ -42,7 +42,7 @@ export function registerListErrorIncidentsTool(server: McpToolRegistrar) {
 							(error) =>
 								new McpQueryError({
 									message: error.message,
-									pipe: "list_error_incidents",
+									pipeName: "list_error_incidents",
 									cause: error,
 								}),
 						),
@@ -52,7 +52,7 @@ export function registerListErrorIncidentsTool(server: McpToolRegistrar) {
 							(error) =>
 								new McpQueryError({
 									message: error.message,
-									pipe: "list_error_incidents",
+									pipeName: "list_error_incidents",
 									cause: error,
 								}),
 						),

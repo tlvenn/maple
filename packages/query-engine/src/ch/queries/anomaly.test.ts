@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { compileCH } from "../compile"
+import { compileCH } from "@maple-dev/clickhouse-builder"
 import {
 	anomalyErrorSpikeBaselineQuery,
 	anomalyErrorSpikeCurrentQuery,
@@ -131,14 +131,15 @@ describe("anomalyErrorSpikeTimeseriesQuery", () => {
 			...baseParams,
 			fingerprintHash: "12345",
 			deploymentEnv: "prod",
-			bucketSeconds: 1800,
+			bucketSeconds: 300,
 		})
 		expect(sql).toContain("FROM error_events_by_time")
-		expect(sql).toContain("toStartOfInterval(Timestamp, INTERVAL 1800 SECOND)")
-		expect(sql).toContain("toString(FingerprintHash) = '12345'")
+		expect(sql).toContain("toStartOfInterval(Timestamp, INTERVAL 300 SECOND)")
+		expect(sql).toContain("FingerprintHash = toUInt64('12345')")
 		expect(sql).toContain("DeploymentEnv = 'prod'")
 		expect(sql).toContain("OrgId = 'org_1'")
 		expect(sql).toContain("GROUP BY bucket")
 		expect(sql).toContain("ORDER BY bucket ASC")
+		expect(sql).toContain("LIMIT 2500")
 	})
 })

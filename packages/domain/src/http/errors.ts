@@ -1,12 +1,15 @@
 import { HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi"
-import { Schema } from "effect"
+import { Schema, SchemaGetter } from "effect"
 import {
 	ActorId,
 	AlertDestinationId,
 	ErrorIncidentId,
 	ErrorIssueEventId,
 	ErrorIssueId,
+	InvestigationId,
 	IsoDateTimeString,
+	IssueEscalationId,
+	PostgresTransactionId,
 	SpanId,
 	TraceId,
 	UserId,
@@ -31,6 +34,50 @@ export const WorkflowState = Schema.Literals([
 	title: "Workflow State",
 })
 export type WorkflowState = Schema.Schema.Type<typeof WorkflowState>
+
+/**
+ * The legal workflow-state moves. Rows are the "from" state, values the allowed
+ * "to" states.
+ *
+ * Single source of truth on purpose — this used to be copied into
+ * `ErrorsService`, the `transition_error_issue` tool description, and the web's
+ * `StateSelect`, where the three drifted independently and the tool description
+ * was the copy nobody remembered to update.
+ *
+ * `done` is reachable from every actionable state, not just `in_review`. The
+ * narrower rule made sense for code-review-shaped work but not for the issue
+ * hub at large: alert- and integration-kind issues are created in `triage` and
+ * nothing ever advances them through review, so requiring `in_review` first
+ * left them with no way to be retired at all — by a human or by auto-resolve.
+ *
+ * `cancelled` stays terminal, and `done → triage` stays legal so the errors
+ * tick's regression path can reopen a resolved issue when it recurs.
+ */
+export const WORKFLOW_TRANSITIONS: Record<WorkflowState, ReadonlyArray<WorkflowState>> = {
+	triage: ["todo", "in_progress", "done", "cancelled", "wontfix"],
+	todo: ["triage", "in_progress", "done", "cancelled", "wontfix"],
+	in_progress: ["triage", "todo", "in_review", "done", "cancelled", "wontfix"],
+	in_review: ["triage", "in_progress", "done", "cancelled", "wontfix"],
+	done: ["triage", "in_progress", "cancelled", "wontfix"],
+	cancelled: [],
+	wontfix: ["triage", "cancelled"],
+}
+
+/** States from which no further transition is possible. */
+export const TERMINAL_WORKFLOW_STATES: ReadonlySet<WorkflowState> = new Set<WorkflowState>([
+	"done",
+	"cancelled",
+])
+
+/**
+ * Renders the matrix as the prose an LLM tool description needs, so the
+ * description can never drift from the rules the server actually enforces.
+ */
+export const describeWorkflowTransitions = (): string =>
+	Object.entries(WORKFLOW_TRANSITIONS)
+		.filter(([, targets]) => targets.length > 0)
+		.map(([from, targets]) => `${from}→(${targets.join("|")})`)
+		.join("; ")
 
 export const ActorType = Schema.Literals(["user", "agent"]).annotate({
 	identifier: "@maple/ActorType",
@@ -63,9 +110,11 @@ export type IssueSeveritySource = Schema.Schema.Type<typeof IssueSeveritySource>
 /**
  * What kind of signal backs the issue. "error" issues are fingerprint groups
  * from the errors tick; "alert" issues are created when an alert incident
- * opens (their fingerprintHash is the synthetic `alert:{ruleId}:{groupKey}`).
+ * opens (their fingerprintHash is the synthetic `alert:{ruleId}:{groupKey}`);
+ * "integration" issues come from third-party webhooks (e.g. PlanetScale
+ * branch.out_of_memory — fingerprint `planetscale:{database}:{event}`).
  */
-export const IssueKind = Schema.Literals(["error", "alert"]).annotate({
+export const IssueKind = Schema.Literals(["error", "alert", "integration"]).annotate({
 	identifier: "@maple/IssueKind",
 	title: "Issue Kind",
 })
@@ -153,11 +202,18 @@ export class ErrorIssueDocument extends Schema.Class<ErrorIssueDocument>("ErrorI
 	snoozeUntil: Schema.NullOr(IsoDateTimeString),
 	archivedAt: Schema.NullOr(IsoDateTimeString),
 	hasOpenIncident: Schema.Boolean,
+	// Postgres txid of the write, present only on mutation responses so the web's
+	// ElectricSQL error_issues collection can resolve optimistic state on the exact
+	// synced transaction. Absent on list/read responses.
+	txid: Schema.optionalKey(PostgresTransactionId),
 }) {}
 
 export class ErrorIssuesListResponse extends Schema.Class<ErrorIssuesListResponse>("ErrorIssuesListResponse")(
 	{
 		issues: Schema.Array(ErrorIssueDocument),
+		// Opaque cursor for the next page (pass back as `?cursor=`); absent on
+		// the last page.
+		nextCursor: Schema.optionalKey(Schema.String),
 	},
 ) {}
 
@@ -359,7 +415,45 @@ export class IssueEscalationPolicyUpsertRequest extends Schema.Class<IssueEscala
 // Query schemas
 // ---------------------------------------------------------------------------
 
+/**
+ * Keyset cursor for `listIssues`: the sort key of the last row of the previous
+ * page (lastSeenAt epoch-ms, id as tiebreaker). The wire form is opaque
+ * base64url JSON, and the whole codec is declarative Schema — a tampered or
+ * malformed cursor fails decode at the HTTP boundary instead of reaching the
+ * query.
+ */
+export const IssueListCursorFields = Schema.Struct({
+	lastSeenAt: Schema.Number,
+	id: ErrorIssueId,
+}).annotate({ identifier: "@maple/IssueListCursorFields" })
+export type IssueListCursorFields = Schema.Schema.Type<typeof IssueListCursorFields>
+
+export const IssueListCursor = Schema.String.pipe(
+	Schema.decodeTo(Schema.String, {
+		decode: SchemaGetter.decodeBase64UrlString(),
+		encode: SchemaGetter.encodeBase64Url(),
+	}),
+	Schema.decodeTo(Schema.fromJsonString(IssueListCursorFields)),
+).annotate({ identifier: "@maple/IssueListCursor", title: "Issue List Cursor" })
+
+/** Alternate keyset used by the v2 urgency-sorted issue list. */
+export const IssueSeverityListCursorFields = Schema.Struct({
+	severityRank: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 0, maximum: 4 })),
+	lastSeenAt: Schema.Number,
+	id: ErrorIssueId,
+}).annotate({ identifier: "@maple/IssueSeverityListCursorFields" })
+export type IssueSeverityListCursorFields = Schema.Schema.Type<typeof IssueSeverityListCursorFields>
+
+export const IssueSeverityListCursor = Schema.String.pipe(
+	Schema.decodeTo(Schema.String, {
+		decode: SchemaGetter.decodeBase64UrlString(),
+		encode: SchemaGetter.encodeBase64Url(),
+	}),
+	Schema.decodeTo(Schema.fromJsonString(IssueSeverityListCursorFields)),
+).annotate({ identifier: "@maple/IssueSeverityListCursor", title: "Issue Severity List Cursor" })
+
 const IssueListQuery = Schema.Struct({
+	cursor: Schema.optional(IssueListCursor),
 	workflowState: Schema.optional(WorkflowState),
 	severity: Schema.optional(Schema.Union([IssueSeverity, Schema.Literal("unset")])),
 	kind: Schema.optional(IssueKind),
@@ -403,6 +497,66 @@ export class ErrorPersistenceError extends Schema.TaggedErrorClass<ErrorPersiste
 	},
 	{ httpApiStatus: 503 },
 ) {}
+
+export const EscalationSkipReason = Schema.Literals([
+	"policy_disabled",
+	"no_destinations_for_severity",
+	"below_min_confidence",
+	"no_enabled_destinations",
+	"issue_missing",
+]).annotate({
+	identifier: "@maple/EscalationSkipReason",
+	title: "Escalation Skip Reason",
+})
+export type EscalationSkipReason = Schema.Schema.Type<typeof EscalationSkipReason>
+
+export class EscalationPolicyEvaluationRequest extends Schema.Class<EscalationPolicyEvaluationRequest>(
+	"EscalationPolicyEvaluationRequest",
+)({
+	severity: IssueSeverity,
+	source: Schema.Literals(["ai", "manual"]),
+	confidence: Schema.optionalKey(EscalationConfidence),
+}) {}
+
+export class EscalationPolicyEvaluationDocument extends Schema.Class<EscalationPolicyEvaluationDocument>(
+	"EscalationPolicyEvaluationDocument",
+)({
+	outcome: Schema.Literals(["route", "skip"]),
+	destinationIds: Schema.Array(AlertDestinationId),
+	skipReason: Schema.NullOr(EscalationSkipReason),
+}) {}
+
+export class EscalationDestinationOutcome extends Schema.Class<EscalationDestinationOutcome>(
+	"EscalationDestinationOutcome",
+)({
+	destinationId: AlertDestinationId,
+	destinationName: Schema.NullOr(Schema.String),
+	status: Schema.Literals(["delivered", "failed", "disabled", "missing"]),
+	error: Schema.NullOr(Schema.String),
+}) {}
+
+export class IssueEscalationAttemptDocument extends Schema.Class<IssueEscalationAttemptDocument>(
+	"IssueEscalationAttemptDocument",
+)({
+	id: IssueEscalationId,
+	issueId: ErrorIssueId,
+	investigationId: Schema.NullOr(InvestigationId),
+	severity: IssueSeverity,
+	source: Schema.Literals(["ai", "manual"]),
+	reason: Schema.Literals(["severity_set", "severity_escalated"]),
+	status: Schema.Literals(["queued", "sent", "skipped", "failed"]),
+	attempts: Schema.Number,
+	skipReason: Schema.NullOr(EscalationSkipReason),
+	deliveries: Schema.Array(EscalationDestinationOutcome),
+	createdAt: IsoDateTimeString,
+	processedAt: Schema.NullOr(IsoDateTimeString),
+}) {}
+
+export class IssueEscalationAttemptsResponse extends Schema.Class<IssueEscalationAttemptsResponse>(
+	"IssueEscalationAttemptsResponse",
+)({
+	attempts: Schema.Array(IssueEscalationAttemptDocument),
+}) {}
 
 export class ErrorValidationError extends Schema.TaggedErrorClass<ErrorValidationError>()(
 	"@maple/http/errors/ErrorValidationError",
@@ -626,6 +780,34 @@ export class ErrorsApiGroup extends HttpApiGroup.make("errors")
 			payload: IssueEscalationPolicyUpsertRequest,
 			success: IssueEscalationPolicyDocument,
 			error: [ErrorForbiddenError, ErrorPersistenceError, ErrorValidationError],
+		}),
+	)
+	.add(
+		HttpApiEndpoint.post("evaluateEscalationPolicy", "/escalation-policy/evaluate", {
+			payload: EscalationPolicyEvaluationRequest,
+			success: EscalationPolicyEvaluationDocument,
+			error: ErrorPersistenceError,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.get("listIssueEscalations", "/issues/:issueId/escalations", {
+			params: { issueId: ErrorIssueId },
+			success: IssueEscalationAttemptsResponse,
+			error: ErrorPersistenceError,
+		}),
+	)
+	.add(
+		HttpApiEndpoint.get("listRecentEscalations", "/escalations/recent", {
+			query: {
+				limit: Schema.optional(
+					Schema.NumberFromString.check(
+						Schema.isInt(),
+						Schema.isBetween({ minimum: 1, maximum: 100 }),
+					),
+				),
+			},
+			success: IssueEscalationAttemptsResponse,
+			error: ErrorPersistenceError,
 		}),
 	)
 	.prefix("/api/errors")

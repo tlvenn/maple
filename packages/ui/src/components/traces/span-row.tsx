@@ -1,14 +1,17 @@
 import * as React from "react"
-import { ChevronRightIcon, ChevronDownIcon } from "../icons"
+import { ChevronRightIcon, ChevronDownIcon, GlobeIcon } from "../icons"
 
 import { Badge } from "../ui/badge"
 import { Button } from "../ui/button"
 import { cn } from "../../lib/utils"
 import { formatDuration } from "../../lib/format"
-import { getServiceLegendColor } from "../../lib/colors"
+import { getServiceColor } from "../../lib/colors"
 import { getCacheInfo, cacheResultStyles } from "../../lib/cache"
 import { getHttpInfo, HTTP_METHOD_COLORS } from "../../lib/http"
+import { getCloudPlatform, outcomeBadgeStyle } from "../../lib/cloud-platforms"
+import { getSpanKindLabel, getSpanStatusBadgeClass } from "../../lib/span-kind"
 import { PixelDurationBar } from "./pixel-duration-bar"
+import { ServiceDot } from "../service-dot"
 import { countDescendants } from "./auto-collapse"
 import type { SpanNode } from "../../lib/types"
 
@@ -16,32 +19,16 @@ interface SpanRowProps {
 	span: SpanNode
 	totalDurationMs: number
 	traceStartTime: string
-	services: string[]
 	expanded: boolean
 	onToggle: (span: SpanNode) => void
 	isSelected?: boolean
 	onSelect?: (span: SpanNode) => void
 }
 
-const statusStyles: Record<string, string> = {
-	Ok: "bg-severity-info/15 text-severity-info border-severity-info/30",
-	Error: "bg-severity-error/15 text-severity-error border-severity-error/30",
-	Unset: "bg-muted text-muted-foreground border-border",
-}
-
-const kindLabels: Record<string, string> = {
-	SPAN_KIND_SERVER: "Server",
-	SPAN_KIND_CLIENT: "Client",
-	SPAN_KIND_PRODUCER: "Producer",
-	SPAN_KIND_CONSUMER: "Consumer",
-	SPAN_KIND_INTERNAL: "Internal",
-}
-
 function SpanRowImpl({
 	span,
 	totalDurationMs,
 	traceStartTime,
-	services,
 	expanded,
 	onToggle,
 	isSelected,
@@ -53,11 +40,11 @@ function SpanRowImpl({
 		return (
 			<div
 				className={cn(
-					"group flex items-center border-b border-dashed py-1.5 px-2 bg-muted/30",
+					"@container/row group flex items-center border-b border-dashed py-1.5 px-2 bg-muted/30",
 					isSelected && "bg-primary/5 border-l-2 border-l-primary",
 				)}
 			>
-				<div className="flex items-center gap-2 flex-1 min-w-0">
+				<div className="flex items-center gap-2 flex-1 min-w-0 overflow-hidden">
 					{span.depth > 0 && <div style={{ width: `${span.depth * 24}px` }} className="shrink-0" />}
 
 					{hasChildren ? (
@@ -93,7 +80,7 @@ function SpanRowImpl({
 				</div>
 
 				<div className="flex items-center gap-2 shrink-0 ml-2">
-					<div className="w-48" />
+					<div className="hidden w-48 @min-[560px]/row:block" />
 					<span
 						className="w-16 text-right font-mono text-[10px] text-muted-foreground/50 truncate"
 						title={span.spanId}
@@ -116,8 +103,9 @@ function SpanRowImpl({
 
 	const cacheInfo = getCacheInfo(span.spanAttributes)
 	const httpInfo = getHttpInfo(span)
-	const statusStyle = statusStyles[span.statusCode] ?? statusStyles.Unset
-	const kindLabel = kindLabels[span.spanKind] ?? span.spanKind?.replace("SPAN_KIND_", "") ?? "Unknown"
+	const platform = getCloudPlatform(span.spanAttributes)
+	const statusStyle = getSpanStatusBadgeClass(span.statusCode)
+	const kindLabel = getSpanKindLabel(span.spanKind)
 
 	const barColor =
 		httpInfo?.statusCode && httpInfo.statusCode >= 500
@@ -131,7 +119,7 @@ function SpanRowImpl({
 	return (
 		<div
 			className={cn(
-				"group flex items-center border-b py-1.5 hover:bg-muted/50 cursor-pointer px-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+				"@container/row group flex items-center border-b py-1.5 hover:bg-muted/50 cursor-pointer px-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
 				span.statusCode === "Error" && "bg-destructive/5",
 				isSelected && "bg-primary/5 border-l-2 border-l-primary",
 			)}
@@ -146,7 +134,8 @@ function SpanRowImpl({
 			}}
 		>
 			{/* Left section: Toggle + Service + Kind + Span Name (variable width) */}
-			<div className="@container flex items-center gap-2 flex-1 min-w-0">
+			{/* overflow-hidden so the shrink-0 children clip rather than paint over the right section */}
+			<div className="@container flex items-center gap-2 flex-1 min-w-0 overflow-hidden">
 				{/* Indentation spacer based on depth */}
 				{span.depth > 0 && <div style={{ width: `${span.depth * 24}px` }} className="shrink-0" />}
 
@@ -167,13 +156,28 @@ function SpanRowImpl({
 					<div className="w-6 shrink-0" />
 				)}
 
-				<Badge variant="outline" className="shrink-0 font-mono text-[10px] px-1.5">
-					<span style={{ color: getServiceLegendColor(span.serviceName, services) }}>
-						{span.serviceName}
+				<span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px]">
+					{platform && (
+						<platform.Icon
+							size={11}
+							className={cn("shrink-0", platform.accentClassName)}
+							aria-label={platform.label}
+						/>
+					)}
+					<ServiceDot serviceName={span.serviceName} className="size-1.5" />
+					<span style={{ color: getServiceColor(span.serviceName) }}>{span.serviceName}</span>
+					<span className="text-muted-foreground/60">{kindLabel}</span>
+				</span>
+
+				{platform?.edge && (
+					<span
+						className="hidden @min-[600px]:inline-flex items-center gap-1 shrink-0 font-mono text-[10px] text-muted-foreground"
+						title={platform.location ?? undefined}
+					>
+						<GlobeIcon size={10} className="shrink-0" />
+						{platform.edge}
 					</span>
-					<span className="text-muted-foreground">·</span>
-					{kindLabel}
-				</Badge>
+				)}
 
 				{httpInfo ? (
 					<span
@@ -209,11 +213,25 @@ function SpanRowImpl({
 					leftPercent={leftPercent}
 					widthPercent={Math.max(widthPercent, 1)}
 					color={barColor}
+					className="hidden @min-[560px]/row:flex"
 				/>
 
 				<span className="w-16 text-right font-mono text-xs text-muted-foreground">
 					{formatDuration(span.durationMs)}
 				</span>
+
+				{platform?.outcome?.bad && (
+					<Badge
+						variant="outline"
+						className={cn(
+							"text-[10px] justify-center font-medium px-1.5 shrink-0",
+							outcomeBadgeStyle(true),
+						)}
+						title={`${platform.label} outcome`}
+					>
+						{platform.outcome.value}
+					</Badge>
+				)}
 
 				{cacheInfo?.result ? (
 					<Badge

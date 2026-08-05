@@ -7,7 +7,7 @@ The service map at `apps/web/src/routes/service-map.tsx` is built entirely from 
 | Rendered element | Source query | Required attribute | Lives on |
 |---|---|---|---|
 | Service-to-service edge | `service_map_edges_hourly_mv` | `peer.service` | Span (`Client` or `Producer` kind) |
-| Service-to-DB edge | `service_map_db_edges_hourly_mv` | `db.system` (and `peer.service` for the main edge) | Span |
+| Service-to-DB edge | `service_map_db_edges_hourly_mv` | `db.system.name` (legacy fallback: `db.system`) and `peer.service` | Span |
 | Platform badge (Cloudflare / AWS / Railway / k8s) | `service_platforms_hourly_mv` | `cloud.platform`, `cloud.provider`, optional `faas.name`, optional `k8s.*` | Resource |
 | Runtime icon (node / bun / deno / workerd / rust) | `service_platforms_hourly_mv` | `process.runtime.name` | Resource |
 | SDK badge | `service_platforms_hourly_mv` | `maple.sdk.type` | Resource |
@@ -21,11 +21,11 @@ Every service must publish these on its OTel `Resource`. Skip any of them and th
 
 ### TypeScript (Effect server)
 
-Use `MapleServerSDK` from [lib/effect-sdk/src/server/index.ts](../../../../lib/effect-sdk/src/server/index.ts). Detection lives in [lib/effect-sdk/src/server/platform.ts](../../../../lib/effect-sdk/src/server/platform.ts) — it auto-resolves `cloud.*` / `faas.*` / `process.runtime.name` from `std-env` plus per-platform env vars. No manual setup needed beyond passing `serviceName` and `serviceVersion`.
+Use `MapleServerSDK` from [packages/effect-sdk/src/server/index.ts](../../../../packages/effect-sdk/src/server/index.ts). Detection lives in [packages/effect-sdk/src/server/platform.ts](../../../../packages/effect-sdk/src/server/platform.ts) — it auto-resolves `cloud.*` / `faas.*` / `process.runtime.name` from `std-env` plus per-platform env vars. No manual setup needed beyond passing `serviceName` and `serviceVersion`.
 
 ### TypeScript (Cloudflare Workers)
 
-Use `MapleCloudflareSDK` from [lib/effect-sdk/src/cloudflare/index.ts](../../../../lib/effect-sdk/src/cloudflare/index.ts). Hard-codes `cloud.provider="cloudflare"`, `cloud.platform="cloudflare.workers"`, `process.runtime.name="workerd"`, `maple.sdk.type="cloudflare"`.
+Use `MapleCloudflareSDK` from [packages/effect-sdk/src/cloudflare/index.ts](../../../../packages/effect-sdk/src/cloudflare/index.ts). Hard-codes `cloud.provider="cloudflare"`, `cloud.platform="cloudflare.workers"`, `process.runtime.name="workerd"`, `maple.sdk.type="cloudflare"`.
 
 ### Rust
 
@@ -43,7 +43,7 @@ let resource = build_resource(ResourceConfig {
 });
 ```
 
-The helper sets `process.runtime.name="rust"`, `maple.sdk.type="server"`, dual-emits `deployment.environment(.name)`, and runs the same platform-detection cascade as the TS SDK (Cloudflare → AWS Lambda → Railway → Vercel → Cloud Run → Render → Fly → k8s). Adding a new platform: extend `detect_platform()`, mirror the env-var sources used in `lib/effect-sdk/src/server/platform.ts`.
+The helper sets `process.runtime.name="rust"`, `maple.sdk.type="server"`, dual-emits `deployment.environment(.name)`, and runs the same platform-detection cascade as the TS SDK (Cloudflare → AWS Lambda → Railway → Vercel → Cloud Run → Render → Fly → k8s). Adding a new platform: extend `detect_platform()`, mirror the env-var sources used in `packages/effect-sdk/src/server/platform.ts`.
 
 ### Python (forward-looking)
 
@@ -54,17 +54,17 @@ Mirror the TS detection. Set the same keys with the same values — never invent
 | Call type | Span kind | Required attributes | Notes |
 |---|---|---|---|
 | Outbound HTTP / RPC | `Client` or `Producer` | `peer.service`; optional `server.address`, `http.request.method` | `peer.service` is the **logical** destination, not the host |
-| Database call | any | `db.system` (e.g. `clickhouse`, `tinybird`, `postgres`) and `peer.service` (same value) | Both keys; `db.system` powers the DB-edge query, `peer.service` powers the main edge query |
+| Database call | `Client` or `Producer` | `db.system.name` (e.g. `clickhouse`, `tinybird`, `postgresql`) and `peer.service` | `db.system.name` powers the DB edge; `peer.service` is the logical destination and may differ (for example chDB uses `clickhouse` + `chdb`) |
 | Message bus produce | `Producer` | `messaging.system`, `messaging.destination.name` | |
 
 ### TypeScript
 
 ```typescript
 yield* Effect.annotateCurrentSpan("peer.service", "tinybird")
-yield* Effect.annotateCurrentSpan("db.system", "tinybird")
+yield* Effect.annotateCurrentSpan("db.system.name", "tinybird")
 ```
 
-Canonical example: [apps/api/src/services/WarehouseQueryService.ts](../../../../apps/api/src/services/WarehouseQueryService.ts) `executeSql` — sets both `db.system` and `peer.service` from the resolved warehouse backend.
+Canonical example: [packages/query-engine/src/execution/executor.ts](../../../../packages/query-engine/src/execution/executor.ts) `executeSql` — sets both `db.system.name` and `peer.service` from the resolved warehouse backend.
 
 ### Rust
 
@@ -89,6 +89,7 @@ Keep these names consistent across services to avoid edge fragmentation on the m
 |---|---|
 | `tinybird` | Tinybird hosted warehouse |
 | `clickhouse` | Self-managed ClickHouse warehouse |
+| `chdb` | Embedded chDB behind the local Maple binary |
 | `collector` | Maple ingest's downstream OTLP collector |
 | `cloudflare-logpush` | Cloudflare logpush source |
 | `clerk` | Clerk auth |

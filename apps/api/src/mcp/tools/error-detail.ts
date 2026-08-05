@@ -5,22 +5,24 @@ import {
 	requiredStringParam,
 	type McpToolRegistrar,
 } from "./types"
-import { resolveTenant } from "../lib/query-warehouse"
-import { resolveTimeRange } from "../lib/time"
-import { formatDurationFromMs, truncate } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
-import { toMcpQueryError } from "../lib/map-warehouse-error"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { resolveTimeRange } from "@/mcp/lib/time"
+import { formatDurationFromMs, truncate } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
+import { toMcpQueryError } from "@/mcp/lib/map-warehouse-error"
 import { Array as Arr, Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { errorDetail } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
+import { makeWarehouseExecutorFromTenant } from "@/services/warehouse/WarehouseQueryService"
 
 export function registerErrorDetailTool(server: McpToolRegistrar) {
 	server.tool(
 		"error_detail",
 		"Get sample traces and correlated logs for a specific error, identified by its `fingerprint` (from find_errors or list_error_issues). Optionally include a timeseries to see if the error is getting worse. Use inspect_trace on a trace_id for the full span tree.",
 		Schema.Struct({
-			fingerprint: requiredStringParam("The error FingerprintHash (from find_errors / list_error_issues)"),
+			fingerprint: requiredStringParam(
+				"The error FingerprintHash (from find_errors / list_error_issues)",
+			),
 			start_time: optionalStringParam("Start of time range (YYYY-MM-DD HH:mm:ss)"),
 			end_time: optionalStringParam("End of time range (YYYY-MM-DD HH:mm:ss)"),
 			service: optionalStringParam("Filter by service name"),

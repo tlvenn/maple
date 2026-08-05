@@ -1,29 +1,49 @@
 {
 	"$schema": "https://unpkg.com/knip@6/schema.json",
-	"ignoreWorkspaces": ["apps/ingest", "apps/landing", "apps/mobile"],
-	"ignore": ["**/routeTree.gen.ts", ".context/**", ".deepsec/**", "**/sst-env.d.ts"],
+	"ignoreWorkspaces": ["apps/ingest", "apps/landing", "apps/mobile", "examples/*", "lib/llm"],
+	"ignore": ["**/routeTree.gen.ts", ".context/**", ".deepsec/**"],
+	"ignoreExportsUsedInFile": true,
 	"workspaces": {
 		".": {
-			"entry": ["alchemy.run.ts", "scripts/**/*.ts", "otel/**/*.ts"]
+			"entry": ["alchemy.run.ts", "scripts/**/*.ts"],
+			"ignoreBinaries": ["wrangler", "tb", "pscale"]
 		},
 		"apps/web": {
-			"entry": ["src/routes/**/*.tsx", "src/worker.ts", "alchemy.run.ts"]
+			"entry": [
+				"src/routes/**/*.tsx",
+				"src/worker.ts",
+				"alchemy.run.ts",
+				"src/components/ai-elements/**",
+				"src/components/icons/**",
+				"src/lib/effect-atom.ts"
+			]
 		},
 		"apps/api": {
-			"entry": ["alchemy.run.ts"],
+			"entry": ["alchemy.run.ts", "autumn.config.ts"],
 			"ignoreDependencies": ["cloudflare"]
 		},
 		"apps/alerting": {
 			"entry": ["alchemy.run.ts"]
 		},
-		"apps/chat-agent": {
-			"entry": ["alchemy.run.ts"]
-		},
 		"apps/local-ui": {
 			"entry": ["src/worker.ts", "alchemy.run.ts"]
 		},
+		"apps/cli": {
+			"entry": [
+				"test/probes/*.ts",
+				"test/archive-probe-helpers.ts",
+				"test/merge-injection-probe.ts",
+				"test/native-local-store-migration-fixture.ts",
+				"test/native-reconnect-probe.ts"
+			],
+			"ignoreBinaries": ["duckdb"]
+		},
 		"packages/domain": {
 			"entry": ["scripts/**/*.ts"]
+		},
+		"packages/db": {
+			"entry": ["scripts/**/*.ts"],
+			"ignoreBinaries": ["pscale"]
 		},
 		"packages/email": {
 			"entry": ["src/render-preview.tsx"]
@@ -31,8 +51,11 @@
 		"lib/effect-cloudflare": {
 			"ignoreDependencies": ["cloudflare"]
 		},
-		"apps/cli": {
-			"entry": ["src/bin.ts"]
+		"packages/query-engine": {
+			"entry": ["src/drain/index.ts"]
+		},
+		"packages/browser": {
+			"ignoreDependencies": ["rrweb"]
 		}
 	},
 	"rules": {

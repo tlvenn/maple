@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react"
 import { Link } from "@tanstack/react-router"
 import { Exit } from "effect"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
 import { Schema } from "effect"
 
 import { Result, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { useAlertDestinationsList } from "@/hooks/use-alerts-list"
 import {
 	IssueEscalationPolicyRule,
 	IssueEscalationPolicyUpsertRequest,
@@ -59,9 +60,7 @@ export function EscalationPolicySection({ isAdmin }: { isAdmin: boolean }) {
 	const policyResult = useAtomValue(policyQueryAtom)
 	const refreshPolicy = useAtomRefresh(policyQueryAtom)
 
-	const destinationsQueryAtom = MapleApiAtomClient.query("alerts", "listDestinations", {})
-	const destinationsResult = useAtomValue(destinationsQueryAtom)
-	const refreshDestinations = useAtomRefresh(destinationsQueryAtom)
+	const { result: destinationsResult } = useAlertDestinationsList()
 
 	const upsertMutation = useAtomSet(MapleApiAtomClient.mutation("errors", "upsertEscalationPolicy"), {
 		mode: "promiseExit",
@@ -107,9 +106,9 @@ export function EscalationPolicySection({ isAdmin }: { isAdmin: boolean }) {
 		})
 		setIsSaving(false)
 		if (Exit.isSuccess(result)) {
-			toast.success("Escalation policy saved")
+			toastManager.add({ title: "Escalation policy saved", type: "success" })
 		} else {
-			toast.error("Failed to save escalation policy")
+			toastManager.add({ title: "Failed to save escalation policy", type: "error" })
 		}
 	}
 
@@ -151,15 +150,10 @@ export function EscalationPolicySection({ isAdmin }: { isAdmin: boolean }) {
 				</div>
 
 				{Result.builder(destinationsResult)
+					// Destinations come from the live-synced collection, which only
+					// resolves to `initial` (loading) or `success` — never a failure —
+					// so there is no error/retry branch to render here.
 					.onInitial(() => <Skeleton className="h-24 w-full" />)
-					.onError(() => (
-						<div className="flex items-center justify-between gap-4 py-2 text-sm text-muted-foreground">
-							<span>Failed to load alert destinations.</span>
-							<Button size="sm" variant="outline" onClick={() => refreshDestinations()}>
-								Retry
-							</Button>
-						</div>
-					))
 					.onSuccess((response) => {
 						if (response.destinations.length === 0) {
 							return (
@@ -170,7 +164,7 @@ export function EscalationPolicySection({ isAdmin }: { isAdmin: boolean }) {
 										search={{ tab: "settings" }}
 										className="underline underline-offset-4 hover:text-foreground"
 									>
-										Create one in Alerts settings
+										Create one in Alerts → Destinations
 									</Link>{" "}
 									first.
 								</p>

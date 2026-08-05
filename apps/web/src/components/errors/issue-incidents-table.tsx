@@ -2,7 +2,7 @@ import type { ErrorIncidentDocument } from "@maple/domain/http"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@maple/ui/components/ui/empty"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
 import { cn } from "@maple/ui/lib/utils"
-import { formatRelativeTime } from "@/lib/format"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
 import { normalizeTimestampInput } from "@/lib/timezone-format"
 
 interface IssueIncidentsTableProps {
@@ -80,13 +80,17 @@ export function IssueIncidentsTable({ incidents }: IssueIncidentsTableProps) {
 							</TableCell>
 							<TableCell
 								className="tabular-nums text-muted-foreground"
-								title={new Date(normalizeTimestampInput(incident.firstTriggeredAt)).toLocaleString()}
+								title={new Date(
+									normalizeTimestampInput(incident.firstTriggeredAt),
+								).toLocaleString()}
 							>
 								{formatRelativeTime(incident.firstTriggeredAt)}
 							</TableCell>
 							<TableCell
 								className="tabular-nums"
-								title={new Date(normalizeTimestampInput(incident.lastTriggeredAt)).toLocaleString()}
+								title={new Date(
+									normalizeTimestampInput(incident.lastTriggeredAt),
+								).toLocaleString()}
 							>
 								{formatRelativeTime(incident.lastTriggeredAt)}
 							</TableCell>

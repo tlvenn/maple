@@ -1,8 +1,9 @@
 import { Result, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Exit, Option } from "effect"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 import { formatBackendError } from "@/lib/error-messages"
+import { useIntervalRefresh } from "@/hooks/use-interval-refresh"
 
 import { Button } from "@maple/ui/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@maple/ui/components/ui/card"
@@ -119,12 +120,10 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 	const configured = settings?.configured === true
 	const isBusy = isSaving || isApplying || isRefreshingDiff || isDisabling
 
-	// Poll the background apply run while it's active.
-	useEffect(() => {
-		if (!runActive) return
-		const id = setInterval(() => refreshStatus(), 2000)
-		return () => clearInterval(id)
-	}, [runActive, refreshStatus])
+	// Poll the background apply run while it's active. Ticks pause while the tab is
+	// hidden, so the terminal-transition toast below fires on refocus rather than
+	// in the background — this is a foreground progress indicator.
+	useIntervalRefresh(refreshStatus, { intervalMs: 2_000, enabled: runActive })
 
 	// Toast + refresh the diff on terminal transitions (running → succeeded/failed).
 	const prevApplyStatusRef = useRef<string | null>(null)
@@ -136,9 +135,9 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 		if (status === "succeeded") {
 			refreshSettings()
 			refreshDiff()
-			toast.success("Schema applied")
+			toastManager.add({ title: "Schema applied", type: "success" })
 		} else if (status === "failed") {
-			toast.error(applyStatus?.errorMessage ?? "Schema apply failed")
+			toastManager.add({ title: applyStatus?.errorMessage ?? "Schema apply failed", type: "error" })
 		}
 	}, [applyStatus?.status, applyStatus?.errorMessage, refreshSettings, refreshDiff])
 
@@ -188,10 +187,10 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 			setChPassword("")
 			refreshSettings()
 			refreshDiff()
-			toast.success("ClickHouse connection saved")
+			toastManager.add({ title: "ClickHouse connection saved", type: "success" })
 			return
 		}
-		toast.error(getExitErrorMessage(result, "Failed to save settings"))
+		toastManager.add({ title: getExitErrorMessage(result, "Failed to save settings"), type: "error" })
 	}
 
 	async function handleApply() {
@@ -203,16 +202,19 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 		if (Exit.isSuccess(result)) {
 			refreshStatus()
 			if (result.value.status === "already_running") {
-				toast.info("A schema apply is already in progress")
+				toastManager.add({ title: "A schema apply is already in progress", type: "info" })
 			} else {
-				toast.message("Schema apply started")
+				toastManager.add({ title: "Schema apply started" })
 			}
 			// Hand off to the status poll; keep the button busy until it reports active.
 			setTimeout(() => setIsStarting(false), 1500)
 			return
 		}
 		setIsStarting(false)
-		toast.error(getExitErrorMessage(result, "Failed to start schema apply"))
+		toastManager.add({
+			title: getExitErrorMessage(result, "Failed to start schema apply"),
+			type: "error",
+		})
 	}
 
 	async function handleRefreshDiff() {
@@ -235,10 +237,13 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 			setChPassword("")
 			refreshSettings()
 			refreshDiff()
-			toast.success("BYO ClickHouse disabled")
+			toastManager.add({ title: "BYO ClickHouse disabled", type: "success" })
 			return
 		}
-		toast.error(getExitErrorMessage(result, "Failed to disable BYO ClickHouse"))
+		toastManager.add({
+			title: getExitErrorMessage(result, "Failed to disable BYO ClickHouse"),
+			type: "error",
+		})
 	}
 
 	function toggleDriftRow(name: string) {
@@ -437,7 +442,7 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 													{entry.status === "up_to_date" ? (
 														<CircleCheckIcon
 															size={14}
-															className="text-severity-ok shrink-0"
+															className="text-success shrink-0"
 														/>
 													) : entry.status === "missing" ? (
 														<CircleXmarkIcon
@@ -521,7 +526,9 @@ export function OrgClickHouseSettingsSection({ isAdmin, hasEntitlement }: OrgCli
 									{isApplying ? (
 										<>
 											<LoaderIcon size={12} className="mr-1 animate-spin" />
-											{runActive && applyStatus?.stepsTotal != null && applyStatus?.stepsDone != null
+											{runActive &&
+											applyStatus?.stepsTotal != null &&
+											applyStatus?.stepsDone != null
 												? `Applying… (${applyStatus.stepsDone}/${applyStatus.stepsTotal})`
 												: "Applying…"}
 										</>

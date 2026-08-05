@@ -1,5 +1,4 @@
 import { useState } from "react"
-import { toast } from "sonner"
 
 import {
 	InputGroup,
@@ -7,7 +6,9 @@ import {
 	InputGroupButton,
 	InputGroupInput,
 } from "@maple/ui/components/ui/input-group"
-import { CheckIcon, CopyIcon } from "@/components/icons"
+import { EyeIcon } from "@/components/icons"
+import { CopyButton } from "@maple/ui/components/ui/copy-button"
+import { maskKey } from "@maple/ui/components/ui/copyable-field"
 
 interface ApiKeySecretRevealProps {
 	secret: string
@@ -15,43 +16,33 @@ interface ApiKeySecretRevealProps {
 
 /**
  * Read-only reveal of a freshly minted API key secret, shown once at create/roll
- * time. Shared by the create and roll dialogs so the "copy it now, you won't see
- * it again" UX stays identical.
+ * time. Masked by default behind an eye toggle (same idiom as the ingest key
+ * fields); copy always copies the full secret. Shared by the create and roll
+ * dialogs so the "copy it now, you won't see it again" UX stays identical.
  */
 export function ApiKeySecretReveal({ secret }: ApiKeySecretRevealProps) {
-	const [copied, setCopied] = useState(false)
-
-	async function handleCopy() {
-		try {
-			await navigator.clipboard.writeText(secret)
-			setCopied(true)
-			toast.success("API key copied to clipboard")
-			setTimeout(() => setCopied(false), 2000)
-		} catch {
-			toast.error("Failed to copy API key")
-		}
-	}
+	const [isVisible, setIsVisible] = useState(false)
 
 	return (
 		<div className="space-y-3">
 			<InputGroup>
 				<InputGroupInput
 					readOnly
-					value={secret}
-					className="font-mono text-xs tracking-wide select-all"
+					value={isVisible ? secret : maskKey(secret)}
+					className={
+						isVisible
+							? "font-mono text-xs tracking-wide select-all"
+							: "font-mono text-xs tracking-wide"
+					}
 				/>
 				<InputGroupAddon align="inline-end">
 					<InputGroupButton
-						onClick={handleCopy}
-						aria-label="Copy API key"
-						title={copied ? "Copied!" : "Copy"}
+						onClick={() => setIsVisible((v) => !v)}
+						aria-label={isVisible ? "Hide key" : "Reveal key"}
 					>
-						{copied ? (
-							<CheckIcon size={14} className="text-severity-info" />
-						) : (
-							<CopyIcon size={14} />
-						)}
+						<EyeIcon size={14} className={isVisible ? "text-foreground" : undefined} />
 					</InputGroupButton>
+					<CopyButton value={secret} label="API key" render={<InputGroupButton />} />
 				</InputGroupAddon>
 			</InputGroup>
 			<p className="text-muted-foreground text-xs">

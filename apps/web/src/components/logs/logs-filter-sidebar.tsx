@@ -1,12 +1,13 @@
-import { Result, useAtomValue } from "@/lib/effect-atom"
-import { useCallback, useRef, useState } from "react"
+import { Result, useAtomRefresh, useAtomValue } from "@/lib/effect-atom"
+import { useCallback, useState } from "react"
 import { useNavigate } from "@tanstack/react-router"
 import { XmarkIcon, MagnifierIcon } from "@/components/icons"
 
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
-import { FilterSection, SearchableFilterSection } from "@/components/filters/filter-section"
+import { useDebouncedCallback } from "@maple/ui/hooks/use-debounced-callback"
+import { FilterSection, SearchableFilterSection, serviceColorMap } from "@/components/filters/filter-section"
 import { Route } from "@/routes/logs"
-import { Separator } from "@maple/ui/components/ui/separator"
+import { FILTER_SECTION_LABEL } from "@maple/ui/components/filters/filter-styles"
 import { Kbd } from "@maple/ui/components/ui/kbd"
 import {
 	InputGroup,
@@ -23,7 +24,6 @@ import {
 	FilterSidebarLoading,
 } from "@/components/filters/filter-sidebar"
 import { SEVERITY_COLORS } from "@maple/ui/lib/severity"
-import { formatBackendError } from "@/lib/error-messages"
 
 function LoadingState() {
 	return <FilterSidebarLoading sectionCount={3} />
@@ -39,30 +39,30 @@ export function LogsFilterSidebar() {
 	)
 
 	const [searchText, setSearchText] = useState(search.search ?? "")
-	const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+	const debouncedNavigate = useDebouncedCallback((value: string) => {
+		const trimmed = value.trim() || undefined
+		navigate({
+			search: (prev) => ({ ...prev, search: trimmed }),
+		})
+	}, 300)
 
 	const handleSearchChange = useCallback(
 		(value: string) => {
 			setSearchText(value)
-			if (debounceRef.current) clearTimeout(debounceRef.current)
-			debounceRef.current = setTimeout(() => {
-				const trimmed = value.trim() || undefined
-				navigate({
-					search: (prev) => ({ ...prev, search: trimmed }),
-				})
-			}, 300)
+			debouncedNavigate(value)
 		},
-		[navigate],
+		[debouncedNavigate],
 	)
 
-	const facetsResult = useAtomValue(
-		getLogsFacetsResultAtom({
-			data: {
-				startTime: effectiveStartTime,
-				endTime: effectiveEndTime,
-			},
-		}),
-	)
+	const facetsAtom = getLogsFacetsResultAtom({
+		data: {
+			startTime: effectiveStartTime,
+			endTime: effectiveEndTime,
+		},
+	})
+	const facetsResult = useAtomValue(facetsAtom)
+	const refreshFacets = useAtomRefresh(facetsAtom)
 
 	const updateFilter = <K extends keyof typeof search>(key: K, value: (typeof search)[K]) => {
 		navigate({
@@ -94,9 +94,7 @@ export function LogsFilterSidebar() {
 
 	return Result.builder(facetsResult)
 		.onInitial(() => <LoadingState />)
-		.onError((error) => (
-			<FilterSidebarError message={formatBackendError(error).description} />
-		))
+		.onError((error) => <FilterSidebarError error={error} onRetry={refreshFacets} />)
 		.onSuccess((facetsResponse, result) => {
 			const facets = facetsResponse.data
 			const hasFacets =
@@ -110,9 +108,7 @@ export function LogsFilterSidebar() {
 					<FilterSidebarHeader canClear={hasActiveFilters} onClear={clearAllFilters} />
 					<FilterSidebarBody>
 						<div className="pb-3">
-							<span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-								Search
-							</span>
+							<span className={`${FILTER_SECTION_LABEL} text-muted-foreground`}>Search</span>
 							<InputGroup className="mt-2">
 								<InputGroupAddon>
 									<MagnifierIcon />
@@ -141,53 +137,36 @@ export function LogsFilterSidebar() {
 								)}
 							</InputGroup>
 						</div>
-						<Separator className="my-2" />
 
-						{(facets.severities?.length ?? 0) > 0 && (
-							<>
-								<FilterSection
-									title="Severity"
-									options={facets.severities}
-									selected={search.severities ?? []}
-									onChange={(val) => updateFilter("severities", val)}
-									colorMap={SEVERITY_COLORS}
-								/>
-								<Separator className="my-2" />
-							</>
-						)}
+						<FilterSection
+							title="Severity"
+							options={facets.severities ?? []}
+							selected={search.severities ?? []}
+							onChange={(val) => updateFilter("severities", val)}
+							colorMap={SEVERITY_COLORS}
+						/>
 
-						{(facets.deploymentEnvs?.length ?? 0) > 0 && (
-							<>
-								<FilterSection
-									title="Environment"
-									options={facets.deploymentEnvs}
-									selected={search.deploymentEnvs ?? []}
-									onChange={(val) => updateFilter("deploymentEnvs", val)}
-								/>
-								<Separator className="my-2" />
-							</>
-						)}
+						<FilterSection
+							title="Environment"
+							options={facets.deploymentEnvs ?? []}
+							selected={search.deploymentEnvs ?? []}
+							onChange={(val) => updateFilter("deploymentEnvs", val)}
+						/>
 
-						{(facets.namespaces?.length ?? 0) > 0 && (
-							<>
-								<SearchableFilterSection
-									title="Namespace"
-									options={facets.namespaces}
-									selected={search.namespaces ?? []}
-									onChange={(val) => updateFilter("namespaces", val)}
-								/>
-								<Separator className="my-2" />
-							</>
-						)}
+						<SearchableFilterSection
+							title="Namespace"
+							options={facets.namespaces ?? []}
+							selected={search.namespaces ?? []}
+							onChange={(val) => updateFilter("namespaces", val)}
+						/>
 
-						{(facets.services?.length ?? 0) > 0 && (
-							<SearchableFilterSection
-								title="Service"
-								options={facets.services}
-								selected={search.services ?? []}
-								onChange={(val) => updateFilter("services", val)}
-							/>
-						)}
+						<SearchableFilterSection
+							title="Service"
+							options={facets.services ?? []}
+							selected={search.services ?? []}
+							onChange={(val) => updateFilter("services", val)}
+							colorMap={serviceColorMap(facets.services ?? [])}
+						/>
 
 						{!hasFacets && (
 							<p className="text-sm text-muted-foreground py-4">

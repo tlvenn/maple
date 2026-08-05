@@ -2,8 +2,9 @@ import { memo } from "react"
 import { Link } from "@tanstack/react-router"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
+import { cn } from "@maple/ui/lib/utils"
 import { WidgetFrame } from "@/components/dashboard-builder/widgets/widget-shell"
-import { formatCellValue } from "@/components/dashboard-builder/widgets/table-widget"
+import { columnVisibilityClass, formatCellValue } from "@/components/dashboard-builder/widgets/table-widget"
 import { resolveFieldPath } from "@/lib/resolve-field-path"
 import type { WidgetDataState, WidgetDisplayConfig, WidgetMode } from "@/components/dashboard-builder/types"
 
@@ -11,10 +12,6 @@ interface ListWidgetProps {
 	dataState: WidgetDataState
 	display: WidgetDisplayConfig
 	mode: WidgetMode
-	onRemove?: () => void
-	onClone?: () => void
-	onConfigure?: () => void
-	onFix?: () => void
 }
 
 type ColumnDef = {
@@ -26,15 +23,7 @@ type ColumnDef = {
 	hidden?: boolean
 }
 
-export const ListWidget = memo(function ListWidget({
-	dataState,
-	display,
-	mode,
-	onRemove,
-	onClone,
-	onConfigure,
-	onFix,
-}: ListWidgetProps) {
+export const ListWidget = memo(function ListWidget({ dataState, display, mode }: ListWidgetProps) {
 	const title = display.title || "Untitled"
 	const rows =
 		dataState.status === "ready" && Array.isArray(dataState.data)
@@ -60,10 +49,6 @@ export const ListWidget = memo(function ListWidget({
 			title={title}
 			dataState={dataState}
 			mode={mode}
-			onRemove={onRemove}
-			onClone={onClone}
-			onConfigure={onConfigure}
-			onFix={onFix}
 			contentClassName="flex-1 min-h-0 overflow-auto p-0"
 			loadingSkeleton={
 				<div className="p-3 flex flex-col gap-2">
@@ -76,10 +61,10 @@ export const ListWidget = memo(function ListWidget({
 			<Table>
 				<TableHeader>
 					<TableRow>
-						{effectiveColumns.map((col) => (
+						{effectiveColumns.map((col, colIndex) => (
 							<TableHead
 								key={col.field}
-								className="text-xs"
+								className={cn("text-xs", columnVisibilityClass(colIndex))}
 								style={{
 									textAlign: col.align ?? "left",
 									width: col.width ? `${col.width}px` : undefined,
@@ -103,7 +88,7 @@ export const ListWidget = memo(function ListWidget({
 					) : (
 						rows.map((row, i) => (
 							<TableRow key={i}>
-								{effectiveColumns.map((col) => {
+								{effectiveColumns.map((col, colIndex) => {
 									const value = resolveFieldPath(row, col.field)
 									const displayValue = Array.isArray(value)
 										? value.join(", ")
@@ -145,7 +130,7 @@ export const ListWidget = memo(function ListWidget({
 									return (
 										<TableCell
 											key={col.field}
-											className="text-xs"
+											className={cn("text-xs", columnVisibilityClass(colIndex))}
 											style={{ textAlign: col.align ?? "left" }}
 										>
 											{content}

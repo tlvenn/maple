@@ -5,12 +5,12 @@ import {
 	validationError,
 	type McpToolRegistrar,
 } from "./types"
-import { formatNumber, formatTable, truncate } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatNumber, formatTable, truncate } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Option, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-warehouse"
-import { ErrorsService } from "@/services/ErrorsService"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { ErrorsService } from "@/services/errors/ErrorsService"
 import { IssueKind, IssueSeverity, WorkflowState } from "@maple/domain/http"
 
 const decodeWorkflowState = Schema.decodeUnknownOption(WorkflowState)
@@ -28,7 +28,9 @@ export function registerListErrorIssuesTool(server: McpToolRegistrar) {
 			severity: optionalStringParam(
 				"Filter by triage severity: critical, high, medium, low, or 'unset' for untriaged issues",
 			),
-			kind: optionalStringParam("Filter by issue kind: error (fingerprint groups) or alert (alert-rule incidents)"),
+			kind: optionalStringParam(
+				"Filter by issue kind: error (fingerprint groups) or alert (alert-rule incidents)",
+			),
 			service: optionalStringParam("Filter by service name"),
 			limit: optionalNumberParam("Max results (default 50)"),
 			include_archived: optionalStringParam("Pass '1' to include archived issues in results"),
@@ -100,13 +102,13 @@ export function registerListErrorIssuesTool(server: McpToolRegistrar) {
 						(error) =>
 							new McpQueryError({
 								message: error.message,
-								pipe: "list_error_issues",
+								pipeName: "list_error_issues",
 								cause: error,
 							}),
 					),
 				)
 
-			yield* Effect.annotateCurrentSpan("resultCount", result.issues.length)
+			yield* Effect.annotateCurrentSpan("result.rowCount", result.issues.length)
 
 			const issues = result.issues
 
@@ -135,10 +137,7 @@ export function registerListErrorIssuesTool(server: McpToolRegistrar) {
 					i.severity ?? "—",
 					String(i.priority),
 					i.serviceName,
-					truncate(
-						i.errorLabel || `${i.exceptionType}: ${i.exceptionMessage}`,
-						50,
-					),
+					truncate(i.errorLabel || `${i.exceptionType}: ${i.exceptionMessage}`, 50),
 					formatNumber(i.occurrenceCount),
 					i.lastSeenAt.slice(0, 19),
 					i.assignedActor

@@ -1,5 +1,4 @@
 import type { ReactNode } from "react"
-import { toast } from "sonner"
 import type { ErrorIssueDocument, WorkflowState } from "@maple/domain/http"
 import {
 	ContextMenu,
@@ -14,6 +13,8 @@ import {
 
 import { WORKFLOW_LABEL, WorkflowRingIcon } from "@/components/icons/workflow-ring"
 import { CheckIcon } from "@/components/icons"
+import { useCopy } from "@maple/ui/hooks/use-copy"
+import { agentPromptFromIssue } from "./agent-debug-prompt"
 import type { IssueMutations } from "./use-issue-mutations"
 
 const STATE_ORDER: ReadonlyArray<WorkflowState> = [
@@ -42,23 +43,16 @@ export function IssueContextMenu({
 	const canClaim = !issue.leaseHolder
 	const canRelease = Boolean(issue.leaseHolder)
 
-	const copyId = async () => {
-		try {
-			await navigator.clipboard.writeText(issue.id)
-			toast.success("Copied issue ID")
-		} catch {
-			toast.error("Copy failed")
-		}
-	}
+	const idCopy = useCopy({ label: "Issue ID" })
+	const linkCopy = useCopy({ label: "Link" })
+	const promptCopy = useCopy({
+		label: "Agent prompt",
+		successMessage: "Agent prompt copied — paste it into your MCP agent",
+	})
 
-	const copyUrl = async () => {
-		try {
-			await navigator.clipboard.writeText(window.location.origin + issueUrl)
-			toast.success("Copied link")
-		} catch {
-			toast.error("Copy failed")
-		}
-	}
+	const copyId = () => void idCopy.copy(issue.id)
+	const copyUrl = () => void linkCopy.copy(window.location.origin + issueUrl)
+	const copyAgentPrompt = () => void promptCopy.copy(agentPromptFromIssue(issue))
 
 	return (
 		<ContextMenu>
@@ -106,6 +100,9 @@ export function IssueContextMenu({
 				<ContextMenuItem onClick={onOpenInNewTab}>Open in new tab</ContextMenuItem>
 				<ContextMenuItem onClick={copyUrl}>Copy link</ContextMenuItem>
 				<ContextMenuItem onClick={copyId}>Copy ID</ContextMenuItem>
+				{issue.kind === "error" ? (
+					<ContextMenuItem onClick={copyAgentPrompt}>Copy agent prompt</ContextMenuItem>
+				) : null}
 			</ContextMenuContent>
 		</ContextMenu>
 	)

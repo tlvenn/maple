@@ -1,14 +1,11 @@
 "use client"
 
+import { useRef, useState } from "react"
+
 import { cn } from "../../lib/utils"
-import { useClipboard } from "../../hooks/use-clipboard"
+import { useCopy } from "../../hooks/use-copy"
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../ui/hover-card"
-import {
-	tryParseJson,
-	CopyableValue,
-	CollapsibleJsonValue,
-	useAttributesConfig,
-} from "../attributes"
+import { tryParseJson, CopyableValue, CollapsibleJsonValue } from "../attributes"
 import type { ChipTone } from "../../lib/log-attributes"
 
 const TONE_CLASSES: Record<ChipTone, string> = {
@@ -41,48 +38,63 @@ export interface LogAttributeChipProps {
 
 /**
  * Compact, copy-on-click attribute pill rendered inline on a log row. Hovering
- * reveals the full key/value (with JSON expansion). Copies the `key=value` pair
- * and reports it through `AttributesProvider`'s `notifyCopied`.
+ * reveals the full key/value (with JSON expansion). Copies the `key=value` pair.
+ * The chip is too small to carry a status glyph, so this is one of the few
+ * surfaces that toasts.
  */
 export function LogAttributeChip({ attrKey, value, tone }: LogAttributeChipProps) {
-	const clipboard = useClipboard()
-	const { notifyCopied } = useAttributesConfig()
+	const [detailsEnabled, setDetailsEnabled] = useState(false)
+	const triggerRef = useRef<HTMLButtonElement>(null)
+	const { copy } = useCopy({ successMessage: `Copied ${attrKey}` })
 	const parsed = tryParseJson(value)
 	const displayValue = parsed !== null ? "{…}" : truncateValue(value)
 	const displayKey = shortKey(attrKey)
 
 	const handleCopy = (e: React.SyntheticEvent) => {
 		e.stopPropagation()
-		clipboard.copy(`${attrKey}=${value}`)
-		notifyCopied?.(`Copied ${attrKey}`)
+		void copy(`${attrKey}=${value}`)
 	}
 
-	return (
-		<HoverCard>
-			<HoverCardTrigger
-				render={
-					<button
-						type="button"
-						onPointerDown={(e) => e.stopPropagation()}
-						onClick={handleCopy}
-						onKeyDown={(e) => {
-							if (e.key === "Enter" || e.key === " ") {
-								e.preventDefault()
-								handleCopy(e)
-							}
-						}}
-						className={cn(
-							"inline-flex items-center gap-1 h-[18px] px-1.5 rounded border text-[10px] font-mono leading-none whitespace-nowrap shrink-0 cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-							TONE_CLASSES[tone],
-						)}
-						title={`${attrKey}=${value}`}
-					/>
+	const trigger = (
+		<button
+			ref={triggerRef}
+			type="button"
+			onPointerEnter={() => setDetailsEnabled(true)}
+			onFocus={() => {
+				if (detailsEnabled) return
+				setDetailsEnabled(true)
+				// Wrapping the trigger in Base UI remounts it once. Restore keyboard
+				// focus after that upgrade so deferred details stay accessible.
+				queueMicrotask(() => triggerRef.current?.focus({ preventScroll: true }))
+			}}
+			onPointerDown={(e) => e.stopPropagation()}
+			onClick={handleCopy}
+			onKeyDown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault()
+					handleCopy(e)
 				}
-			>
-				<span className="opacity-70">{displayKey}</span>
-				<span className="opacity-40">:</span>
-				<span>{displayValue}</span>
-			</HoverCardTrigger>
+			}}
+			className={cn(
+				"inline-flex items-center gap-1 h-[18px] px-1.5 rounded border text-[10px] font-mono leading-none whitespace-nowrap shrink-0 cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+				TONE_CLASSES[tone],
+			)}
+			title={`${attrKey}=${value}`}
+		>
+			<span className="opacity-70">{displayKey}</span>
+			<span className="opacity-40">:</span>
+			<span>{displayValue}</span>
+		</button>
+	)
+
+	// A wide virtualized row can contain dozens of chips. Base UI's complete
+	// hover-card machinery is useful only for the chip a person actually
+	// inspects, so keep the identical copyable trigger cheap until hover/focus.
+	if (!detailsEnabled) return trigger
+
+	return (
+		<HoverCard defaultOpen>
+			<HoverCardTrigger render={trigger} />
 			<HoverCardContent align="start" className="w-80 p-0">
 				<div className="px-3 py-2 border-b">
 					<div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">

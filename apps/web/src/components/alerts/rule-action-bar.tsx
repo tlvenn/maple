@@ -2,7 +2,7 @@ import type { ReactNode } from "react"
 
 import { Button } from "@maple/ui/components/ui/button"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "@maple/ui/components/ui/tooltip"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 
 import {
 	CheckIcon,
@@ -11,6 +11,7 @@ import {
 	LoaderIcon,
 	SquareTerminalIcon,
 } from "@/components/icons"
+import { RULE_FORM_MAX_WIDTH } from "@/components/alerts/rule-form-layout"
 
 interface RuleActionBarProps {
 	editing: boolean
@@ -57,7 +58,7 @@ export function RuleActionBar({
 				"sticky bottom-0 z-20 -mx-4 -mb-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80",
 			)}
 		>
-			<div className="mx-auto flex max-w-[1100px] items-center justify-between gap-4">
+			<div className={cn("mx-auto flex items-center justify-between gap-4", RULE_FORM_MAX_WIDTH)}>
 				<div className="flex min-w-0 items-center gap-3">
 					{onShowTemplates && (
 						<Button
@@ -119,11 +120,7 @@ function ValidationSummary({
 	}
 	const summary = visibleIssues.join(", ") + (hiddenCount > 0 ? ` +${hiddenCount} more` : "")
 	return (
-		<span
-			className={cn(
-				"flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground",
-			)}
-		>
+		<span className={cn("flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground")}>
 			<CircleWarningIcon size={14} className="shrink-0 text-warning" />
 			<span className="truncate">
 				Missing: <span className="text-foreground">{summary}</span>

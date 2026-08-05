@@ -1,14 +1,14 @@
 import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
-import { toMcpQueryError } from "../lib/map-warehouse-error"
-import { resolveTenant } from "../lib/query-warehouse"
-import { resolveTimeRange, formatClampNote } from "../lib/time"
-import { clampLimit, clampOffset } from "../lib/limits"
-import { truncate, formatNumber } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { toMcpQueryError } from "@/mcp/lib/map-warehouse-error"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { resolveTimeRange, rangeExceededResult, MCP_SEARCH_MAX_HOURS } from "@/mcp/lib/time"
+import { clampLimit, clampOffset } from "@/mcp/lib/limits"
+import { truncate, formatNumber } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { searchLogs } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
+import { makeWarehouseExecutorFromTenant } from "@/services/warehouse/WarehouseQueryService"
 
 export function registerSearchLogsTool(server: McpToolRegistrar) {
 	server.tool(
@@ -40,8 +40,9 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 			offset,
 			limit,
 		}) {
-			const range = resolveTimeRange(start_time, end_time, { maxHours: 24 * 7 })
+			const range = resolveTimeRange(start_time, end_time, { maxHours: MCP_SEARCH_MAX_HOURS })
 			const { st, et } = range
+			if (range.exceeded) return rangeExceededResult(range, "search_logs")
 			const lim = clampLimit(limit, { defaultValue: 30, max: 200 })
 			const off = clampOffset(offset, { max: 10_000 })
 			const tenant = yield* resolveTenant
@@ -67,7 +68,7 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 				Effect.mapError(toMcpQueryError("search_logs")),
 			)
 
-			yield* Effect.annotateCurrentSpan({ resultCount: result.logs.length, "result.count": result.logs.length })
+			yield* Effect.annotateCurrentSpan("result.rowCount", result.logs.length)
 
 			if (result.logs.length === 0) {
 				return { content: [{ type: "text", text: `No logs found matching filters (${st} — ${et})` }] }
@@ -75,7 +76,7 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 
 			const lines: string[] = [
 				`## Logs (${formatNumber(result.total)} total, showing ${result.logs.length})`,
-				`Time range: ${st} — ${et}${formatClampNote(range)}`,
+				`Time range: ${st} — ${et}`,
 			]
 
 			const filters: string[] = []
@@ -97,9 +98,7 @@ export function registerSearchLogsTool(server: McpToolRegistrar) {
 					const span = trace_id && log.spanId ? ` span:${log.spanId.slice(0, 8)}` : ""
 					ref = ` [trace:${log.traceId.slice(0, 8)}${span}]`
 				}
-				lines.push(
-					`${marker} ${time} [${sev}] ${log.serviceName}: ${truncate(log.body, 120)}${ref}`,
-				)
+				lines.push(`${marker} ${time} [${sev}] ${log.serviceName}: ${truncate(log.body, 120)}${ref}`)
 			}
 
 			const hasMore = result.pagination.hasMore

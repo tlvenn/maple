@@ -2,7 +2,20 @@ import { Effect, Result, Schema } from "effect"
 import { QueryBuilderQueryDraftSchema } from "@maple/domain/http"
 import { QueryEngineExecuteRequest } from "@maple/query-engine"
 import { buildBreakdownQuerySpec } from "@/lib/query-builder/model"
-import { decodeInput, executeQueryEngine, invalidWarehouseInput } from "@/api/warehouse/effect-utils"
+import {
+	type BackendError,
+	type WarehouseQueryError,
+	decodeInput,
+	executeQueryEngine,
+	invalidWarehouseInput,
+} from "@/api/warehouse/effect-utils"
+
+// Discriminate the typed query-engine error channel on `_tag` (both the local
+// `WarehouseQueryError` and the backend `@maple/http/errors/Warehouse*` union
+// carry a `message` field) rather than collapsing it via `instanceof Error`.
+function queryEngineErrorMessage(error: WarehouseQueryError | BackendError, fallback: string): string {
+	return "message" in error && typeof error.message === "string" ? error.message : fallback
+}
 
 const dateTimeString = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/))
 
@@ -10,6 +23,13 @@ const QueryBuilderBreakdownInputSchema = Schema.Struct({
 	startTime: dateTimeString,
 	endTime: dateTimeString,
 	queries: Schema.mutable(Schema.Array(QueryBuilderQueryDraftSchema)),
+	/**
+	 * Rows to fetch per query when the author set no explicit limit add-on.
+	 * A panel that collapses its long tail into an "Other" bucket asks for more
+	 * rows than it draws, so that bucket is a real sum rather than absent; one
+	 * that plots every row it receives omits this and keeps the warehouse default.
+	 */
+	defaultLimit: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 })
 
 export type QueryBuilderBreakdownInput = Schema.Schema.Type<typeof QueryBuilderBreakdownInputSchema>
@@ -22,16 +42,13 @@ interface BreakdownQueryResult {
 	data: Array<{ name: string; value: number }>
 }
 
-export interface QueryBuilderBreakdownResponse {
-	data: Array<Record<string, string | number>>
-}
-
 const executeBreakdownQuery = Effect.fn("QueryEngine.executeBreakdownQuery")(function* (
 	startTime: string,
 	endTime: string,
 	query: QueryBuilderBreakdownInput["queries"][number],
+	defaultLimit: number | undefined,
 ) {
-	const built = buildBreakdownQuerySpec(query)
+	const built = buildBreakdownQuerySpec(query, { defaultLimit })
 
 	if (!built.query) {
 		return {
@@ -63,7 +80,7 @@ const executeBreakdownQuery = Effect.fn("QueryEngine.executeBreakdownQuery")(fun
 			queryId: query.id,
 			queryName: query.name,
 			status: "error",
-			error: error instanceof Error ? error.message : "Breakdown query failed",
+			error: queryEngineErrorMessage(error, "Breakdown query failed"),
 			data: [],
 		} satisfies BreakdownQueryResult
 	}
@@ -161,14 +178,17 @@ const getQueryBuilderBreakdownEffect = Effect.fn("QueryEngine.getQueryBuilderBre
 }) {
 	const input = yield* decodeInput(QueryBuilderBreakdownInputSchema, data, "getQueryBuilderBreakdown")
 
-	const enabledQueries = input.queries.filter((query) => query.enabled !== false)
+	// A breakdown has no formulas, so a hidden query has nothing to feed — it is purely "don't
+	// show me", and running it would only cost a warehouse round trip to plot a row the author
+	// asked to hide.
+	const enabledQueries = input.queries.filter((query) => query.enabled !== false && !query.hidden)
 	if (enabledQueries.length === 0) {
 		return yield* invalidWarehouseInput("getQueryBuilderBreakdown", "No enabled queries to run")
 	}
 
 	const results = yield* Effect.forEach(
 		enabledQueries,
-		(query) => executeBreakdownQuery(input.startTime, input.endTime, query),
+		(query) => executeBreakdownQuery(input.startTime, input.endTime, query, input.defaultLimit),
 		{ concurrency: enabledQueries.length },
 	)
 
@@ -186,3 +206,7 @@ const getQueryBuilderBreakdownEffect = Effect.fn("QueryEngine.getQueryBuilderBre
 		data: mergeBreakdownResults(results, enabledQueries),
 	}
 })
+
+export const __testables = {
+	mergeBreakdownResults,
+}

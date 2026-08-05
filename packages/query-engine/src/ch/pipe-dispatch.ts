@@ -15,10 +15,16 @@
 // ---------------------------------------------------------------------------
 
 import * as CH from "./index"
-import type { TracesMetric, AttributeFilter } from "../query-engine"
+import type { TracesMetric, AttributeFilter, MetricType } from "@maple/domain/query-engine"
 import type { OrgId } from "@maple/domain"
-import { unsafeCompiledQuery, type CompiledQuery } from "./compile"
-import { Array as A, Match, Result } from "effect"
+import { unsafeCompiledQuery, type CompiledQuery } from "@maple-dev/clickhouse-builder"
+import { Array as A, Match, Result, Schema } from "effect"
+import {
+	attributeIndexMode,
+	baselineWarehouseCapabilities,
+	logBodySearchMode,
+	type WarehouseCapabilities,
+} from "../capabilities"
 
 type CompileTarget = Parameters<typeof CH.compile>[0]
 
@@ -31,11 +37,21 @@ function eraseType<T>(compiled: CompiledQuery<T>): PipeCompiledQuery {
 	return compiled as CompiledQuery<unknown>
 }
 
+const METRIC_TYPES: ReadonlySet<string> = new Set(["sum", "gauge", "histogram", "exponential_histogram"])
+
+function parseMetricType(value: string | undefined): MetricType | undefined {
+	return value != null && METRIC_TYPES.has(value) ? (value as MetricType) : undefined
+}
+
 /**
  * Compiles a named pipe + params into a SQL string.
  * Returns undefined for unknown pipes (caller should handle gracefully).
  */
-export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiledQuery | undefined {
+export function compilePipeQuery(
+	pipe: string,
+	params: PipeParams,
+	capabilities: WarehouseCapabilities = baselineWarehouseCapabilities(),
+): PipeCompiledQuery | undefined {
 	const orgId = String(params.org_id)
 	const startTime = String(params.start_time ?? "2023-01-01 00:00:00")
 	const endTime = String(params.end_time ?? "2099-12-31 23:59:59")
@@ -43,7 +59,7 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 	const int = (key: string, def?: number) => (params[key] != null ? Number(params[key]) : def)
 	const bool = (key: string) => params[key] === true || params[key] === "1" || params[key] === "true"
 
-	const compileCompare = (
+	const compileCompare = <Fields extends Schema.Struct.Fields>(
 		query: CompileTarget,
 		ranges: {
 			currentStart: string
@@ -51,23 +67,45 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 			previousStart: string
 			previousEnd: string
 		},
+		/**
+		 * The branch query's row schema. Taking a `Schema.Struct` rather than a
+		 * bare `Schema` is what makes the `period` field spreadable below — and
+		 * every `*RowSchema` export already is one. Without this the union
+		 * decoded nothing, so on a backend that quotes 64-bit integers every
+		 * count came back as a string. See ../schema.ts.
+		 */
+		rowSchema?: Schema.Struct<Fields>,
 	): PipeCompiledQuery => {
-		const currentSql = CH.compile(
+		const current = CH.compile(
 			query,
 			{ orgId, startTime: ranges.currentStart, endTime: ranges.currentEnd },
 			{ skipFormat: true },
-		).sql
-		const previousSql = CH.compile(
+		)
+		const previous = CH.compile(
 			query,
 			{ orgId, startTime: ranges.previousStart, endTime: ranges.previousEnd },
 			{ skipFormat: true },
-		).sql
+		)
 		return unsafeCompiledQuery({
 			sql:
-				`SELECT 'current' AS period, * FROM (\n${currentSql}\n)\n` +
+				`SELECT 'current' AS period, * FROM (\n${current.sql}\n)\n` +
 				`UNION ALL\n` +
-				`SELECT 'previous' AS period, * FROM (\n${previousSql}\n)\n` +
+				`SELECT 'previous' AS period, * FROM (\n${previous.sql}\n)\n` +
 				`FORMAT JSON`,
+			reason: "param-varied-union",
+			note: "One builder over a current and a previous window; params are substituted once per compile, so a single CHQuery cannot carry both.",
+			// Both branches are the same builder over different windows, so the
+			// union is scoped exactly when the branch is.
+			tenantScope:
+				current.tenantScope === "org" && previous.tenantScope === "org" ? "org" : "cross-org",
+			// `period` is typed as a plain String, not a `"current" | "previous"`
+			// literal union. The value is produced by our own SELECT so it is
+			// always one of the two at runtime — but the row schema describes the
+			// WIRE type, and ClickHouse reports the column as String. The SQL
+			// catalog's analyzer sweep decodes a synthetic zero-value row built
+			// from DESCRIBE output, where a String column is `""`; a literal union
+			// rejects that and fails the gate.
+			rowSchema: rowSchema ? Schema.Struct({ period: Schema.String, ...rowSchema.fields }) : undefined,
 		})
 	}
 
@@ -78,6 +116,7 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 				eraseType(
 					CH.compile(
 						CH.tracesRootListQuery({
+							attributeIndexMode: attributeIndexMode(capabilities, "traces"),
 							limit: int("limit", 100),
 							offset: int("offset", 0),
 							cursor: str("cursor"),
@@ -198,6 +237,8 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 				eraseType(
 					CH.compile(
 						CH.logsListQuery({
+							attributeIndexMode: attributeIndexMode(capabilities, "logs"),
+							bodySearchMode: logBodySearchMode(capabilities),
 							serviceName: str("service"),
 							severity: str("severity"),
 							minSeverity: int("min_severity"),
@@ -220,6 +261,8 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 				eraseType(
 					CH.compile(
 						CH.logsCountQuery({
+							attributeIndexMode: attributeIndexMode(capabilities, "logs"),
+							bodySearchMode: logBodySearchMode(capabilities),
 							serviceName: str("service"),
 							severity: str("severity"),
 							traceId: str("trace_id"),
@@ -264,6 +307,7 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 							commitShas: str("commit_shas")?.split(",").filter(Boolean),
 						}),
 						{ orgId, startTime, endTime },
+						{ rowSchema: CH.serviceOverviewRowSchema },
 					),
 				),
 			),
@@ -279,6 +323,7 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 						previousStart: str("previous_start_time") ?? startTime,
 						previousEnd: str("previous_end_time") ?? endTime,
 					},
+					CH.serviceOverviewRowSchema,
 				),
 			),
 			Match.when("services_facets", () =>
@@ -289,6 +334,7 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 					CH.compile(
 						CH.serviceReleasesTimelineQuery({ serviceName: String(params.service_name) }),
 						{ orgId, startTime, endTime, bucketSeconds: int("bucket_seconds", 300)! },
+						{ rowSchema: CH.serviceReleasesTimelineRowSchema },
 					),
 				),
 			),
@@ -300,6 +346,7 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 							apdexThresholdMs: int("apdex_threshold_ms", 500),
 						}),
 						{ orgId, startTime, endTime, bucketSeconds: int("bucket_seconds", 60)! },
+						{ rowSchema: CH.serviceApdexTimeseriesRowSchema },
 					),
 				),
 			),
@@ -313,12 +360,16 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 				),
 			),
 			Match.when("get_service_usage_compare", () =>
-				compileCompare(CH.serviceUsageQuery({ serviceName: str("service") }), {
-					currentStart: str("current_start_time") ?? startTime,
-					currentEnd: str("current_end_time") ?? endTime,
-					previousStart: str("previous_start_time") ?? startTime,
-					previousEnd: str("previous_end_time") ?? endTime,
-				}),
+				compileCompare(
+					CH.serviceUsageQuery({ serviceName: str("service") }),
+					{
+						currentStart: str("current_start_time") ?? startTime,
+						currentEnd: str("current_end_time") ?? endTime,
+						previousStart: str("previous_start_time") ?? startTime,
+						previousEnd: str("previous_end_time") ?? endTime,
+					},
+					CH.serviceUsageRowSchema,
+				),
 			),
 			Match.when("service_dependencies", () =>
 				eraseType(
@@ -475,15 +526,32 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 					}),
 				),
 			),
-			Match.when("metric_attribute_keys", () =>
-				eraseType(
+			Match.when("metric_attribute_keys", () => {
+				// Optional per-metric scoping: reads the raw metric table (the hourly
+				// rollup carries no MetricName column).
+				const metricName = str("metric_name")
+				const metricType = parseMetricType(str("metric_type"))
+				if (metricName && metricType) {
+					return eraseType(
+						CH.compile(
+							CH.metricScopedAttributeKeysQuery({ metricType, limit: int("limit", 200) }),
+							{
+								orgId,
+								startTime,
+								endTime,
+								metricName,
+							},
+						),
+					)
+				}
+				return eraseType(
 					CH.compile(CH.attributeKeysQuery({ scope: "metric", limit: int("limit", 200) }), {
 						orgId,
 						startTime,
 						endTime,
 					}),
-				),
-			),
+				)
+			}),
 			Match.when("span_attribute_values", () =>
 				eraseType(
 					CH.compile(
@@ -506,9 +574,37 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 					),
 				),
 			),
+			Match.when("metric_attribute_values", () => {
+				const metricName = str("metric_name")
+				const metricType = parseMetricType(str("metric_type"))
+				if (metricName && metricType) {
+					return eraseType(
+						CH.compile(
+							CH.metricScopedAttributeValuesQuery({
+								metricType,
+								attributeKey: String(params.attribute_key),
+								limit: int("limit", 50),
+							}),
+							{ orgId, startTime, endTime, metricName },
+						),
+					)
+				}
+				return eraseType(
+					CH.compile(
+						CH.metricAttributeValuesQuery({
+							attributeKey: String(params.attribute_key),
+							limit: int("limit", 50),
+						}),
+						{ orgId, startTime, endTime },
+					),
+				)
+			}),
 			// ----- Custom charts -----
 			Match.when("custom_traces_timeseries", () => {
-				const tsOpts = pipeParamsToTracesTimeseriesOpts(params)
+				const tsOpts = {
+					...pipeParamsToTracesTimeseriesOpts(params),
+					attributeIndexMode: attributeIndexMode(capabilities, "traces"),
+				}
 				return eraseType(
 					CH.compile(CH.tracesTimeseriesQuery(tsOpts), {
 						orgId,
@@ -519,7 +615,10 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 				)
 			}),
 			Match.when("custom_traces_breakdown", () => {
-				const bdOpts = pipeParamsToTracesBreakdownOpts(params)
+				const bdOpts = {
+					...pipeParamsToTracesBreakdownOpts(params),
+					attributeIndexMode: attributeIndexMode(capabilities, "traces"),
+				}
 				return eraseType(CH.compile(CH.tracesBreakdownQuery(bdOpts), { orgId, startTime, endTime }))
 			}),
 			Match.when("top_operations", () =>
@@ -561,7 +660,9 @@ export function compilePipeQuery(pipe: string, params: PipeParams): PipeCompiled
 							serviceName: str("service"),
 							spanName: str("span_name"),
 							matchModes:
-								str("span_name_match_mode") === "contains" ? { spanName: "contains" } : undefined,
+								str("span_name_match_mode") === "contains"
+									? { spanName: "contains" }
+									: undefined,
 							errorsOnly: bool("has_error"),
 							minDurationMs: int("min_duration_ms"),
 							maxDurationMs: int("max_duration_ms"),

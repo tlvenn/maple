@@ -2,5 +2,5 @@ export {
 	FilterSection,
 	SearchableFilterSection,
 	SingleCheckboxFilter,
-	type FilterOption,
+	serviceColorMap,
 } from "@/components/filters/filter-section"

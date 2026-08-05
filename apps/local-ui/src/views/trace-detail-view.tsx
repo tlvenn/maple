@@ -3,9 +3,10 @@ import { TraceViewTabs } from "@maple/ui/components/traces/trace-view-tabs"
 import { Button } from "@maple/ui/components/ui/button"
 import { Spinner } from "@maple/ui/components/ui/spinner"
 import { ArrowLeftIcon } from "@maple/ui/components/icons"
-import type { SpanNode } from "@maple/ui/types"
+import type { SpanNode } from "@maple/ui/lib/types"
 import { useLocalTraceDetail } from "../hooks/use-local-trace-detail"
 import { SpanDetailPanel } from "../components/span-detail-panel"
+import { RefreshButton } from "../components/toolbar"
 
 interface TraceDetailViewProps {
 	traceId: string
@@ -26,6 +27,7 @@ export function TraceDetailView({ traceId, onBack }: TraceDetailViewProps) {
 				<span className="truncate font-mono text-xs text-muted-foreground" title={traceId}>
 					{traceId}
 				</span>
+				<RefreshButton className="ml-auto" />
 			</div>
 
 			<div className="min-h-0 flex-1">
@@ -55,11 +57,7 @@ export function TraceDetailView({ traceId, onBack }: TraceDetailViewProps) {
 							/>
 						</div>
 						{selectedSpan ? (
-							<SpanDetailPanel
-								span={selectedSpan}
-								services={data.services}
-								onClose={() => setSelectedSpan(undefined)}
-							/>
+							<SpanDetailPanel span={selectedSpan} onClose={() => setSelectedSpan(undefined)} />
 						) : null}
 					</div>
 				)}

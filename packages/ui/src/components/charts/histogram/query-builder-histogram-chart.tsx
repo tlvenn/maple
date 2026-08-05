@@ -4,7 +4,7 @@ import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import type { BaseChartProps } from "../_shared/chart-types"
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from "../../ui/chart"
 import { formatValueByUnit, formatNumber } from "../../../lib/format"
-import { histogramSampleData } from "../_shared/sample-data"
+import { cn } from "../../../lib/utils"
 
 function asFiniteNumber(value: unknown): number {
 	const parsed = typeof value === "number" ? value : Number(value)
@@ -71,7 +71,10 @@ export function QueryBuilderHistogramChart({
 	histogram,
 	logScale,
 }: BaseChartProps) {
-	const source = Array.isArray(data) && data.length > 0 ? data : histogramSampleData
+	// No sample-data fallback: substituting fixtures for real rows made every
+	// misconfigured histogram (a source with no numeric column, an empty result)
+	// render a plausible-looking distribution instead of an empty state.
+	const source = Array.isArray(data) ? data : []
 	const bucketCount = histogram?.bucketCount ?? 30
 	const bucketWidth = histogram?.bucketWidth
 	const useLogY = histogram?.logScaleY ?? logScale ?? false
@@ -97,6 +100,14 @@ export function QueryBuilderHistogramChart({
 		[],
 	)
 
+	if (chartData.length === 0) {
+		return (
+			<div className={cn("relative h-full w-full grid place-items-center", className)}>
+				<span className="text-[11px] text-muted-foreground">No data</span>
+			</div>
+		)
+	}
+
 	return (
 		<ChartContainer config={chartConfig} className={className}>
 			<BarChart data={chartData} accessibilityLayer barCategoryGap={1}>
@@ -107,14 +118,21 @@ export function QueryBuilderHistogramChart({
 					axisLine={false}
 					tickMargin={8}
 					interval="preserveStartEnd"
-					minTickGap={20}
+					minTickGap={32}
+					tick={{ fontSize: 10 }}
+					// Axis ticks show only the bucket's lower bound ("150" instead
+					// of "150-200") — halves label width so ticks stop overlapping;
+					// the full range stays in the tooltip.
+					tickFormatter={(value) => String(value).split("-")[0] || String(value)}
 				/>
 				<YAxis
 					tickLine={false}
 					axisLine={false}
-					tickMargin={8}
+					tickMargin={6}
+					width={48}
 					scale={useLogY ? "log" : "auto"}
 					domain={useLogY ? [1, "auto"] : ["auto", "auto"]}
+					allowDecimals={false}
 					allowDataOverflow={useLogY}
 					tickFormatter={(value) => formatNumber(asFiniteNumber(value))}
 				/>

@@ -1,5 +1,5 @@
 import { Cause, Exit } from "effect"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 import { useAtomSet } from "@/lib/effect-atom"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import {
@@ -12,6 +12,7 @@ import {
 	type WorkflowState,
 } from "@maple/domain/http"
 import { WORKFLOW_LABEL } from "@/components/icons/workflow-ring"
+import { logClientError } from "@/lib/services/common/telemetry"
 
 const INVALIDATE = ["errorIssues"] as const
 
@@ -25,10 +26,12 @@ function describeFailure(result: Exit.Exit<unknown, unknown>): string {
 
 function logFailure(label: string, result: Exit.Exit<unknown, unknown>) {
 	if (Exit.isSuccess(result)) return
-	console.error(`[issue-mutations] ${label} failed`, result.cause)
+	logClientError("issue.mutation_failed", result.cause, {
+		"maple.issue.mutation": label,
+	})
 }
 
-export function useIssueMutations() {
+export function useIssueMutations(onSuccess?: () => void) {
 	const transition = useAtomSet(MapleApiAtomClient.mutation("errors", "transitionIssue"), {
 		mode: "promiseExit",
 	})
@@ -45,11 +48,14 @@ export function useIssueMutations() {
 			reactivityKeys: [...INVALIDATE, `errorIssue:${issueId}`],
 		})
 		if (Exit.isSuccess(result)) {
-			toast.success(`Moved to ${WORKFLOW_LABEL[toState]}`)
+			onSuccess?.()
+			toastManager.add({ title: `Moved to ${WORKFLOW_LABEL[toState]}`, type: "success" })
 		} else {
 			logFailure("transitionTo", result)
-			toast.error("State change failed", {
+			toastManager.add({
+				title: "State change failed",
 				description: describeFailure(result),
+				type: "error",
 			})
 		}
 		return result
@@ -70,14 +76,23 @@ export function useIssueMutations() {
 		const failed = failures.length
 		failures.forEach((r) => logFailure("transitionMany", r))
 		if (failed === 0) {
-			toast.success(`Moved ${issueIds.length} to ${WORKFLOW_LABEL[toState]}`)
+			onSuccess?.()
+			toastManager.add({
+				title: `Moved ${issueIds.length} to ${WORKFLOW_LABEL[toState]}`,
+				type: "success",
+			})
 		} else if (failed < issueIds.length) {
-			toast.warning(`Moved ${issueIds.length - failed} of ${issueIds.length}; ${failed} failed`, {
+			onSuccess?.()
+			toastManager.add({
+				title: `Moved ${issueIds.length - failed} of ${issueIds.length}; ${failed} failed`,
 				description: describeFailure(failures[0]!),
+				type: "warning",
 			})
 		} else {
-			toast.error("State change failed", {
+			toastManager.add({
+				title: "State change failed",
 				description: describeFailure(failures[0]!),
+				type: "error",
 			})
 		}
 	}
@@ -89,12 +104,36 @@ export function useIssueMutations() {
 			reactivityKeys: [...INVALIDATE, `errorIssue:${issueId}`],
 		})
 		if (Exit.isSuccess(result)) {
-			toast.success("Claimed")
+			onSuccess?.()
+			toastManager.add({ title: "Claimed", type: "success" })
 		} else {
 			logFailure("claim", result)
-			toast.error("Claim failed", { description: describeFailure(result) })
+			toastManager.add({ title: "Claim failed", description: describeFailure(result), type: "error" })
 		}
 		return result
+	}
+
+	const claimMany = async (issueIds: ReadonlyArray<ErrorIssueId>) => {
+		if (issueIds.length === 0) return
+		const results = await Promise.all(
+			issueIds.map((issueId) =>
+				claim({
+					params: { issueId },
+					payload: new ErrorIssueClaimRequest({}),
+					reactivityKeys: [...INVALIDATE, `errorIssue:${issueId}`],
+				}),
+			),
+		)
+		const failed = results.filter((result) => !Exit.isSuccess(result))
+		if (failed.length === 0) {
+			onSuccess?.()
+			toastManager.add({ title: `Claimed ${issueIds.length} issues`, type: "success" })
+		} else {
+			toastManager.add({
+				title: `Claimed ${issueIds.length - failed.length} of ${issueIds.length}`,
+				type: "error",
+			})
+		}
 	}
 
 	const releaseIssue = async (issueId: ErrorIssueId) => {
@@ -104,10 +143,11 @@ export function useIssueMutations() {
 			reactivityKeys: [...INVALIDATE, `errorIssue:${issueId}`],
 		})
 		if (Exit.isSuccess(result)) {
-			toast.success("Released")
+			onSuccess?.()
+			toastManager.add({ title: "Released", type: "success" })
 		} else {
 			logFailure("release", result)
-			toast.error("Release failed", { description: describeFailure(result) })
+			toastManager.add({ title: "Release failed", description: describeFailure(result), type: "error" })
 		}
 		return result
 	}
@@ -119,15 +159,54 @@ export function useIssueMutations() {
 			reactivityKeys: [...INVALIDATE, `errorIssue:${issueId}`],
 		})
 		if (Exit.isSuccess(result)) {
-			toast.success(value === null ? "Severity cleared" : `Severity set to ${value}`)
+			onSuccess?.()
+			toastManager.add({
+				title: value === null ? "Severity cleared" : `Severity set to ${value}`,
+				type: "success",
+			})
 		} else {
 			logFailure("setSeverity", result)
-			toast.error("Severity change failed", { description: describeFailure(result) })
+			toastManager.add({
+				title: "Severity change failed",
+				description: describeFailure(result),
+				type: "error",
+			})
 		}
 		return result
 	}
 
-	return { transitionTo, transitionMany, claimIssue, releaseIssue, setSeverity }
+	const setSeverityMany = async (issueIds: ReadonlyArray<ErrorIssueId>, value: IssueSeverity | null) => {
+		if (issueIds.length === 0) return
+		const results = await Promise.all(
+			issueIds.map((issueId) =>
+				severity({
+					params: { issueId },
+					payload: new ErrorIssueSetSeverityRequest({ severity: value }),
+					reactivityKeys: [...INVALIDATE, `errorIssue:${issueId}`],
+				}),
+			),
+		)
+		const failed = results.filter((result) => !Exit.isSuccess(result))
+		if (failed.length === 0) {
+			onSuccess?.()
+			toastManager.add({ title: `Updated severity for ${issueIds.length} issues`, type: "success" })
+		} else {
+			toastManager.add({
+				title: `Updated ${issueIds.length - failed.length} of ${issueIds.length} issues`,
+				type: "error",
+			})
+		}
+	}
+
+	return {
+		transitionTo,
+		transitionMany,
+		claimIssue,
+		claimMany,
+		releaseIssue,
+		setSeverity,
+		setSeverityMany,
+	}
 }
 
 export type IssueMutations = ReturnType<typeof useIssueMutations>

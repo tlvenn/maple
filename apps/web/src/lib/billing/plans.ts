@@ -5,11 +5,12 @@ export interface PlanLimits {
 	tracesGB: number
 	metricsGB: number
 	retentionDays: number
+	browserSessions: number
 }
 
-export const PLAN_LIMITS: Record<string, PlanLimits> = {
-	starter: { logsGB: 10, tracesGB: 10, metricsGB: 10, retentionDays: 7 },
-	startup: { logsGB: 40, tracesGB: 40, metricsGB: 40, retentionDays: 30 },
+const PLAN_LIMITS: Record<string, PlanLimits> = {
+	starter: { logsGB: 10, tracesGB: 10, metricsGB: 10, retentionDays: 7, browserSessions: 5000 },
+	startup: { logsGB: 40, tracesGB: 40, metricsGB: 40, retentionDays: 30, browserSessions: 5000 },
 }
 
 const DEFAULT_PLAN = "starter"
@@ -24,7 +25,7 @@ export interface PlanFeature {
 	value: string
 }
 
-export const PLAN_FEATURES: Record<string, PlanFeature[]> = {
+const PLAN_FEATURES: Record<string, PlanFeature[]> = {
 	starter: [
 		{ icon: "clock", label: "Data retention", value: "7 days" },
 		{ icon: "grid", label: "Dashboards", value: "Unlimited" },
@@ -52,7 +53,7 @@ export function getPlanFeatures(planSlug: string | undefined): PlanFeature[] {
 	return PLAN_FEATURES[planSlug ?? DEFAULT_PLAN] ?? PLAN_FEATURES[DEFAULT_PLAN]
 }
 
-export const PLAN_DESCRIPTIONS: Record<string, string> = {
+const PLAN_DESCRIPTIONS: Record<string, string> = {
 	starter: "For individuals and small projects",
 	startup: "For growing teams",
 }

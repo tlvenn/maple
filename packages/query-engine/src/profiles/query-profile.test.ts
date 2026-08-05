@@ -50,8 +50,37 @@ describe("appendSettings", () => {
 	})
 
 	it("appends max_block_size", () => {
-		expect(appendSettings("SELECT 1", { maxBlockSize: 512 })).toBe(
-			"SELECT 1 SETTINGS max_block_size=512",
+		expect(appendSettings("SELECT 1", { maxBlockSize: 512 })).toBe("SELECT 1 SETTINGS max_block_size=512")
+	})
+
+	it("appends the verified full-text feature setting", () => {
+		expect(appendSettings("SELECT 1", { enableFullTextIndex: 1 })).toBe(
+			"SELECT 1 SETTINGS enable_full_text_index=1",
+		)
+	})
+
+	// Regression: Tinybird rejects `FORMAT JSON SETTINGS …` with
+	// "Syntax error: failed at position … (FORMAT)" — SETTINGS must precede
+	// a trailing FORMAT clause.
+	it("inserts SETTINGS before a trailing FORMAT clause", () => {
+		expect(appendSettings("SELECT 1 FORMAT JSON", { maxExecutionTime: 15 })).toBe(
+			"SELECT 1 SETTINGS max_execution_time=15 FORMAT JSON",
+		)
+	})
+
+	it("inserts SETTINGS before FORMAT with a trailing semicolon and newlines", () => {
+		expect(appendSettings("SELECT 1\nFORMAT JSONEachRow;", { maxThreads: 2 })).toBe(
+			"SELECT 1 SETTINGS max_threads=2\nFORMAT JSONEachRow",
+		)
+	})
+
+	it("leaves a trailing FORMAT untouched when settings are empty", () => {
+		expect(appendSettings("SELECT 1 FORMAT JSON", {})).toBe("SELECT 1 FORMAT JSON")
+	})
+
+	it("only treats a FORMAT at the end of the query as the format clause", () => {
+		expect(appendSettings("SELECT formatDateTime(now(), '%F') AS format_col", { maxThreads: 2 })).toBe(
+			"SELECT formatDateTime(now(), '%F') AS format_col SETTINGS max_threads=2",
 		)
 	})
 })
@@ -67,13 +96,17 @@ describe("stripTinybirdRestrictedSettings", () => {
 	})
 
 	it("drops maxBlockSize and keeps the rest", () => {
-		expect(
-			stripTinybirdRestrictedSettings({ maxExecutionTime: 15, maxBlockSize: 512 }),
-		).toEqual({ maxExecutionTime: 15 })
+		expect(stripTinybirdRestrictedSettings({ maxExecutionTime: 15, maxBlockSize: 512 })).toEqual({
+			maxExecutionTime: 15,
+		})
 	})
 
 	it("strips the body-search settings down to profile-safe values", () => {
 		expect(stripTinybirdRestrictedSettings({ ...LOGS_BODY_SEARCH_SETTINGS })).toEqual({})
+	})
+
+	it("strips full-text feature settings from managed Tinybird requests", () => {
+		expect(stripTinybirdRestrictedSettings({ enableFullTextIndex: 1 })).toEqual({})
 	})
 })
 

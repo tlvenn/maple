@@ -2,10 +2,9 @@
 	"name": "@maple/alerting",
 	"private": true,
 	"type": "module",
-	"portless": { "name": "alerting", "script": "dev:app" },
 	"scripts": {
 		"dev": "portless",
-		"dev:app": "bun run ../../scripts/portless-wrangler.ts --env-file ../../.env.local --persist-to ../api/.wrangler/state --test-scheduled --port ${PORT:-8788} --inspector-port=9231",
+		"dev:app": "bun run ../../scripts/portless-wrangler.ts --env-file ../../.env.local --persist-to ../api/.wrangler/state --test-scheduled --port ${PORT:-8788} --inspector-port=$((${PORT:-8788} + 10000))",
 		"deploy": "wrangler deploy",
 		"test": "echo 'No tests yet'",
 		"typecheck": "tsc --noEmit"
@@ -17,10 +16,15 @@
 		"effect": "catalog:effect"
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^4.20260405.0",
+		"@cloudflare/workers-types": "4.20260603.1",
 		"@effect/language-service": "catalog:effect",
+		"@maple/infra": "workspace:*",
 		"@types/node": "catalog:tooling",
 		"typescript": "catalog:tooling",
-		"wrangler": "^4.41.0"
+		"wrangler": "^4.118.0"
+	},
+	"portless": {
+		"name": "alerting",
+		"script": "dev:app"
 	}
 }

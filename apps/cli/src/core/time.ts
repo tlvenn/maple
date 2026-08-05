@@ -1,7 +1,7 @@
 // Time-range resolution for the CLI commands. Emits ClickHouse-style
 // `YYYY-MM-DD HH:mm:ss` UTC strings, matching what the query engine expects.
 
-import { Effect, Option, Schema } from "effect"
+import { Clock, Effect, Option, Schema } from "effect"
 
 export interface Range {
 	readonly startTime: string
@@ -9,10 +9,9 @@ export interface Range {
 }
 
 /** A bad `--since` / time-range input, surfaced to the user with a hint. */
-export class TimeRangeError extends Schema.TaggedErrorClass<TimeRangeError>()(
-	"@maple/cli/TimeRangeError",
-	{ message: Schema.String },
-) {}
+export class TimeRangeError extends Schema.TaggedErrorClass<TimeRangeError>()("@maple/cli/TimeRangeError", {
+	message: Schema.String,
+}) {}
 
 const pad = (n: number): string => String(n).padStart(2, "0")
 
@@ -61,9 +60,9 @@ export const resolveRangeChecked = (a: {
 				message: `unrecognized --since "${a.since}" — use Nm, Nh, or Nd (e.g. 30m, 6h, 7d)`,
 			})
 		}
-		const now = new Date()
+		const nowMs = yield* Clock.currentTimeMillis
 		return {
-			startTime: start ?? formatDateTimeUTC(new Date(now.getTime() - ms)),
-			endTime: end ?? formatDateTimeUTC(now),
+			startTime: start ?? formatDateTimeUTC(new Date(nowMs - ms)),
+			endTime: end ?? formatDateTimeUTC(new Date(nowMs)),
 		}
 	})

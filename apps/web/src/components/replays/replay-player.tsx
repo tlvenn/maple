@@ -1,12 +1,7 @@
 import * as React from "react"
 import "@rrweb/replay/dist/style.css"
-import { cn } from "@maple/ui/utils"
-import {
-	type DisplayMarker,
-	type IdleBand,
-	errorMessage,
-	useReplayPlayer,
-} from "./replay-player-context"
+import { cn } from "@maple/ui/lib/utils"
+import { type DisplayMarker, type IdleBand, errorMessage, useReplayPlayer } from "./replay-player-context"
 import {
 	GlobeIcon,
 	ArrowPathIcon,
@@ -34,8 +29,24 @@ function prettyUrl(url: string | undefined): string {
  * `ReplayPlayerProvider`, so this player and the `<ReplayEditorTimeline>` strip
  * below it read and drive the same playhead.
  */
-export function ReplaySurface({ url }: { url?: string }) {
-	const { status, error, figureRef, surfaceRef, mountRef, isFullscreen } = useReplayPlayer()
+export function ReplaySurface({
+	url,
+	detachedTransport = false,
+	docked = false,
+}: {
+	url?: string
+	/** Render only the browser chrome + video; the caller places `<ReplayTransport>`
+	 *  separately (so a side panel can match just the video block). Fullscreen always
+	 *  keeps the controls inside the figure. */
+	detachedTransport?: boolean
+	/** A docked `<ReplayTransport docked>` sits flush below: square off the bottom
+	 *  corners so surface + transport read as one unit. */
+	docked?: boolean
+}) {
+	const { status, error, sessionActive, figureRef, surfaceRef, mountRef, isFullscreen } = useReplayPlayer()
+	// A scrubber over a session that has no recording is a dead control; drop the
+	// whole transport rather than offer it.
+	const showTransport = status !== "unrecorded"
 
 	// Page-wide Space/←/→ transport — Space to play/pause, arrows to seek ±5s.
 	useReplayKeyboardShortcuts()
@@ -45,6 +56,7 @@ export function ReplaySurface({ url }: { url?: string }) {
 			ref={figureRef}
 			className={cn(
 				"m-0 overflow-hidden rounded-xl border border-border bg-card shadow-sm",
+				docked && "rounded-b-none shadow-none",
 				isFullscreen && "flex h-screen w-screen flex-col rounded-none border-0 bg-black",
 			)}
 		>
@@ -83,29 +95,71 @@ export function ReplaySurface({ url }: { url?: string }) {
 							</PlayerMessage>
 						)}
 						{status === "empty" && (
+							<PlayerMessage spinner={sessionActive}>
+								{sessionActive
+									? "Recording in progress — frames appear as chunks finish uploading."
+									: "This recording is too short to play back."}
+							</PlayerMessage>
+						)}
+						{status === "unrecorded" && (
 							<PlayerMessage>
-								No playable frames yet. The session may still be recording, or its event blobs
-								have expired.
+								This session wasn’t recorded. Replay is off or unsampled for this app — its
+								traces and events are still below.
 							</PlayerMessage>
 						)}
 					</div>
 				)}
 			</div>
 
-			<ReplayControls />
-
-			{/* Legend for the scrubber's action-marker dots — otherwise the colors
-			    are undiscoverable. Hidden in fullscreen to keep the surface clean. */}
-			{!isFullscreen && (
-				<div className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-3 py-1.5">
-					<MarkerLegend />
-				</div>
+			{/* Transport stays inside the figure unless the caller renders it detached
+			    below the surface. Fullscreen always keeps the controls in the figure. */}
+			{showTransport && (!detachedTransport || isFullscreen) && (
+				<>
+					<ReplayControls />
+					{/* Legend for the scrubber's action-marker dots — otherwise the colors
+					    are undiscoverable. Hidden in fullscreen to keep the surface clean. */}
+					{!isFullscreen && (
+						<div className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-3 py-1.5">
+							<MarkerLegend />
+						</div>
+					)}
+				</>
 			)}
 		</figure>
 	)
 }
 
-function ReplayControls() {
+/**
+ * The transport controls, rendered detached from the player surface. Pair with
+ * `<ReplaySurface detachedTransport />`. With `docked` it drops its own card
+ * chrome and sits flush against a `<ReplaySurface docked>` above — one visual
+ * unit, separated by the shared border. The marker legend then lives in the
+ * timeline header instead of here.
+ */
+export function ReplayTransport({ docked = false }: { docked?: boolean }) {
+	const { isFullscreen, status } = useReplayPlayer()
+	// In fullscreen the controls live inside the fullscreen figure.
+	if (isFullscreen) return null
+	// Nothing was ever recorded — see `showTransport` in `<ReplaySurface>`.
+	if (status === "unrecorded") return null
+	if (docked) {
+		return (
+			<div className="overflow-hidden rounded-b-xl border border-t-0 border-border bg-card">
+				<ReplayControls detached />
+			</div>
+		)
+	}
+	return (
+		<div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+			<ReplayControls detached />
+			<div className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-3 py-1.5">
+				<MarkerLegend />
+			</div>
+		</div>
+	)
+}
+
+function ReplayControls({ detached = false }: { detached?: boolean }) {
 	const {
 		isPlaying,
 		finished,
@@ -124,84 +178,96 @@ function ReplayControls() {
 	} = useReplayPlayer()
 
 	return (
-		<div className="flex items-center gap-3 border-t border-border bg-card px-3 py-2.5">
-			<button
-				type="button"
-				onClick={togglePlay}
-				aria-label={finished ? "Replay" : isPlaying ? "Pause" : "Play"}
-				aria-keyshortcuts="Space"
-				title={`${finished ? "Replay" : isPlaying ? "Pause" : "Play"} (Space)`}
-				className="grid size-9 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-transform hover:scale-105 active:scale-95"
-			>
-				{finished ? (
-					<ArrowPathIcon className="size-4" />
-				) : isPlaying ? (
-					<MediaPauseIcon className="size-4" />
-				) : (
-					<MediaPlayIcon className="size-4 translate-x-px" />
-				)}
-			</button>
+		// On phones the controls stack into two rows; at ≥640px the inner wrappers
+		// collapse to `display:contents` so everything flows into one row exactly as
+		// before. Row 1 is play + scrubber + clock; row 2 is speed + skip + fullscreen.
+		<div
+			className={cn(
+				"flex flex-col gap-2 bg-card px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3",
+				// Attached: a divider from the surface above. Detached: it's the top of
+				// its own card, so no divider.
+				!detached && "border-t border-border",
+			)}
+		>
+			<div className="flex items-center gap-3 sm:contents">
+				<button
+					type="button"
+					onClick={togglePlay}
+					aria-label={finished ? "Replay" : isPlaying ? "Pause" : "Play"}
+					aria-keyshortcuts="Space"
+					title={`${finished ? "Replay" : isPlaying ? "Pause" : "Play"} (Space)`}
+					className="relative grid size-9 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition-transform hover:scale-105 active:scale-95 pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11"
+				>
+					{finished ? (
+						<ArrowPathIcon className="size-4" />
+					) : isPlaying ? (
+						<MediaPauseIcon className="size-4" />
+					) : (
+						<MediaPlayIcon className="size-4 translate-x-px" />
+					)}
+				</button>
 
-			<Scrubber
-				currentMs={displayCurrentMs}
-				totalMs={displayTotalMs}
-				markers={markers}
-				idleBands={idleBands}
-				onSeek={seekDisplay}
-			/>
+				<Scrubber
+					currentMs={displayCurrentMs}
+					totalMs={displayTotalMs}
+					markers={markers}
+					idleBands={idleBands}
+					onSeek={seekDisplay}
+				/>
 
-			<div className="flex shrink-0 items-center gap-1 font-mono text-xs tabular-nums text-muted-foreground">
-				<span className="text-foreground">{formatClock(displayCurrentMs)}</span>
-				<span className="opacity-50">/</span>
-				<span>{formatClock(displayTotalMs)}</span>
+				<div className="flex shrink-0 items-center gap-1 font-mono text-xs tabular-nums text-muted-foreground">
+					<span className="text-foreground">{formatClock(displayCurrentMs)}</span>
+					<span className="opacity-50">/</span>
+					<span>{formatClock(displayTotalMs)}</span>
+				</div>
 			</div>
 
-			<div className="flex shrink-0 items-center rounded-md bg-muted p-0.5">
-				{SPEEDS.map((s) => (
-					<button
-						key={s}
-						type="button"
-						onClick={() => changeSpeed(s)}
-						className={cn(
-							"rounded px-1.5 py-0.5 text-xs font-medium tabular-nums transition-colors",
-							speed === s
-								? "bg-background text-foreground shadow-sm"
-								: "text-muted-foreground hover:text-foreground",
-						)}
-					>
-						{s}×
-					</button>
-				))}
+			<div className="flex items-center gap-2 sm:contents">
+				<div className="flex shrink-0 items-center rounded-md bg-muted p-0.5">
+					{SPEEDS.map((s) => (
+						<button
+							key={s}
+							type="button"
+							onClick={() => changeSpeed(s)}
+							className={cn(
+								// Grouped control: expand the touch target vertically only
+								// (min-h) so adjacent segments' hit areas don't overlap.
+								"relative rounded px-1.5 py-0.5 text-xs font-medium tabular-nums transition-colors pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11",
+								speed === s
+									? "bg-background text-foreground shadow-sm"
+									: "text-muted-foreground hover:text-foreground",
+							)}
+						>
+							{s}×
+						</button>
+					))}
+				</div>
+
+				<button
+					type="button"
+					onClick={toggleSkipInactive}
+					aria-pressed={skipInactive}
+					title={skipInactive ? "Idle gaps skipped during playback" : "Skip idle gaps"}
+					className={cn(
+						"relative shrink-0 rounded-md px-2 py-1 text-xs font-medium transition-colors pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11",
+						skipInactive
+							? "bg-primary/10 text-primary"
+							: "text-muted-foreground hover:bg-muted hover:text-foreground",
+					)}
+				>
+					Skip idle
+				</button>
+
+				<button
+					type="button"
+					onClick={toggleFullscreen}
+					aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+					title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+					className="relative grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground max-sm:ml-auto pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11"
+				>
+					{isFullscreen ? <MinimizeIcon className="size-4" /> : <MaximizeIcon className="size-4" />}
+				</button>
 			</div>
-
-			<button
-				type="button"
-				onClick={toggleSkipInactive}
-				aria-pressed={skipInactive}
-				title={skipInactive ? "Idle gaps skipped during playback" : "Skip idle gaps"}
-				className={cn(
-					"shrink-0 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-					skipInactive
-						? "bg-primary/10 text-primary"
-						: "text-muted-foreground hover:bg-muted hover:text-foreground",
-				)}
-			>
-				Skip idle
-			</button>
-
-			<button
-				type="button"
-				onClick={toggleFullscreen}
-				aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-				title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-				className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-			>
-				{isFullscreen ? (
-					<MinimizeIcon className="size-4" />
-				) : (
-					<MaximizeIcon className="size-4" />
-				)}
-			</button>
 		</div>
 	)
 }
@@ -317,9 +383,9 @@ function Scrubber({
 						/>
 					)
 				})}
-			{/* Thumb */}
+			{/* Thumb — hover-revealed on desktop, always shown on touch (no hover). */}
 			<div
-				className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+				className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background opacity-0 shadow-sm transition-opacity group-hover:opacity-100 pointer-coarse:opacity-100"
 				style={{ left: `${pct}%`, opacity: dragging ? 1 : undefined }}
 			/>
 		</div>

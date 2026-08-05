@@ -1,3 +1,4 @@
+import { useState } from "react"
 import {
 	PlusIcon,
 	PencilIcon,
@@ -6,6 +7,8 @@ import {
 	DotsVerticalIcon,
 	DownloadIcon,
 	HistoryIcon,
+	BracketsCurlyIcon,
+	TagIcon,
 } from "@/components/icons"
 
 import { Button } from "@maple/ui/components/ui/button"
@@ -18,9 +21,14 @@ import {
 } from "@maple/ui/components/ui/dropdown-menu"
 import { TimeRangePicker } from "@/components/time-range-picker/time-range-picker"
 import { ReloadControls } from "@/components/time-range-picker/reload-controls"
+import { VariableSelects } from "@/components/dashboard-builder/toolbar/variable-selects"
 import { useDashboardTimeRange } from "@/components/dashboard-builder/dashboard-providers"
 import { useDashboardActions } from "@/components/dashboard-builder/dashboard-actions-context"
 import { downloadPortableDashboard } from "@/components/dashboard-builder/portable-dashboard"
+import { VariablesManagerDialog } from "@/components/dashboard-builder/config/variables-manager-dialog"
+import { TagEditorDialog } from "@/components/dashboard-builder/tag-editor"
+import { collectTags } from "@/components/dashboard-builder/list/dashboard-summary"
+import { useDashboardStore } from "@/hooks/use-dashboard-store"
 import type { Dashboard } from "@/components/dashboard-builder/types"
 
 interface DashboardToolbarProps {
@@ -41,11 +49,24 @@ export function DashboardToolbar({
 		state: { timeRange, resolvedTimeRange },
 		actions: { setTimeRange },
 	} = useDashboardTimeRange()
+	const { updateDashboardVariables, updateDashboard, dashboards } = useDashboardStore()
+	const [variablesDialogOpen, setVariablesDialogOpen] = useState(false)
+	const [tagsDialogOpen, setTagsDialogOpen] = useState(false)
 
 	const isEdit = mode === "edit"
 
 	return (
-		<div className="flex items-center gap-3">
+		// Wraps rather than overflows: variable chips, the time picker and the
+		// action group together need ~700px, which the canvas does not have on a
+		// phone or with both sidebars open. Gating is on `@container/page`
+		// (declared by PageLayout.Content) because the sidebars, not the viewport,
+		// decide how much room this actually gets.
+		<div className="flex flex-wrap items-center justify-end gap-2 @min-[720px]/page:gap-3">
+			<div className="flex min-w-0 max-w-full items-center overflow-x-auto">
+				<VariableSelects
+					onManage={isEdit && !readOnly ? () => setVariablesDialogOpen(true) : undefined}
+				/>
+			</div>
 			<TimeRangePicker
 				hotkey
 				startTime={resolvedTimeRange?.startTime}
@@ -72,10 +93,18 @@ export function DashboardToolbar({
 			<ReloadControls />
 
 			<div className="flex items-center gap-1">
+				{/* Labels collapse to icon-only on a narrow canvas; `aria-label`
+				    keeps the buttons named for screen readers either way. */}
 				{isEdit && (
-					<Button variant="outline" size="sm" onClick={onAddWidget} disabled={readOnly}>
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={onAddWidget}
+						disabled={readOnly}
+						aria-label="Add widget"
+					>
 						<PlusIcon size={14} data-icon="inline-start" />
-						Add Widget
+						<span className="hidden @min-[560px]/page:inline">Add Widget</span>
 					</Button>
 				)}
 				<Button
@@ -83,13 +112,14 @@ export function DashboardToolbar({
 					size="sm"
 					onClick={onToggleEdit}
 					disabled={readOnly}
+					aria-label={isEdit ? "Done editing" : "Edit dashboard"}
 				>
 					{isEdit ? (
 						<CheckIcon size={14} data-icon="inline-start" />
 					) : (
 						<PencilIcon size={14} data-icon="inline-start" />
 					)}
-					{isEdit ? "Done" : "Edit"}
+					<span className="hidden @min-[560px]/page:inline">{isEdit ? "Done" : "Edit"}</span>
 				</Button>
 				<DropdownMenu>
 					<DropdownMenuTrigger
@@ -106,6 +136,26 @@ export function DashboardToolbar({
 							>
 								<GridIcon size={14} />
 								Auto Layout
+							</DropdownMenuItem>
+						)}
+						{isEdit && (
+							<DropdownMenuItem
+								onClick={() => setVariablesDialogOpen(true)}
+								disabled={readOnly}
+								className="whitespace-nowrap"
+							>
+								<BracketsCurlyIcon size={14} />
+								Variables
+							</DropdownMenuItem>
+						)}
+						{isEdit && (
+							<DropdownMenuItem
+								onClick={() => setTagsDialogOpen(true)}
+								disabled={readOnly}
+								className="whitespace-nowrap"
+							>
+								<TagIcon size={14} />
+								Tags
 							</DropdownMenuItem>
 						)}
 						{onOpenHistory && (
@@ -125,6 +175,22 @@ export function DashboardToolbar({
 					</DropdownMenuContent>
 				</DropdownMenu>
 			</div>
+
+			<VariablesManagerDialog
+				open={variablesDialogOpen}
+				onOpenChange={setVariablesDialogOpen}
+				variables={dashboard.variables ?? []}
+				onSave={(variables) => updateDashboardVariables(dashboard.id, variables)}
+			/>
+
+			<TagEditorDialog
+				open={tagsDialogOpen}
+				onOpenChange={setTagsDialogOpen}
+				dashboardName={dashboard.name}
+				tags={dashboard.tags ?? []}
+				suggestions={collectTags(dashboards)}
+				onSave={(tags) => updateDashboard(dashboard.id, { tags })}
+			/>
 		</div>
 	)
 }

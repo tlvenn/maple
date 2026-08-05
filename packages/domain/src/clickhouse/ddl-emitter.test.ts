@@ -14,9 +14,7 @@ describe("ClickHouse DDL emitter", () => {
 		const stmts = emitProjectDdl(manifest)
 
 		expect(stmts.length).toBe(manifest.datasources.length + manifest.pipes.length)
-		expect(stmts.filter((s) => s.startsWith("CREATE TABLE")).length).toBe(
-			manifest.datasources.length,
-		)
+		expect(stmts.filter((s) => s.startsWith("CREATE TABLE")).length).toBe(manifest.datasources.length)
 		expect(stmts.filter((s) => s.startsWith("CREATE MATERIALIZED VIEW")).length).toBe(
 			manifest.pipes.length,
 		)
@@ -54,6 +52,15 @@ describe("ClickHouse DDL emitter", () => {
 		expect(ddl).toContain("INDEX idx_resource_attr_vals mapValues(ResourceAttributes)")
 	})
 
+	it("keeps generated DDL portable while text indexes are reconciled separately", async () => {
+		const manifest = await buildTinybirdProjectManifest()
+		const logs = manifest.datasources.find((ds) => ds.name === "logs")
+
+		const portable = emitCreateTable(logs!)
+		expect(portable).toContain("INDEX idx_lower_body lower(Body) TYPE tokenbf_v1")
+		expect(portable).not.toContain("TYPE text(")
+	})
+
 	it("does not include FORWARD_QUERY blocks (Tinybird-only)", async () => {
 		const manifest = await buildTinybirdProjectManifest()
 		const traces = manifest.datasources.find((ds) => ds.name === "traces")
@@ -84,6 +91,9 @@ describe("ClickHouse DDL emitter", () => {
 		expect(orgId?.jsonPath).toBe("$.resource_attributes.maple_org_id")
 		const body = spec.find((c) => c.column === "Body")
 		expect(body?.jsonPath).toBe("$.body")
+		const resourceItems = spec.find((c) => c.column === "ResourceAttributeItems")
+		expect(resourceItems?.jsonPath).toBe("$.ResourceAttributeItems[:]")
+		expect(resourceItems?.hasDefaultExpression).toBe(true)
 
 		// Datasources populated only by MVs (e.g. service_usage) have no JSONPaths.
 		const serviceUsage = manifest.datasources.find((ds) => ds.name === "service_usage")
@@ -101,6 +111,27 @@ describe("ClickHouse DDL emitter", () => {
 		const aggDs = manifest.datasources.find((ds) => ds.name === "logs_aggregates_hourly")
 		const aggDdl = emitCreateTable(aggDs!, { engineFlavor: "ReplicatedMergeTree" })
 		expect(aggDdl).toContain("ENGINE = AggregatingMergeTree")
+	})
+
+	it("emits the service-operation rollup key, lifecycle, and MV projection", async () => {
+		const manifest = await buildTinybirdProjectManifest()
+		const rollup = manifest.datasources.find((ds) => ds.name === "service_operations_minutely")
+		const mv = manifest.pipes.find((pipe) => pipe.name === "service_operations_minutely_mv")
+		expect(rollup).toBeDefined()
+		expect(mv).toBeDefined()
+
+		const tableDdl = emitCreateTable(rollup!)
+		expect(tableDdl).toContain("ENGINE = AggregatingMergeTree")
+		expect(tableDdl).toContain("PARTITION BY toDate(Minute)")
+		expect(tableDdl).toContain("ORDER BY (OrgId, ServiceName, DeploymentEnv, Minute, SpanName)")
+		expect(tableDdl).toContain("TTL toDate(Minute) + INTERVAL 90 DAY")
+		expect(tableDdl).toContain("DurationQuantiles AggregateFunction(quantilesTDigest(0.5, 0.95), UInt64)")
+
+		const mvDdl = emitCreateMaterializedView(mv!)
+		expect(mvDdl).toContain("FROM traces")
+		expect(mvDdl).toContain("toStartOfMinute(toDateTime(Timestamp)) AS Minute")
+		expect(mvDdl).toContain("http.route")
+		expect(mvDdl).toContain("GROUP BY OrgId, Minute, ServiceName, DeploymentEnv, SpanName")
 	})
 })
 
@@ -157,9 +188,7 @@ ENGINE = MergeTree`
 	})
 
 	it("returns null for non-CREATE-TABLE input", () => {
-		expect(
-			extractColumnDefinition("CREATE MATERIALIZED VIEW foo TO bar AS SELECT 1", "OrgId"),
-		).toBeNull()
+		expect(extractColumnDefinition("CREATE MATERIALIZED VIEW foo TO bar AS SELECT 1", "OrgId")).toBeNull()
 		expect(extractColumnDefinition("not sql at all", "OrgId")).toBeNull()
 	})
 

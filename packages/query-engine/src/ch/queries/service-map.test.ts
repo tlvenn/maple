@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Exit } from "effect"
-import { compileCH } from "../compile"
+import { compileCH, param, toDateTime } from "@maple-dev/clickhouse-builder"
 import {
 	serviceDbEdgesSQL,
 	serviceDbEdgesForServiceQuery,
@@ -10,9 +10,22 @@ import {
 	serviceDependenciesSQL,
 	serviceDependenciesForServiceQuery,
 	serviceExternalEdgesSQL,
+	serviceMapEdgeJoinQuery,
 	servicePlatformsSQL,
 } from "./service-map"
-import { serviceMapResolutionsRollupSQL } from "./service-map-rollup"
+import { serviceMapEdgesRollupSQL, serviceMapResolutionsRollupSQL } from "./service-map-rollup"
+import { ServiceMapEdgesHourly } from "../tables"
+import { DB_NAMESPACE_ATTR_SQL } from "@maple/domain/tinybird/db-query-shape-sql"
+
+// The read side must derive `DbNamespace` byte-identically to the write side's
+// `DB_NAMESPACE_ATTR_SQL` (Hyperdrive-collapsing coalesce) or the sealed-hour and
+// raw-fallback branches won't merge. Assertions below reference these directly so
+// a drift in either surface fails the build.
+//
+// Sealed rows already store the collapsed value, but pre-migration rows still hold
+// the raw Hyperdrive hex, so the sealed column is re-collapsed on read too:
+const SEALED_NAMESPACE_COLLAPSE =
+	"if(match(DbNamespace, '^([0-9a-fA-F]{32}|.*[.]hyperdrive[.]local)$'), 'hyperdrive', DbNamespace)"
 
 const baseParams = {
 	orgId: "org_1",
@@ -31,6 +44,28 @@ describe("serviceExternalEdgesSQL", () => {
 		expect(sql).toContain("ServiceName = 'artifacts-api'")
 		expect(sql).toContain("toStartOfHour(toDateTime('2024-01-01 00:00:00'))")
 		expect(sql).toContain("toStartOfHour(toDateTime('2024-01-02 00:00:00'))")
+	})
+
+	it("derives tenant scope from its union branches, not from the anti-join", () => {
+		const compiled = serviceExternalEdgesSQL({ serviceName: "artifacts-api" }, baseParams)
+		// The outer query carries no OrgId predicate of its own — both branches do.
+		// The `NOT IN (…)` subquery is scoped too, but a subquery never confines
+		// its outer scan, so it must not be what makes this pass.
+		expect(compiled.tenantScope).toBe("org")
+	})
+
+	it("suppresses internal-service overlap only for http targets", () => {
+		const { sql } = serviceExternalEdgesSQL({ serviceName: "artifacts-api" }, baseParams)
+		expect(sql).toContain("targetType = 'http'")
+		expect(sql).toContain("targetName IN (")
+		expect(sql).toContain("FROM service_address_resolutions_hourly")
+		expect(sql).toContain("NOT (")
+	})
+
+	it("filters the computed targetName in HAVING, after the GROUP BY", () => {
+		const { sql } = serviceExternalEdgesSQL({ serviceName: "artifacts-api" }, baseParams)
+		expect(sql).toContain("HAVING targetName != ''")
+		expect(sql.indexOf("HAVING")).toBeGreaterThan(sql.indexOf("GROUP BY"))
 	})
 
 	it("unions hourly MV branch with raw-traces fallback for the in-progress hour", () => {
@@ -209,6 +244,21 @@ describe("serviceMapResolutionsRollupSQL", () => {
 // ---------------------------------------------------------------------------
 
 describe("serviceDependenciesSQL", () => {
+	it("reads partial boundary hours from raw spans without widening the start", () => {
+		const { sql } = serviceDependenciesSQL(
+			{},
+			{
+				orgId: "org_1",
+				startTime: "2024-01-01 10:15:00",
+				endTime: "2024-01-01 12:30:00",
+			},
+		)
+		expect(sql).toContain("Timestamp >= toDateTime('2024-01-01 10:15:00')")
+		expect(sql).toContain("addHours(toStartOfHour(toDateTime('2024-01-01 10:15:00')), 1)")
+		expect(sql).toContain("greatest(least(")
+		expect(sql).not.toContain("Timestamp >= toStartOfHour(toDateTime('2024-01-01 10:15:00'))")
+	})
+
 	it.effect("decodes service dependency rows with numeric strings from ClickHouse JSON", () =>
 		Effect.gen(function* () {
 			const compiled = serviceDependenciesSQL({ deploymentEnv: "production" }, baseParams)
@@ -238,9 +288,96 @@ describe("serviceDependenciesSQL", () => {
 			])
 		}),
 	)
+
+	// The outer SELECT re-aggregates over a UNION ALL. If an inner branch reused
+	// an outer alias, ClickHouse's UNION-ALL + GROUP-BY optimizer rewrites the
+	// outer as `sum(sum(CallCount))` and rejects the query outright. The `bucket*`
+	// prefix on every inner aggregate is what keeps the two alias sets disjoint.
+	it("never nests an aggregate inside another aggregate", () => {
+		for (const opts of [{}, { deploymentEnv: "production" }]) {
+			const { sql } = serviceDependenciesSQL(opts, baseParams)
+			expect(sql).not.toContain("sum(sum(")
+			expect(sql).not.toContain("max(max(")
+			expect(sql).not.toContain("count(count(")
+		}
+	})
+
+	it("keeps the union branches' aliases disjoint from the outer aggregates", () => {
+		const { sql } = serviceDependenciesSQL({}, baseParams)
+		// Inner branches project `bucket*`; the outer projects the public names.
+		for (const outerAlias of ["callCount", "errorCount", "p95DurationMs", "estimatedSpanCount"]) {
+			expect(sql).toContain(`AS ${outerAlias}`)
+			expect(sql).not.toContain(`AS bucket${outerAlias}`)
+		}
+		for (const innerAlias of [
+			"bucketCallCount",
+			"bucketErrorCount",
+			"bucketDurationSumMs",
+			"bucketMaxDurationMs",
+			"bucketEstimatedSpanCount",
+		]) {
+			expect(sql).toContain(`AS ${innerAlias}`)
+		}
+	})
+
+	it("derives tenant scope from its branches rather than asserting it", () => {
+		// The outer query has no OrgId predicate — every union branch carries one.
+		expect(serviceDependenciesSQL({}, baseParams).tenantScope).toBe("org")
+	})
+})
+
+describe("serviceMapEdgeJoinQuery", () => {
+	const compiledRollup = () =>
+		serviceMapEdgesRollupSQL({
+			orgId: "org_1",
+			hourStart: "2024-01-01 10:00:00",
+			hourEnd: "2024-01-01 11:00:00",
+		})
+
+	// These rows are `ingest`ed into service_map_edges_hourly verbatim. A renamed
+	// or dropped output column corrupts the rollup table, and nothing downstream
+	// would notice — the ingest just writes defaults.
+	it("projects exactly the service_map_edges_hourly column set", () => {
+		const { sql } = compiledRollup()
+		const selectClause = sql.slice(0, sql.indexOf("FROM ("))
+		const aliases = [...selectClause.matchAll(/ AS (\w+)/g)].map((m) => m[1])
+
+		expect(new Set(aliases)).toEqual(new Set(Object.keys(ServiceMapEdgesHourly.columns)))
+	})
+
+	it("filters OrgId on both join sides, so the scope is derived", () => {
+		const compiled = compiledRollup()
+		expect(compiled.sql.match(/OrgId = 'org_1'/g)).toHaveLength(2)
+		expect(compiled.tenantScope).toBe("org")
+	})
+
+	it("pushes a source-service filter into the parent subquery, not the outer WHERE", () => {
+		const { sql } = compileCH(
+			serviceMapEdgeJoinQuery({
+				rangeStart: toDateTime(param.dateTime("hourStart")),
+				rangeEnd: toDateTime(param.dateTime("hourEnd")),
+				parentServiceName: "web",
+			}),
+			{ orgId: "org_1", hourStart: "2024-01-01 10:00:00", hourEnd: "2024-01-01 11:00:00" },
+		)
+		// Inside the parent subquery — before the JOIN — so ClickHouse can skip
+		// the full Client/Producer scan rather than filtering after the join.
+		expect(sql.indexOf("ServiceName = 'web'")).toBeLessThan(sql.indexOf("INNER JOIN"))
+	})
 })
 
 describe("serviceDependenciesForServiceQuery", () => {
+	it("keeps partial start and end hours outside the hourly rollup", () => {
+		const { sql } = compileCH(serviceDependenciesForServiceQuery({ serviceName: "artifacts-api" }), {
+			orgId: "org_1",
+			startTime: "2024-01-01 10:15:00",
+			endTime: "2024-01-01 12:30:00",
+		})
+		expect(sql).toContain("Timestamp >= toDateTime('2024-01-01 10:15:00')")
+		expect(sql).toContain("addHours(toStartOfHour(toDateTime('2024-01-01 10:15:00')), 1)")
+		expect(sql).toContain("greatest(least(")
+	})
+
 	it("filters SourceService on the hourly branch", () => {
 		const { sql } = compileCH(
 			serviceDependenciesForServiceQuery({ serviceName: "artifacts-api" }),
@@ -321,6 +458,7 @@ describe("serviceDbEdgesForServiceQuery", () => {
 				{
 					sourceService: "artifacts-api",
 					dbSystem: "postgresql",
+					dbNamespace: "orders",
 					callCount: "42",
 					errorCount: "3",
 					avgDurationMs: "14.25",
@@ -333,6 +471,7 @@ describe("serviceDbEdgesForServiceQuery", () => {
 				{
 					sourceService: "artifacts-api",
 					dbSystem: "postgresql",
+					dbNamespace: "orders",
 					callCount: 42,
 					errorCount: 3,
 					avgDurationMs: 14.25,
@@ -343,34 +482,57 @@ describe("serviceDbEdgesForServiceQuery", () => {
 		}),
 	)
 
+	it("splits database nodes by namespace on both branches, collapsing Hyperdrive (org-wide SQL)", () => {
+		const { sql } = serviceDbEdgesSQL({}, baseParams)
+		// hourly branch reads the rollup's stored dimension, re-collapsing pre-migration hex…
+		expect(sql).toContain(`${SEALED_NAMESPACE_COLLAPSE} AS dbNamespace`)
+		// …the raw branch derives the SAME identity via the shared write-side fragment
+		expect(sql).toContain(`${DB_NAMESPACE_ATTR_SQL} AS dbNamespace`)
+		// …and every GROUP BY carries it so distinct databases stay distinct rows
+		const matches = sql.match(/GROUP BY sourceService, dbSystem, dbNamespace/g)
+		expect(matches?.length).toBe(3)
+	})
+
+	it("guards the org-wide raw branch against unnamed spans (ServiceName != '')", () => {
+		// Org-wide (no serviceName) still needs the empty-service guard on the raw
+		// in-progress-hour branch — the hourly MV already applies it at write time.
+		const { sql } = serviceDbEdgesSQL({}, baseParams)
+		expect(sql).toContain("ServiceName != ''")
+	})
+
 	it("filters ServiceName on both branches (hourly MV + raw traces)", () => {
-		const { sql } = compileCH(
-			serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }),
-			baseParams,
-		)
+		const { sql } = compileCH(serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }), baseParams)
 		const matches = sql.match(/ServiceName = 'artifacts-api'/g)
 		// One in the hourly branch, one in the raw-traces fallback.
 		expect(matches && matches.length === 2).toBe(true)
 	})
 
 	it("unions service_map_db_edges_hourly with raw traces for the in-progress hour", () => {
-		const { sql } = compileCH(
-			serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }),
-			baseParams,
-		)
+		const { sql } = compileCH(serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }), baseParams)
 		expect(sql).toContain("FROM service_map_db_edges_hourly")
 		expect(sql).toContain("FROM traces")
 		expect(sql).toContain("UNION ALL")
 		expect(sql).toContain("Timestamp >= toStartOfHour(toDateTime('2024-01-02 00:00:00'))")
 	})
 
-	it("restricts the raw branch to Client/Producer spans with db.system.name set", () => {
-		const { sql } = compileCH(
-			serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }),
-			baseParams,
-		)
+	it("restricts the raw branch to Client/Producer spans with a db system set (stable + legacy)", () => {
+		const { sql } = compileCH(serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }), baseParams)
 		expect(sql).toContain("SpanKind IN ('Client', 'Producer')")
-		expect(sql).toContain("SpanAttributes['db.system.name'] != ''")
+		// Same stable→legacy coalesce as the MV write side (DB_SYSTEM_ATTR_SQL).
+		expect(sql).toContain(
+			"coalesce(nullIf(SpanAttributes['db.system.name'], ''), SpanAttributes['db.system']) != ''",
+		)
+	})
+
+	it("carries dbNamespace on both branches so distinct databases split", () => {
+		const { sql } = compileCH(serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }), baseParams)
+		// hourly branch reads the rollup's stored dimension
+		expect(sql).toContain("DbNamespace")
+		// raw branch derives the identity via the shared coalesce order
+		expect(sql).toContain("SpanAttributes['db.namespace']")
+		expect(sql).toContain("SpanAttributes['db.name']")
+		expect(sql).toContain("SpanAttributes['server.address']")
+		expect(sql).toContain("SpanAttributes['net.peer.name']")
 	})
 
 	it("threads deploymentEnv through both branches", () => {
@@ -386,20 +548,14 @@ describe("serviceDbEdgesForServiceQuery", () => {
 	})
 
 	it("orders by callCount desc, limits to 200, formats as JSON", () => {
-		const { sql } = compileCH(
-			serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }),
-			baseParams,
-		)
+		const { sql } = compileCH(serviceDbEdgesForServiceQuery({ serviceName: "artifacts-api" }), baseParams)
 		expect(sql).toContain("ORDER BY callCount DESC")
 		expect(sql).toContain("LIMIT 200")
 		expect(sql).toContain("FORMAT JSON")
 	})
 
 	it("escapes single quotes in serviceName to prevent SQL injection", () => {
-		const { sql } = compileCH(
-			serviceDbEdgesForServiceQuery({ serviceName: "weird'service" }),
-			baseParams,
-		)
+		const { sql } = compileCH(serviceDbEdgesForServiceQuery({ serviceName: "weird'service" }), baseParams)
 		expect(sql).toContain("ServiceName = 'weird\\'service'")
 	})
 })
@@ -511,6 +667,46 @@ describe("service-map database query summaries", () => {
 		expect(topQueries).toContain("LIMIT 50")
 	})
 
+	it("scopes to one database identity when dbNamespace is set (rollup + raw branches)", () => {
+		const { sql } = serviceDbQuerySummarySQL({ ...params, dbNamespace: "orders" })
+		// sealed rollup branch filters the stored dimension (re-collapsed)…
+		expect(sql).toContain(`${SEALED_NAMESPACE_COLLAPSE} = 'orders'`)
+		// …the raw branch filters via the shared identity fragment
+		expect(sql).toContain(`${DB_NAMESPACE_ATTR_SQL} = 'orders'`)
+	})
+
+	it("treats dbNamespace='' as the legacy/unknown node and undefined as unscoped", () => {
+		const scoped = serviceDbQuerySummarySQL({ ...params, dbNamespace: "" }).sql
+		expect(scoped).toContain(`${SEALED_NAMESPACE_COLLAPSE} = ''`)
+		const unscoped = serviceDbQuerySummarySQL(params).sql
+		expect(unscoped).not.toContain(`${SEALED_NAMESPACE_COLLAPSE} = `)
+	})
+
+	it("scopes hour-aligned timeseries and top-queries to dbNamespace on both branches", () => {
+		// Both sibling builders must thread the same filter as the summary — a
+		// regression here silently widens the panel to every database of the system.
+		// (Sub-hour timeseries is raw-only, covered separately below.)
+		const namespaceCoalesce = `${DB_NAMESPACE_ATTR_SQL} = 'orders'`
+		const timeseries = serviceDbQueryTimeseriesSQL({
+			...params,
+			dbNamespace: "orders",
+			bucketSeconds: 3600,
+		}).sql
+		const topQueries = serviceDbTopQueriesSQL({ ...params, dbNamespace: "orders" }).sql
+		for (const sql of [timeseries, topQueries]) {
+			expect(sql).toContain(`${SEALED_NAMESPACE_COLLAPSE} = 'orders'`) // sealed rollup branch
+			expect(sql).toContain(namespaceCoalesce) // raw in-progress-hour branch
+		}
+	})
+
+	it("scopes sub-hour timeseries to dbNamespace via the raw identity fragment", () => {
+		// The <1h path reads raw traces only (rollup can't serve sub-hour buckets),
+		// so it filters on the coalesced identity, not the stored DbNamespace column.
+		const { sql } = serviceDbQueryTimeseriesSQL({ ...params, dbNamespace: "orders", bucketSeconds: 300 })
+		expect(sql).not.toContain("service_map_db_query_shapes_hourly")
+		expect(sql).toContain(`${DB_NAMESPACE_ATTR_SQL} = 'orders'`)
+	})
+
 	it("escapes raw params in summary SQL", () => {
 		const { sql } = serviceDbQuerySummarySQL({
 			...baseParams,
@@ -577,15 +773,15 @@ describe("service-map database query summaries", () => {
 			expect(rows).toEqual([
 				{
 					bucket: "2024-01-01 00:05:00",
-				queryCount: 12,
-				estimatedQueryCount: 16,
-				errorCount: 1,
-				errorRate: 0.0625,
-				avgDurationMs: 7.5,
-				p50DurationMs: 4,
-				p95DurationMs: 20,
-			},
-		])
+					queryCount: 12,
+					estimatedQueryCount: 16,
+					errorCount: 1,
+					errorRate: 0.0625,
+					avgDurationMs: 7.5,
+					p50DurationMs: 4,
+					p95DurationMs: 20,
+				},
+			])
 		}),
 	)
 

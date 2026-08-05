@@ -1,10 +1,10 @@
 import { McpQueryError, optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
-import { formatTable, truncate } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatTable, truncate } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { AlertsService } from "@/services/AlertsService"
+import { AlertsService } from "@/services/alerts/AlertsService"
 
 const comparatorLabel: Record<string, string> = {
 	gt: ">",
@@ -32,7 +32,7 @@ export function registerListAlertIncidentsTool(server: McpToolRegistrar) {
 					(error) =>
 						new McpQueryError({
 							message: error.message,
-							pipe: "list_alert_incidents",
+							pipeName: "list_alert_incidents",
 							cause: error,
 						}),
 				),
@@ -60,7 +60,7 @@ export function registerListAlertIncidentsTool(server: McpToolRegistrar) {
 				orgId: tenant.orgId,
 				status: status ?? "all",
 				severity: severity ?? "all",
-				resultCount: incidents.length,
+				"result.rowCount": incidents.length,
 			})
 
 			const lines: string[] = [

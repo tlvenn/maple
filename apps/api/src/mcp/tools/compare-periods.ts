@@ -1,12 +1,13 @@
 import { McpQueryError, optionalStringParam, type McpToolRegistrar } from "./types"
-import { queryWarehouse } from "../lib/query-warehouse"
-import { getSpamPatternsParam } from "@/lib/spam-patterns"
-import { resolveTimeRange } from "../lib/time"
-import { formatPercent, formatDurationFromMs, formatNumber, formatTable } from "../lib/format"
+import { queryWarehouse } from "@/mcp/lib/query-warehouse"
+import { getSpamPatternsParam } from "@/services/errors/spam-patterns"
+import { resolveTimeRange } from "@/mcp/lib/time"
+import { formatPercent, formatDurationFromMs, formatNumber, formatTable } from "@/mcp/lib/format"
 import { Array as Arr, Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { formatNextSteps } from "../lib/next-steps"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 
+import { formatWarehouseDateTime } from "@maple/query-engine"
 export function registerComparePeriodsTool(server: McpToolRegistrar) {
 	server.tool(
 		"compare_periods",
@@ -43,14 +44,14 @@ export function registerComparePeriodsTool(server: McpToolRegistrar) {
 				if (!Number.isFinite(center.getTime())) {
 					return yield* new McpQueryError({
 						message: `Invalid around_time: ${around_time}`,
-						pipe: "compare_periods",
+						pipeName: "compare_periods",
 					})
 				}
 				const halfWindow = 30 * 60 * 1000 // 30 minutes
-				prevSt = new Date(center.getTime() - halfWindow).toISOString().replace("T", " ").slice(0, 19)
+				prevSt = formatWarehouseDateTime(center.getTime() - halfWindow)
 				prevEt = around_time
 				curSt = around_time
-				curEt = new Date(center.getTime() + halfWindow).toISOString().replace("T", " ").slice(0, 19)
+				curEt = formatWarehouseDateTime(center.getTime() + halfWindow)
 			} else {
 				// Resolve current period
 				const current = resolveTimeRange(current_start, current_end, 1)
@@ -60,21 +61,19 @@ export function registerComparePeriodsTool(server: McpToolRegistrar) {
 				// Resolve previous period: default to same duration before current
 				const currentStartDate = new Date(current.st.replace(" ", "T") + "Z")
 				const currentEndDate = new Date(current.et.replace(" ", "T") + "Z")
-				if (!Number.isFinite(currentStartDate.getTime()) || !Number.isFinite(currentEndDate.getTime())) {
+				if (
+					!Number.isFinite(currentStartDate.getTime()) ||
+					!Number.isFinite(currentEndDate.getTime())
+				) {
 					return yield* new McpQueryError({
 						message: `Invalid current period: ${current_start ?? "(default)"} to ${current_end ?? "(default)"}`,
-						pipe: "compare_periods",
+						pipeName: "compare_periods",
 					})
 				}
 				const durationMs = currentEndDate.getTime() - currentStartDate.getTime()
 
 				prevEt = previous_end ?? current.st
-				prevSt =
-					previous_start ??
-					new Date(currentStartDate.getTime() - durationMs)
-						.toISOString()
-						.replace("T", " ")
-						.slice(0, 19)
+				prevSt = previous_start ?? formatWarehouseDateTime(currentStartDate.getTime() - durationMs)
 			}
 
 			// Query both periods in parallel

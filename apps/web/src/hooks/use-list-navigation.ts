@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useHotkeys, type UseHotkeyDefinition } from "@tanstack/react-hotkeys"
 
-import { isDialogOpen } from "@/lib/keyboard"
+import { isDialogOpen } from "@maple/ui/lib/keyboard"
 
 export interface ListNavigationOptions<T extends string> {
 	/** Row ids in display order. */
@@ -29,7 +29,9 @@ function isInteractiveTarget(target: EventTarget | null): boolean {
  * Suspended while a modal dialog/sheet is open so detail panels own the
  * keyboard (the dialog's own Escape still closes it first).
  */
-export function useListNavigation<T extends string>(options: ListNavigationOptions<T>): {
+export function useListNavigation<T extends string>(
+	options: ListNavigationOptions<T>,
+): {
 	focusedId: T | null
 	setFocusedId: (id: T | null) => void
 } {

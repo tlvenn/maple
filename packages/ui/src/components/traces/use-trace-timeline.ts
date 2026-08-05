@@ -1,7 +1,13 @@
 import * as React from "react"
 import type { SpanNode } from "../../lib/types"
 import type { TimelineBar, ViewportState, TimelineState, TimelineAction } from "./trace-timeline-types"
-import { ROW_HEIGHT, ROW_GAP, OVERSCAN } from "./trace-timeline-types"
+import {
+	ROW_HEIGHT,
+	ROW_GAP,
+	OVERSCAN,
+	MIN_VISIBLE_ABS_MS,
+	DEFAULT_MAX_WINDOW_MS,
+} from "./trace-timeline-types"
 import { getValueHue } from "../../lib/colors"
 import { resolveColorValue, isStatusCodePreset, type ColorByField } from "./color-by"
 import { computeDefaultExpandedSpanIds, countDescendants } from "./auto-collapse"
@@ -36,14 +42,12 @@ export interface LayoutResult {
 export function layoutSpans(
 	rootSpans: SpanNode[],
 	expandedSpanIds: Set<string>,
-	services: string[],
 	colorBy: ColorByField,
 ): LayoutResult {
 	const bars: TimelineBar[] = []
 	const barIndexBySpanId = new Map<string, number>()
 	let currentRow = 0
 	const statusPreset = isStatusCodePreset(colorBy)
-	const colorByService = colorBy.kind === "preset" && colorBy.key === "service"
 
 	function visit(node: SpanNode) {
 		const startMs = new Date(node.startTime).getTime()
@@ -51,11 +55,9 @@ export function layoutSpans(
 		const hasChildren = node.children.length > 0
 		const isCollapsed = hasChildren && !expandedSpanIds.has(node.spanId)
 		const isError = node.statusCode === "Error"
-		const serviceIndex = services.indexOf(node.serviceName)
 
 		const value = resolveColorValue(node, colorBy)
-		const indexHint = colorByService && value ? services.indexOf(value) : undefined
-		const hue = getValueHue(value, indexHint, services.length)
+		const hue = getValueHue(value)
 
 		const bar: TimelineBar = {
 			span: node,
@@ -67,7 +69,6 @@ export function layoutSpans(
 			isError,
 			isCollapsed,
 			childCount: isCollapsed ? countDescendants(node) : 0,
-			serviceIndex,
 			fill: barFillFromHue(hue, isError, statusPreset),
 			borderColor: barBorderFromHue(hue, isError, statusPreset),
 			hasChildren,
@@ -101,36 +102,52 @@ export function layoutSpans(
 // --- State reducer ---
 
 export function clampViewport(vp: ViewportState, traceStartMs: number, traceEndMs: number): ViewportState {
-	const duration = vp.endMs - vp.startMs
-	const traceDuration = traceEndMs - traceStartMs
-	const minDuration = traceDuration * 0.001
-	const maxDuration = traceDuration * 1.1
-
-	let clampedDuration = Math.max(minDuration, Math.min(duration, maxDuration))
-	let startMs = vp.startMs
-	let endMs = startMs + clampedDuration
-
-	// Clamp to trace boundaries with 5% padding
+	const traceDuration = Math.max(0, traceEndMs - traceStartMs)
+	// Trace boundaries with 5% padding each side.
 	const padding = traceDuration * 0.05
-	if (startMs < traceStartMs - padding) {
-		startMs = traceStartMs - padding
-		endMs = startMs + clampedDuration
-	}
-	if (endMs > traceEndMs + padding) {
-		endMs = traceEndMs + padding
-		startMs = endMs - clampedDuration
+	const loBound = traceStartMs - padding
+	const hiBound = traceEndMs + padding
+	const boundWidth = hiBound - loBound
+
+	// Absolute floor only — a proportional floor (traceDuration * k) makes long traces
+	// un-zoomable: a 7-min trace would cap the window at tens of ms while the spans you're
+	// trying to inspect are µs-scale, so zoom appears not to work. SpanBar clamps its
+	// rendered width, so extreme zoom can't emit gigapixel nodes.
+	const minDuration = MIN_VISIBLE_ABS_MS
+	const maxDuration = Math.max(boundWidth, minDuration)
+
+	const rawDuration = vp.endMs - vp.startMs
+	const duration = Number.isFinite(rawDuration)
+		? Math.max(minDuration, Math.min(rawDuration, maxDuration))
+		: maxDuration
+
+	// Window as wide as (or wider than) the padded trace → center it, so neither edge
+	// clamp can push the other back out of bounds (degenerate/near-zero traces included).
+	if (duration >= boundWidth) {
+		const center = (loBound + hiBound) / 2
+		return { startMs: center - duration / 2, endMs: center + duration / 2 }
 	}
 
-	return { startMs, endMs }
+	// Right-clamp before left-clamp: min() first means the subsequent max() can only pull
+	// the window right, never past hiBound (duration < boundWidth guarantees room).
+	const startMs = Number.isFinite(vp.startMs)
+		? Math.max(loBound, Math.min(vp.startMs, hiBound - duration))
+		: loBound
+	return { startMs, endMs: startMs + duration }
 }
 
-function timelineReducer(state: TimelineState, action: TimelineAction): TimelineState {
+export function timelineReducer(state: TimelineState, action: TimelineAction): TimelineState {
 	switch (action.type) {
 		case "RESET":
 			return action.state
 
 		case "SET_VIEWPORT":
-			return { ...state, viewport: action.viewport }
+			// Clamp here (not at dispatch sites) so every path — minimap pan/resize/jump
+			// included — is bounded by the same rules as the other gestures.
+			return {
+				...state,
+				viewport: clampViewport(action.viewport, action.traceStartMs, action.traceEndMs),
+			}
 
 		case "ZOOM": {
 			const { centerMs, factor, traceStartMs, traceEndMs } = action
@@ -177,12 +194,28 @@ function timelineReducer(state: TimelineState, action: TimelineAction): Timeline
 			}
 		}
 
+		case "ZOOM_TO_RANGE": {
+			// Drag-to-select target: zoom to exactly the dragged window (no extra padding),
+			// clamped so it stays inside the trace and respects the min-visible floor.
+			const { startMs, endMs, traceStartMs, traceEndMs } = action
+			const lo = Math.min(startMs, endMs)
+			const hi = Math.max(startMs, endMs)
+			return {
+				...state,
+				viewport: clampViewport({ startMs: lo, endMs: hi }, traceStartMs, traceEndMs),
+			}
+		}
+
 		case "ZOOM_TO_FIT": {
 			const { traceStartMs, traceEndMs } = action
 			const padding = (traceEndMs - traceStartMs) * 0.02
 			return {
 				...state,
-				viewport: { startMs: traceStartMs - padding, endMs: traceEndMs + padding },
+				viewport: clampViewport(
+					{ startMs: traceStartMs - padding, endMs: traceEndMs + padding },
+					traceStartMs,
+					traceEndMs,
+				),
 			}
 		}
 
@@ -284,7 +317,6 @@ export interface UseTraceTimelineOptions {
 	rootSpans: SpanNode[]
 	totalDurationMs: number
 	traceStartTime: string
-	services: string[]
 	colorBy: ColorByField
 	/** Keep this span's ancestor chain expanded so auto-collapse never hides it. */
 	keepVisibleSpanId?: string
@@ -309,12 +341,59 @@ export function useTraceTimeline({
 	rootSpans,
 	totalDurationMs,
 	traceStartTime,
-	services,
 	colorBy,
 	keepVisibleSpanId,
 }: UseTraceTimelineOptions): UseTraceTimelineResult {
-	const traceStartMs = React.useMemo(() => new Date(traceStartTime).getTime(), [traceStartTime])
-	const traceEndMs = traceStartMs + totalDurationMs
+	// Trace bounds must span EVERY span, not just `traceStartTime + totalDurationMs`.
+	// On synthetic-root ("Missing Span") or clock-skewed traces, totalDurationMs (the
+	// reported root duration) can be far smaller than the real extent of the children,
+	// which would clamp the viewport to a tiny window and make the rest of the timeline
+	// unreachable by pan/zoom. Derive the actual [min start, max end] from the spans and
+	// only fall back to the reported window when there are no spans.
+	const { traceStartMs, traceEndMs } = React.useMemo(() => {
+		const reportedStart = new Date(traceStartTime).getTime()
+		let minStart = Number.POSITIVE_INFINITY
+		let maxEnd = Number.NEGATIVE_INFINITY
+		const visit = (node: SpanNode) => {
+			const s = new Date(node.startTime).getTime()
+			if (Number.isFinite(s)) {
+				if (s < minStart) minStart = s
+				const e = s + node.durationMs
+				if (e > maxEnd) maxEnd = e
+			}
+			node.children.forEach(visit)
+		}
+		rootSpans.forEach(visit)
+		let start: number
+		let end: number
+		if (!Number.isFinite(minStart) || !Number.isFinite(maxEnd)) {
+			start = reportedStart
+			end = reportedStart + totalDurationMs
+		} else {
+			start = Math.min(reportedStart, minStart)
+			end = Math.max(reportedStart + totalDurationMs, maxEnd)
+		}
+		// Zero-duration traces (single instantaneous span) get a 1ms synthetic window so every
+		// downstream `x / traceDuration` (minimap %, axis %, ticks, fit padding) stays finite.
+		if (end <= start) end = start + 1
+		return { traceStartMs: start, traceEndMs: end }
+	}, [rootSpans, traceStartTime, totalDurationMs])
+
+	const traceDurationMs = traceEndMs - traceStartMs
+
+	// Default view shows at most DEFAULT_MAX_WINDOW_MS (10s) starting at the trace start, so long
+	// traces open zoomed-in and readable instead of squeezing minutes of spans into the panel.
+	// Traces shorter than the window show in full. Zoom out (Fit / ⌘-scroll) reaches the whole trace.
+	const defaultViewport = React.useMemo<ViewportState>(() => {
+		const windowMs = Math.min(traceDurationMs, DEFAULT_MAX_WINDOW_MS)
+		const pad = windowMs * 0.02
+		// Route through clampViewport so the min-width floor holds at first paint too.
+		return clampViewport(
+			{ startMs: traceStartMs - pad, endMs: traceStartMs + windowMs + pad },
+			traceStartMs,
+			traceEndMs,
+		)
+	}, [traceStartMs, traceEndMs, traceDurationMs])
 
 	// Initialize with default expanded spans (auto-collapses big subtrees on long traces).
 	const defaultExpanded = React.useMemo(
@@ -323,10 +402,7 @@ export function useTraceTimeline({
 	)
 
 	const [state, dispatch] = React.useReducer(timelineReducer, {
-		viewport: {
-			startMs: traceStartMs - totalDurationMs * 0.02,
-			endMs: traceEndMs + totalDurationMs * 0.02,
-		},
+		viewport: defaultViewport,
 		focusedIndex: null,
 		searchQuery: "",
 		expandedSpanIds: defaultExpanded,
@@ -338,10 +414,7 @@ export function useTraceTimeline({
 		dispatch({
 			type: "RESET",
 			state: {
-				viewport: {
-					startMs: traceStartMs - totalDurationMs * 0.02,
-					endMs: traceEndMs + totalDurationMs * 0.02,
-				},
+				viewport: defaultViewport,
 				focusedIndex: null,
 				searchQuery: "",
 				expandedSpanIds: defaultExpanded,
@@ -351,8 +424,8 @@ export function useTraceTimeline({
 
 	// Layout bars
 	const { bars, totalRows, barIndexBySpanId, parentIndexById } = React.useMemo(
-		() => layoutSpans(rootSpans, state.expandedSpanIds, services, colorBy),
-		[rootSpans, state.expandedSpanIds, services, colorBy],
+		() => layoutSpans(rootSpans, state.expandedSpanIds, colorBy),
+		[rootSpans, state.expandedSpanIds, colorBy],
 	)
 
 	// Viewport derived values

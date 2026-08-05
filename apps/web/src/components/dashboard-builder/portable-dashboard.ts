@@ -1,6 +1,7 @@
-import { PortableDashboardDocument } from "@maple/domain/http"
+import { PortableDashboardDocument, defaultWidgetLayout } from "@maple/domain/http"
 import { Schema } from "effect"
 
+import { CANONICAL_COLS } from "@/components/dashboard-builder/canvas/grid-breakpoints"
 import type { Dashboard, DashboardWidget, WidgetLayout } from "@/components/dashboard-builder/types"
 
 export type PortableDashboard = Omit<Dashboard, "id" | "createdAt" | "updatedAt">
@@ -43,7 +44,7 @@ function findNextWidgetPosition(widgets: DashboardWidget[], width: number) {
 	const bottomRowWidgets = widgets.filter((widget) => widget.layout.y === maxY)
 	const rightEdge = Math.max(...bottomRowWidgets.map((widget) => widget.layout.x + widget.layout.w))
 
-	if (rightEdge + width <= 12) {
+	if (rightEdge + width <= CANONICAL_COLS) {
 		return { x: rightEdge, y: maxY }
 	}
 
@@ -54,17 +55,9 @@ function findNextWidgetPosition(widgets: DashboardWidget[], width: number) {
 
 function normalizeWidgetLayouts(widgets: DashboardWidget[]): DashboardWidget[] {
 	return widgets.reduce<DashboardWidget[]>((normalized, widget) => {
-		const defaultLayout = {
-			w:
-				widget.visualization === "stat"
-					? 3
-					: widget.visualization === "table" || widget.visualization === "list"
-						? 6
-						: 4,
-			h: widget.visualization === "stat" ? 4 : 5,
-			minW: widget.visualization === "stat" ? 2 : 3,
-			minH: widget.visualization === "table" || widget.visualization === "list" ? 3 : 2,
-		}
+		// The same grid size the "Add widget" store hands a click-added widget, so
+		// an imported dashboard doesn't lay out differently from a built one.
+		const defaultLayout = defaultWidgetLayout(widget.visualization)
 
 		const layout = isWidgetLayout(widget.layout)
 			? widget.layout
@@ -89,6 +82,8 @@ export function toPortableDashboard(dashboard: Dashboard): PortableDashboard {
 		tags: dashboard.tags ? [...dashboard.tags] : undefined,
 		timeRange: clonePortableDashboard(dashboard.timeRange),
 		widgets: normalizeWidgetLayouts(clonePortableDashboard(dashboard.widgets)),
+		variables: dashboard.variables ? clonePortableDashboard(dashboard.variables) : undefined,
+		refreshIntervalSeconds: dashboard.refreshIntervalSeconds,
 	}
 }
 
@@ -107,6 +102,10 @@ export function parsePortableDashboardJson(json: string): PortableDashboard {
 		name: decoded.name,
 		description: decoded.description,
 		tags: decoded.tags ? [...decoded.tags] : undefined,
+		variables: decoded.variables
+			? clonePortableDashboard(decoded.variables as PortableDashboard["variables"])
+			: undefined,
+		refreshIntervalSeconds: decoded.refreshIntervalSeconds,
 		timeRange:
 			decoded.timeRange.type === "absolute"
 				? {

@@ -3,19 +3,22 @@ import { Result } from "@/lib/effect-atom"
 import { Effect } from "effect"
 
 import { listTraces, type Trace, type TracesResponse } from "@/api/warehouse/traces"
-import { listTracesResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
+import { listTracesResultAtom, type QueryAtomFailure } from "@/lib/services/atoms/warehouse-query-atoms"
 import { useRetainedRefreshableResultValue } from "@/hooks/use-retained-refreshable-result-value"
 import { useTableRefreshTimeRange } from "@/hooks/use-table-refresh-time-range"
 import type { TracesSearchParams } from "@/routes/traces"
+import { logClientError } from "@/lib/services/common/telemetry"
 
 const PAGE_SIZE = 100
 const FETCH_THRESHOLD = 20
+export const MAX_RETAINED_TRACES = 2_000
 
 export interface UseInfiniteTracesReturn {
-	firstPageResult: Result.Result<TracesResponse, unknown>
+	firstPageResult: Result.Result<TracesResponse, QueryAtomFailure>
 	allData: Trace[]
 	isFetchingNextPage: boolean
 	hasNextPage: boolean
+	isCapped: boolean
 	fetchNextPage: () => void
 }
 
@@ -24,15 +27,15 @@ function buildQueryParams(
 	refreshedRange: { startTime: string; endTime: string },
 ) {
 	return {
-		service: filters?.services?.[0],
-		spanName: filters?.spanNames?.[0],
+		services: filters?.services,
+		spanNames: filters?.spanNames,
 		hasError: filters?.hasError,
 		minDurationMs: filters?.minDurationMs,
 		maxDurationMs: filters?.maxDurationMs,
-		httpMethod: filters?.httpMethods?.[0],
-		httpStatusCode: filters?.httpStatusCodes?.[0],
-		deploymentEnv: filters?.deploymentEnvs?.[0],
-		namespace: filters?.namespaces?.[0],
+		httpMethods: filters?.httpMethods,
+		httpStatusCodes: filters?.httpStatusCodes,
+		deploymentEnvs: filters?.deploymentEnvs,
+		namespaces: filters?.namespaces,
 		attributeFilters: filters?.attributeFilters,
 		resourceAttributeFilters: filters?.resourceAttributeFilters,
 		startTime: refreshedRange.startTime,
@@ -89,10 +92,12 @@ export function useInfiniteTraces(filters: TracesSearchParams | undefined): UseI
 	const allData = React.useMemo(() => {
 		const firstPageData = Result.isSuccess(firstPageResult) ? firstPageResult.value.data : []
 		const additionalData = additionalPages.flatMap((p) => p.data)
-		return [...firstPageData, ...additionalData]
+		return [...firstPageData, ...additionalData].slice(0, MAX_RETAINED_TRACES)
 	}, [firstPageResult, additionalPages])
+	const isCapped = allData.length >= MAX_RETAINED_TRACES
 
 	const hasNextPage = React.useMemo(() => {
+		if (isCapped) return false
 		if (paginationStopped) return false
 		if (!Result.isSuccess(firstPageResult)) return false
 		if (additionalPages.length === 0) {
@@ -100,7 +105,7 @@ export function useInfiniteTraces(filters: TracesSearchParams | undefined): UseI
 		}
 		const lastPage = additionalPages[additionalPages.length - 1]
 		return lastPage.data.length === PAGE_SIZE
-	}, [firstPageResult, additionalPages, paginationStopped])
+	}, [firstPageResult, additionalPages, paginationStopped, isCapped])
 
 	const fetchNextPage = React.useCallback(() => {
 		if (isFetchingRef.current || !hasNextPage) return
@@ -121,7 +126,7 @@ export function useInfiniteTraces(filters: TracesSearchParams | undefined): UseI
 				// asking for more pages. Without this, hasNextPage stays true and the
 				// UI loops on a backend offset cap.
 				setPaginationStopped(true)
-				console.error("Trace pagination failed", error)
+				logClientError("trace.pagination_failed", error)
 			})
 			.finally(() => {
 				if (filterKeyRef.current === currentKey) {
@@ -136,8 +141,9 @@ export function useInfiniteTraces(filters: TracesSearchParams | undefined): UseI
 		allData,
 		isFetchingNextPage,
 		hasNextPage,
+		isCapped,
 		fetchNextPage,
 	}
 }
 
-export { PAGE_SIZE, FETCH_THRESHOLD }
+export { FETCH_THRESHOLD }

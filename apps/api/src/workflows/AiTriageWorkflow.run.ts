@@ -2,23 +2,31 @@
  * Headless AI triage workflow logic (heavy import graph lives here, NOT in the
  * thin class shell — see the dynamic import in `AiTriageWorkflow.ts`).
  *
- * Investigates a freshly opened incident (error or anomaly) with a read-only
- * subset of the Maple tool registry driven by `generateText`, and persists a
+ * Investigates a freshly opened incident (error or anomaly) and persists a
  * structured triage result onto `ai_triage_runs` (+ the error-issue timeline).
  *
+ * The LLM investigation runs **in process** on `@maple/llm` (see
+ * `./triage-agent.ts`): Cloudflare Workers AI through the `AI` binding, driving
+ * the read-only Maple MCP tools directly. It used to run on the Flue `triage`
+ * workflow over the `CHAT_FLUE` service binding, which meant a
+ * api -> chat-flue -> MCP-over-HTTP -> api round trip and a hand-maintained
+ * Valibot mirror of `AiTriageResult`; both are gone.
+ *
+ * This workflow is unchanged in what it owns: the incident lifecycle
+ * (gate/claim, Postgres persistence, issue severity + timeline, Autumn token
+ * tracking). Only the "brain" moved.
+ *
  * Step layout:
- *   1. gate-and-claim — replay guard, settings re-check, OpenRouter key check
- *   2. run-agent      — the whole agent loop in ONE durable step (I/O-bound;
- *                       splitting per LLM round would push the growing message
- *                       array through the 1 MiB step-output cap for no benefit)
+ *   1. gate-and-claim — replay guard, LLM availability check
+ *   2. run-agent      — run the investigation (one durable I/O-bound step)
+ *                       and map its structured result
  *   3. persist        — run row + issue timeline + usage tracking
  */
 import { createHash } from "node:crypto"
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
 import * as MapleCloudflareSDK from "@maple-dev/effect-sdk/cloudflare"
-import { generateText, hasToolCall, stepCountIs, type ToolSet } from "ai"
-import { aiTriageRuns, aiTriageSettings, anomalyIncidents, errorIssueEvents } from "@maple/db"
-import { createMapleD1Client, type CloudflareD1Database, type MapleD1Client } from "@maple/db/client"
+import { aiTriageRuns, anomalyIncidents, errorIssueEvents } from "@maple/db"
+import type { MaplePgClient } from "@maple/db/client"
+import { ANTICIPATED_ERROR_IDENTIFIERS } from "@maple/domain/anticipated-errors"
 import { AiTriageResult } from "@maple/domain/http"
 import {
 	AiTriageRunId,
@@ -26,19 +34,121 @@ import {
 	ErrorIssueEventId,
 	ErrorIssueId,
 	OrgId,
+	UserId,
 } from "@maple/domain/primitives"
+import { layerFromEnvRecord, WorkerConfigProviderLayer } from "@maple/effect-cloudflare"
 import { and, eq } from "drizzle-orm"
-import { Cause, Data, Effect, Exit, Option, Schema } from "effect"
-import { getMapleAgentSetup, resolveOrgOpenrouterKey } from "../agent"
-import { trackTokenUsage } from "../lib/autumn-tracker"
-import { applyTriageSeverity } from "../lib/issue-severity"
-import { buildTriageContextMessage, TRIAGE_SYSTEM_PROMPT } from "./triage-prompt"
-import { buildTriageToolSet, decodeTriageResult, SUBMIT_TRIAGE_TOOL_NAME } from "./triage-tools"
+import { Cause, Data, Effect, Exit, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { trackTokenUsage } from "@/services/billing/autumn-tracker"
+import { applyTriageSeverity } from "@/services/errors/issue-severity"
+import {
+	makeTracedPgConnection,
+	type TracedPgConnection,
+	tracedPgConnectionFrom,
+} from "@/platform/pg-execute"
+import { isWorkersAiBinding } from "@/platform/WorkersAiHttpClient"
 import type { WorkflowEventLike, WorkflowStepLike } from "./ClickHouseSchemaApplyWorkflow.run"
 
 export interface AiTriageWorkflowEnv extends Record<string, unknown> {
 	readonly MAPLE_DB: unknown
-	readonly INTERNAL_SERVICE_TOKEN?: string
+	/** Cloudflare Workers AI binding. Keyless + neuron-billed; see `@/platform/WorkersAiHttpClient`. */
+	readonly AI?: unknown
+	/** REST fallback for stages with no `AI` binding (local `bun dev`, self-hosted). */
+	readonly CLOUDFLARE_API_KEY?: string
+}
+
+/** Structured result of one investigation, as the durable `run-agent` step sees it. */
+interface TriageInvocationResult {
+	readonly result: unknown
+	readonly model: { readonly provider: string; readonly id: string }
+	readonly usage: {
+		readonly input: number
+		readonly output: number
+		readonly cacheRead?: number
+	}
+}
+
+interface InvokeTriageInput {
+	readonly env: AiTriageWorkflowEnv
+	readonly orgId: string
+	readonly incidentKind: "error" | "anomaly" | "alert"
+	readonly incidentId: string
+	readonly context: Record<string, unknown>
+}
+
+/**
+ * True when the worker can reach a model at all: either the Workers AI binding
+ * (the keyless, neuron-billed path) or an API key for the REST endpoint.
+ */
+const canReachModel = (env: AiTriageWorkflowEnv): boolean =>
+	isWorkersAiBinding(env.AI) ||
+	(typeof env.CLOUDFLARE_API_KEY === "string" && env.CLOUDFLARE_API_KEY !== "")
+
+/** Internal actor the triage tools run as — same identity the internal MCP RPC path uses. */
+const internalServiceUserId = Schema.decodeUnknownSync(UserId)("internal-service")
+
+/**
+ * Run the investigation in process.
+ *
+ * The route graph (`../app`) and the Postgres layer are imported dynamically for the same reason
+ * `worker.ts` does it: their static graph builds hundreds of Effect Schema ASTs at module scope,
+ * which would blow Cloudflare's ~1s startup-CPU budget (error 10021). This module is itself only
+ * reached through a dynamic import inside `run()`, so the cost lands inside the workflow step.
+ */
+const invokeTriageWorkflow = async ({
+	env,
+	orgId,
+	incidentKind,
+	incidentId,
+	context,
+}: InvokeTriageInput): Promise<TriageInvocationResult> => {
+	if (!canReachModel(env)) throw new Error("llm_unavailable")
+
+	const [{ MainLive }, { layerPg }, { layerLlm, resolveTriageModel }, { runTriageAgent }] =
+		await Promise.all([
+			import("../app"),
+			import("../platform/DatabasePgLive"),
+			import("../platform/Llm"),
+			import("./triage-agent"),
+		])
+
+	const runtime = ManagedRuntime.make(
+		MainLive.pipe(
+			Layer.provideMerge(layerLlm(env)),
+			Layer.provideMerge(layerPg),
+			Layer.provideMerge(layerFromEnvRecord(env)),
+			Layer.provideMerge(triageTelemetry.layer),
+			Layer.provideMerge(WorkerConfigProviderLayer),
+		),
+	)
+
+	try {
+		const output = await runtime.runPromise(
+			runTriageAgent({
+				orgId,
+				incidentKind,
+				context,
+				model: resolveTriageModel(env, {
+					surface: "ai-triage",
+					orgId,
+					sessionId: `triage_${incidentKind}_${incidentId}`,
+				}),
+				tenant: {
+					orgId: decodeOrgId(orgId),
+					userId: internalServiceUserId,
+					roles: [],
+					authMode: "self_hosted",
+				},
+			}),
+		)
+		return {
+			result: output.result,
+			model: output.model,
+			usage: output.usage,
+		}
+	} finally {
+		await runtime.dispose().catch(() => undefined)
+	}
 }
 
 export interface AiTriageWorkflowPayload {
@@ -58,11 +168,11 @@ const decodeRunId = Schema.decodeUnknownSync(AiTriageRunId)
 const decodeIssueId = Schema.decodeUnknownSync(ErrorIssueId)
 const decodeEventId = Schema.decodeUnknownSync(ErrorIssueEventId)
 const decodeAnomalyIncidentId = Schema.decodeUnknownSync(AnomalyIncidentId)
+/** Validate the agent's result against the canonical domain schema before persisting. */
+const decodeTriageResult = Schema.decodeUnknownSync(AiTriageResult)
 
-/** Lenient decode for the contextJson text column; failures fall back to {}. */
-const decodeContextJson = Schema.decodeUnknownOption(
-	Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-)
+/** Lenient decode for the contextJson jsonb column; failures fall back to {}. */
+const decodeContextJson = Schema.decodeUnknownOption(Schema.Record(Schema.String, Schema.Unknown))
 /**
  * One decode from the persisted resultJson string straight to AiTriageResult —
  * composing `fromJsonString` means a malformed string and a shape mismatch
@@ -107,14 +217,11 @@ const triageTelemetry = MapleCloudflareSDK.make({
 	serviceName: "maple-api",
 	serviceNamespace: "backend",
 	repositoryUrl: "https://github.com/Makisuo/maple",
+	anticipatedErrorIdentifiers: [...ANTICIPATED_ERROR_IDENTIFIERS],
 })
 
-const DEFAULT_TRIAGE_MODEL = "moonshotai/kimi-k2.7-code:nitro"
-const MAX_AGENT_STEPS = 12
-const MAX_OUTPUT_TOKENS = 4096
-
 const GATE_STEP = { retries: { limit: 3, delay: "2 seconds", backoff: "exponential" } }
-// One LLM retry at most — a retried step re-spends the whole agent loop.
+// One retry at most — a retried step re-runs the whole investigation.
 const AGENT_STEP = {
 	retries: { limit: 1, delay: "10 seconds" },
 	timeout: "10 minutes",
@@ -126,19 +233,38 @@ interface AgentStepResult {
 	readonly model: string
 	readonly inputTokens: number
 	readonly outputTokens: number
+	/**
+	 * Prompt-cache reads. New with `@maple/llm` — Flue had no prompt caching at all, so
+	 * this was always effectively zero before. Recorded on the span so the cache hit rate
+	 * of the ~21 tool definitions riding in every turn is observable.
+	 */
+	readonly cacheReadTokens: number
+}
+
+/**
+ * Narrow the worker env's `MAPLE_DB` Hyperdrive binding to its connection
+ * string. (Local copy of the schema-apply workflow's helper so this dynamic
+ * chunk doesn't pull in the ClickHouse migration graph.)
+ */
+const resolveMapleDbConnectionString = (binding: unknown): string => {
+	if (
+		typeof binding === "object" &&
+		binding !== null &&
+		typeof (binding as { connectionString?: unknown }).connectionString === "string"
+	) {
+		return (binding as { connectionString: string }).connectionString
+	}
+	throw new Error("MAPLE_DB is not a Hyperdrive binding (missing connectionString)")
 }
 
 export interface AiTriageRunDeps {
-	/** Test seam: swap the D1 client (e.g. a libsql-backed drizzle) and model wiring. */
-	readonly db?: MapleD1Client
-	readonly generate?: typeof generateText
-	readonly resolveApiKey?: typeof resolveOrgOpenrouterKey
+	/** Test seam: swap the database client (e.g. a PGlite-backed drizzle). */
+	readonly db?: MaplePgClient
 	/**
-	 * Test seam: skip `getMapleAgentSetup` (which dynamic-imports the whole app
-	 * graph — too slow for the vitest budget on CI runners) and supply the
-	 * ToolSet directly. Production always builds from the registry.
+	 * Test seam: stub the investigation so the test asserts the persist path without
+	 * reaching a model. Production runs `runTriageAgent` in process.
 	 */
-	readonly buildTools?: () => Promise<ToolSet>
+	readonly invokeTriage?: typeof invokeTriageWorkflow
 	/** Test seam: fixed clock for timestamp assertions. Production uses Date.now. */
 	readonly now?: () => number
 }
@@ -149,12 +275,41 @@ export async function runAiTriage(
 	step: WorkflowStepLike,
 	deps: AiTriageRunDeps = {},
 ): Promise<AiTriageWorkflowResult> {
+	// Injected test clients are owned by the caller; the workflow only ends the
+	// postgres.js connection it dialed itself. Either way the steps run through
+	// `connection.step`, so this workflow's queries produce the same
+	// `Database.execute` client spans as the request path.
+	const connection =
+		deps.db !== undefined
+			? tracedPgConnectionFrom(deps.db)
+			: makeTracedPgConnection(resolveMapleDbConnectionString(env.MAPLE_DB))
+	try {
+		return await runAiTriageWithDb(connection, env, event, step, deps)
+	} finally {
+		await connection.end()
+	}
+}
+
+async function runAiTriageWithDb(
+	connection: TracedPgConnection,
+	env: AiTriageWorkflowEnv,
+	event: WorkflowEventLike<AiTriageWorkflowPayload>,
+	step: WorkflowStepLike,
+	deps: AiTriageRunDeps,
+): Promise<AiTriageWorkflowResult> {
 	const { orgId, incidentKind, incidentId, issueId } = event.payload
 	const runId = decodeRunId(event.payload.runId)
-	const db = deps.db ?? createMapleD1Client(env.MAPLE_DB as CloudflareD1Database)
-	const generate = deps.generate ?? generateText
-	const resolveApiKey = deps.resolveApiKey ?? resolveOrgOpenrouterKey
+	const invokeTriage = deps.invokeTriage ?? invokeTriageWorkflow
 	const clock = deps.now ?? Date.now
+
+	/**
+	 * One unit of DB work, traced as a `Database.execute` client span on this
+	 * module's telemetry layer — the same idiom `logFailure` below uses to reach
+	 * OTLP from outside the worker's layer graph. Rejects on failure, so callers
+	 * keep their existing try/catch shape.
+	 */
+	const dbStep = <T>(fn: (db: MaplePgClient) => Promise<T>): Promise<T> =>
+		Effect.runPromise(connection.step(fn).pipe(Effect.provide(triageTelemetry.layer)))
 
 	/**
 	 * Failure-path structured log, routed through the module's OTLP telemetry
@@ -176,20 +331,24 @@ export async function runAiTriage(
 	const markFailed = async (error: string) => {
 		const now = clock()
 		try {
-			await db
-				.update(aiTriageRuns)
-				.set({ status: "failed", error, completedAt: now, updatedAt: now })
-				.where(and(eq(aiTriageRuns.orgId, decodeOrgId(orgId)), eq(aiTriageRuns.id, runId)))
+			await dbStep((db) =>
+				db
+					.update(aiTriageRuns)
+					.set({ status: "failed", error, completedAt: new Date(now), updatedAt: new Date(now) })
+					.where(and(eq(aiTriageRuns.orgId, decodeOrgId(orgId)), eq(aiTriageRuns.id, runId))),
+			)
 			if (incidentKind === "anomaly") {
-				await db
-					.update(anomalyIncidents)
-					.set({ triageStatus: "skipped", updatedAt: now })
-					.where(
-						and(
-							eq(anomalyIncidents.orgId, decodeOrgId(orgId)),
-							eq(anomalyIncidents.id, decodeAnomalyIncidentId(incidentId)),
+				await dbStep((db) =>
+					db
+						.update(anomalyIncidents)
+						.set({ triageStatus: "skipped", updatedAt: new Date(now) })
+						.where(
+							and(
+								eq(anomalyIncidents.orgId, decodeOrgId(orgId)),
+								eq(anomalyIncidents.id, decodeAnomalyIncidentId(incidentId)),
+							),
 						),
-					)
+				)
 			}
 		} catch (cause) {
 			// If this write is lost the row stays queued/running until the enqueue
@@ -209,41 +368,31 @@ export async function runAiTriage(
 	}
 
 	const gate = await step.do("gate-and-claim", GATE_STEP, async () => {
-		const rows = await db.select().from(aiTriageRuns).where(eq(aiTriageRuns.id, runId)).limit(1)
+		const rows = await dbStep((db) =>
+			db.select().from(aiTriageRuns).where(eq(aiTriageRuns.id, runId)).limit(1),
+		)
 		const run = rows[0]
 		// Replay guard: a re-delivered event for a run that already progressed is
 		// a no-op (statuses other than queued mean another execution owns it).
 		if (!run || run.status !== "queued") {
-			return { proceed: false as const, contextJson: "{}", modelOverride: null }
+			return { proceed: false as const, contextJson: {} }
 		}
 
-		const key = await resolveApiKey(env, orgId)
-		if (key === undefined) {
-			return {
-				proceed: false as const,
-				failure: "no_openrouter_key",
-				contextJson: run.contextJson,
-				modelOverride: null,
-			}
+		// No Workers AI binding and no API key means there is no model to reach —
+		// fail the run explicitly rather than let the agent step time out.
+		if (!canReachModel(env)) {
+			return { proceed: false as const, failure: "llm_unavailable", contextJson: run.contextJson }
 		}
-
-		const settingsRows = await db
-			.select()
-			.from(aiTriageSettings)
-			.where(eq(aiTriageSettings.orgId, run.orgId))
-			.limit(1)
 
 		const now = clock()
-		await db
-			.update(aiTriageRuns)
-			.set({ status: "running", startedAt: now, updatedAt: now })
-			.where(eq(aiTriageRuns.id, runId))
+		await dbStep((db) =>
+			db
+				.update(aiTriageRuns)
+				.set({ status: "running", startedAt: new Date(now), updatedAt: new Date(now) })
+				.where(eq(aiTriageRuns.id, runId)),
+		)
 
-		return {
-			proceed: true as const,
-			contextJson: run.contextJson,
-			modelOverride: settingsRows[0]?.modelOverride ?? null,
-		}
+		return { proceed: true as const, contextJson: run.contextJson }
 	})
 
 	if (!gate.proceed) {
@@ -267,70 +416,32 @@ export async function runAiTriage(
 	let agentResult: AgentStepResult
 	try {
 		agentResult = await step.do("run-agent", AGENT_STEP, async () => {
-			// The key is re-resolved inside the step (instead of returned from
-			// gate-and-claim) so it never persists in durable workflow state.
-			const apiKey = await resolveApiKey(env, orgId)
-			if (apiKey === undefined) throw new Error("no_openrouter_key")
-
-			const tools = deps.buildTools
-				? await deps.buildTools()
-				: buildTriageToolSet({
-						setup: await getMapleAgentSetup(env),
-						orgId,
-						internalServiceToken: String(env.INTERNAL_SERVICE_TOKEN ?? ""),
-					})
-
-			const modelId = gate.modelOverride ?? DEFAULT_TRIAGE_MODEL
-			const openrouter = createOpenAICompatible({
-				name: "openrouter",
-				baseURL: "https://openrouter.ai/api/v1",
-				apiKey,
-				headers: { "X-OpenRouter-Title": "Maple AI Triage" },
-			})
-
 			const context: Record<string, unknown> = Option.getOrElse(
 				decodeContextJson(gate.contextJson),
 				() => ({}),
 			)
 
-			// gen_ai.* semconv span around the LLM loop (no cost math — Maple's
-			// central pricing layer derives cost from the token counts).
+			// The investigation now runs in this worker, so `runTriageAgent` emits its
+			// own `ai_triage.investigate` span underneath this one. This span keeps the
+			// aggregate token counts and the resolved model for correlation.
 			const generateExit = await Effect.runPromiseExit(
 				Effect.tryPromise({
-					try: () =>
-						generate({
-							model: openrouter.chatModel(modelId),
-							system: TRIAGE_SYSTEM_PROMPT,
-							prompt: buildTriageContextMessage(incidentKind, context),
-							tools,
-							stopWhen: [hasToolCall(SUBMIT_TRIAGE_TOOL_NAME), stepCountIs(MAX_AGENT_STEPS)],
-							maxOutputTokens: MAX_OUTPUT_TOKENS,
-							providerOptions: {
-								openrouter: {
-									trace: {
-										trace_id: runId,
-										trace_name: "Maple AI Triage",
-										generation_name: "Triage Investigation",
-										orgId,
-										operation: "auto_triage",
-									},
-								},
-							},
-						}),
+					try: () => invokeTriage({ env, orgId, incidentKind, incidentId, context }),
 					catch: (error) => new TriageGenerateError({ cause: error }),
 				}).pipe(
 					Effect.tap((r) =>
 						Effect.annotateCurrentSpan({
-							"gen_ai.usage.input_tokens": r.totalUsage.inputTokens ?? 0,
-							"gen_ai.usage.output_tokens": r.totalUsage.outputTokens ?? 0,
+							"gen_ai.usage.input_tokens": r.usage.input,
+							"gen_ai.usage.output_tokens": r.usage.output,
+							"gen_ai.usage.cache_read_input_tokens": r.usage.cacheRead ?? 0,
+							"gen_ai.request.model": r.model.id,
 						}),
 					),
 					Effect.withSpan("ai_triage.generate", {
 						kind: "client",
 						attributes: {
 							"gen_ai.operation.name": "chat",
-							"gen_ai.provider.name": "openrouter",
-							"gen_ai.request.model": modelId,
+							"gen_ai.provider.name": "cloudflare.workers_ai",
 							orgId,
 						},
 					}),
@@ -341,26 +452,23 @@ export async function runAiTriage(
 			// Re-throw the original error so the step's failure handling (and the
 			// message persisted by markFailed) is unchanged by the span wrapper:
 			// unwrap the TriageGenerateError envelope back to its cause; defects
-			// (non-generate failures) are squashed and thrown as before.
+			// are squashed and thrown as before.
 			if (Exit.isFailure(generateExit)) {
 				const squashed = Cause.squash(generateExit.cause)
 				throw squashed instanceof TriageGenerateError ? squashed.cause : squashed
 			}
-			const result = generateExit.value
-
-			const submitCall = result.steps
-				.flatMap((s) => s.toolCalls ?? [])
-				.find((call) => call.toolName === SUBMIT_TRIAGE_TOOL_NAME)
-			if (!submitCall) {
-				throw new Error("no_structured_result")
-			}
-			const decoded = decodeTriageResult(submitCall.input)
+			const invocation = generateExit.value
+			// `generateObject` already decoded against `AiTriageResult`, but the seam is
+			// typed `unknown` (a test stub can return anything) and this is the last
+			// checkpoint before the value reaches the DB.
+			const decoded = decodeTriageResult(invocation.result)
 
 			return {
 				resultJson: JSON.stringify(decoded),
-				model: modelId,
-				inputTokens: result.totalUsage.inputTokens ?? 0,
-				outputTokens: result.totalUsage.outputTokens ?? 0,
+				model: invocation.model.id,
+				inputTokens: invocation.usage.input,
+				outputTokens: invocation.usage.output,
+				cacheReadTokens: invocation.usage.cacheRead ?? 0,
 			}
 		})
 	} catch (error) {
@@ -373,19 +481,23 @@ export async function runAiTriage(
 
 	await step.do("persist", PERSIST_STEP, async () => {
 		const now = clock()
-		await db
-			.update(aiTriageRuns)
-			.set({
-				status: "completed",
-				resultJson: agentResult.resultJson,
-				model: agentResult.model,
-				inputTokens: agentResult.inputTokens,
-				outputTokens: agentResult.outputTokens,
-				error: null,
-				completedAt: now,
-				updatedAt: now,
-			})
-			.where(and(eq(aiTriageRuns.orgId, decodeOrgId(orgId)), eq(aiTriageRuns.id, runId)))
+		await dbStep((db) =>
+			db
+				.update(aiTriageRuns)
+				.set({
+					status: "completed",
+					// The agent step's durable output stays a JSON string (1 MiB step
+					// cap bookkeeping); parse at the jsonb write boundary.
+					resultJson: JSON.parse(agentResult.resultJson),
+					model: agentResult.model,
+					inputTokens: agentResult.inputTokens,
+					outputTokens: agentResult.outputTokens,
+					error: null,
+					completedAt: new Date(now),
+					updatedAt: new Date(now),
+				})
+				.where(and(eq(aiTriageRuns.orgId, decodeOrgId(orgId)), eq(aiTriageRuns.id, runId))),
+		)
 
 		if (issueId) {
 			// Any linked issue (error fingerprint, alert-backed, or anomaly-linked)
@@ -394,45 +506,51 @@ export async function runAiTriage(
 			// idempotent via runId-derived deterministic ids, so a retried persist
 			// step cannot duplicate them.
 			const result = decodeTriageResultJson(agentResult.resultJson)
-			const applied = await applyTriageSeverity(db, {
-				orgId: decodeOrgId(orgId),
-				issueId: decodeIssueId(issueId),
-				runId,
-				severity: result.severityAssessment,
-				confidence: result.confidence,
-				timestamp: now,
-				result,
-			})
-			await db
-				.insert(errorIssueEvents)
-				.values({
-					id: decodeEventId(deterministicEventId(runId)),
+			const applied = await dbStep((db) =>
+				applyTriageSeverity(db, {
 					orgId: decodeOrgId(orgId),
 					issueId: decodeIssueId(issueId),
-					actorId: applied.actorId,
-					type: "ai_triage",
-					payloadJson: JSON.stringify({
-						runId,
-						summary: result.summary,
-						severityAssessment: result.severityAssessment,
-						confidence: result.confidence,
-						applied: applied.applied,
-					}),
-					createdAt: now,
-				})
-				.onConflictDoNothing()
+					runId,
+					severity: result.severityAssessment,
+					confidence: result.confidence,
+					timestamp: now,
+					result,
+				}),
+			)
+			await dbStep((db) =>
+				db
+					.insert(errorIssueEvents)
+					.values({
+						id: decodeEventId(deterministicEventId(runId)),
+						orgId: decodeOrgId(orgId),
+						issueId: decodeIssueId(issueId),
+						actorId: applied.actorId,
+						type: "ai_triage",
+						payloadJson: {
+							runId,
+							summary: result.summary,
+							severityAssessment: result.severityAssessment,
+							confidence: result.confidence,
+							applied: applied.applied,
+						},
+						createdAt: new Date(now),
+					})
+					.onConflictDoNothing(),
+			)
 		}
 
 		if (incidentKind === "anomaly") {
-			await db
-				.update(anomalyIncidents)
-				.set({ triageStatus: "completed", updatedAt: now })
-				.where(
-					and(
-						eq(anomalyIncidents.orgId, decodeOrgId(orgId)),
-						eq(anomalyIncidents.id, decodeAnomalyIncidentId(incidentId)),
+			await dbStep((db) =>
+				db
+					.update(anomalyIncidents)
+					.set({ triageStatus: "completed", updatedAt: new Date(now) })
+					.where(
+						and(
+							eq(anomalyIncidents.orgId, decodeOrgId(orgId)),
+							eq(anomalyIncidents.id, decodeAnomalyIncidentId(incidentId)),
+						),
 					),
-				)
+			)
 		}
 
 		await trackTokenUsage(env, {

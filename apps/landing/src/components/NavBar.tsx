@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useAuth } from "@clerk/clerk-react"
 import {
 	NavigationMenu,
@@ -8,15 +8,34 @@ import {
 	NavigationMenuContent,
 	NavigationMenuLink,
 } from "@maple/ui/components/ui/navigation-menu"
+import { buttonVariants } from "@maple/ui/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@maple/ui/components/ui/sheet"
+import { cn } from "@maple/ui/lib/utils"
 import * as m from "../paraglide/messages"
+import { broadcastSignedIn } from "./auth-signal"
 import { ClerkProvider } from "./ClerkProvider"
+import { formatStars } from "../lib/github-stars"
+import { features } from "../lib/features"
+import { featurePath, useCasePath } from "../lib/page-registry"
+import { useCases } from "../lib/use-cases"
+import { identifyLanding } from "../lib/telemetry"
+import { GithubStarButton, Octocat } from "./GithubStarButton"
 
 const PUBLISHABLE_KEY = import.meta.env.PUBLIC_CLERK_PUBLISHABLE_KEY
 
+type MenuLink = { href: string; label: () => string; desc: () => string }
+
 function AuthAwareCTA() {
-	const { isSignedIn, isLoaded } = useAuth()
-	return isLoaded && isSignedIn ? m.nav_dashboard() : m.nav_get_started()
+	const { isSignedIn, isLoaded, userId } = useAuth()
+	const signedIn = isLoaded && isSignedIn === true
+	useEffect(() => {
+		broadcastSignedIn(signedIn)
+		// This island is the only place Clerk is mounted, so it is also the only
+		// place that can name the visitor. Anonymous visitors still link to their
+		// later app sessions through the cross-subdomain visitor cookie.
+		identifyLanding(signedIn ? userId : null)
+	}, [signedIn, userId])
+	return signedIn ? m.nav_dashboard() : m.nav_get_started()
 }
 
 function CTAButton() {
@@ -27,98 +46,179 @@ function CTAButton() {
 	return <AuthAwareCTA />
 }
 
-function NavBarInner({ locale = "en" }: { locale?: string }) {
+function Eyebrow({ children }: { children: React.ReactNode }) {
+	return <span className="text-[11px] uppercase tracking-wider font-medium text-primary">{children}</span>
+}
+
+function MegaLink({ link }: { link: MenuLink }) {
+	return (
+		<NavigationMenuLink
+			href={link.href}
+			className="group/link flex flex-col items-start gap-0.5 rounded-lg p-2 hover:bg-muted/20"
+		>
+			<span className="text-xs font-medium text-fg transition-colors group-hover/link:text-primary">
+				{link.label()}
+			</span>
+			<span className="text-[11px] leading-snug text-fg-muted">{link.desc()}</span>
+		</NavigationMenuLink>
+	)
+}
+
+/**
+ * True while the header CTA should be collapsed: only on mobile (<sm), and only
+ * while the page's hero CTA (`[data-hero-cta]`) is in the viewport. On sm+ the
+ * header CTA always shows, and pages without a hero CTA always show it too.
+ */
+function useHeaderCtaCollapsed() {
+	const [collapsed, setCollapsed] = useState(false)
+	useEffect(() => {
+		const target = document.querySelector("[data-hero-cta]")
+		if (!target) return
+		const desktop = window.matchMedia("(min-width: 640px)")
+		let heroVisible = false
+		const update = () => setCollapsed(heroVisible && !desktop.matches)
+		const observer = new IntersectionObserver(([entry]) => {
+			heroVisible = entry.isIntersecting
+			update()
+		})
+		observer.observe(target)
+		desktop.addEventListener("change", update)
+		return () => {
+			observer.disconnect()
+			desktop.removeEventListener("change", update)
+		}
+	}, [])
+	return collapsed
+}
+
+function NavBarInner({ locale = "en", stars }: { locale?: string; stars?: number | null }) {
 	const [menuOpen, setMenuOpen] = useState(false)
+	const ctaCollapsed = useHeaderCtaCollapsed()
 	const l = (path: string) => (locale === "en" ? path : `/${locale}${path}`)
 
-	const featureLinks = [
-		{ href: l("/features/distributed-tracing"), label: () => m.nav_distributed_tracing() },
-			{ href: l("/features/browser-sessions"), label: () => m.nav_browser_sessions() },
-		{ href: l("/features/metrics-dashboards"), label: () => m.nav_metrics_dashboards() },
-		{ href: l("/features/log-management"), label: () => m.nav_log_management() },
-		{ href: l("/features/service-catalog"), label: () => m.nav_service_catalog() },
-		{ href: l("/features/error-tracking"), label: () => m.nav_error_tracking() },
-		{ href: l("/features/ai-mcp-integration"), label: () => m.nav_ai_mcp() },
-		{ href: l("/features/kubernetes-monitoring"), label: () => m.nav_kubernetes() },
+	// Derived from the registries rather than hand-listed, so adding a feature
+	// can't leave the nav pointing at seven of eight. `navLabel`/`navDesc` are
+	// stored uncalled for the same reason MenuLink holds thunks — Paraglide
+	// resolves the locale per call, at render.
+	const featureLinks: MenuLink[] = features.map((feature) => ({
+		href: featurePath(locale, feature.slug),
+		label: feature.navLabel,
+		desc: feature.navDesc,
+	}))
+
+	const useCaseLinks: MenuLink[] = useCases.map((useCase) => ({
+		href: useCasePath(locale, useCase.slug),
+		label: useCase.navLabel,
+		desc: useCase.navDesc,
+	}))
+
+	const integrationLinks: MenuLink[] = [
+		{ href: l("/integrations/nextjs"), label: () => m.nav_nextjs(), desc: () => m.nav_desc_nextjs() },
+		{ href: l("/integrations/python"), label: () => m.nav_python(), desc: () => m.nav_desc_python() },
+		{ href: l("/integrations/nodejs"), label: () => m.nav_nodejs(), desc: () => m.nav_desc_nodejs() },
 	]
 
-	const useCaseLinks = [
-		{ href: l("/use-cases/ecommerce-observability"), label: () => m.nav_ecommerce() },
-		{ href: l("/use-cases/microservices-debugging"), label: () => m.nav_microservices() },
-		{ href: l("/use-cases/api-performance"), label: () => m.nav_api_performance() },
+	const compareLinks: MenuLink[] = [
+		{ href: l("/compare/datadog"), label: () => m.nav_vs_datadog(), desc: () => m.nav_desc_vs_datadog() },
+		{ href: l("/compare/grafana"), label: () => m.nav_vs_grafana(), desc: () => m.nav_desc_vs_grafana() },
+		{
+			href: l("/compare/new-relic"),
+			label: () => m.nav_vs_new_relic(),
+			desc: () => m.nav_desc_vs_new_relic(),
+		},
+		{ href: l("/compare/dash0"), label: () => m.nav_vs_dash0(), desc: () => m.nav_desc_vs_dash0() },
 	]
 
-	const compareLinks = [
-		{ href: l("/compare/datadog"), label: () => m.nav_vs_datadog() },
-		{ href: l("/compare/grafana"), label: () => m.nav_vs_grafana() },
-		{ href: l("/compare/new-relic"), label: () => m.nav_vs_new_relic() },
-		{ href: l("/compare/dash0"), label: () => m.nav_vs_dash0() },
-	]
-
-	const integrationLinks = [
-		{ href: l("/integrations/nextjs"), label: () => m.nav_nextjs() },
-		{ href: l("/integrations/python"), label: () => m.nav_python() },
-		{ href: l("/integrations/nodejs"), label: () => m.nav_nodejs() },
+	const mobileGroups: { title: string; links: MenuLink[] }[] = [
+		{ title: m.nav_features(), links: featureLinks },
+		{ title: m.nav_use_cases(), links: useCaseLinks },
+		{ title: m.nav_integrations(), links: integrationLinks },
+		{ title: m.nav_compare(), links: compareLinks },
 	]
 
 	return (
-		<div className="flex items-center justify-between h-full w-full">
-			{/* Left group: Logo + Navigation */}
-			<div className="flex items-center gap-1">
-				<a href={l("/")} className="flex items-center gap-3 mr-2">
-					<div className="w-7 h-7 bg-accent flex items-center justify-center">
-						<span className="text-accent-foreground text-sm font-bold">M</span>
+		<div className="relative flex items-center justify-between h-full w-full">
+			{/* Logo. The nav list is absolutely centred rather than laid out
+			    between the two groups, so the centring survives the asymmetric
+			    right-hand group (star pill + Log in + CTA). */}
+			<div className="flex items-center">
+				<a href={l("/")} className="flex items-center gap-3">
+					<div className="w-7 h-7 bg-primary flex items-center justify-center">
+						<span className="text-primary-foreground text-sm font-bold">M</span>
 					</div>
 					<span className="text-fg font-medium text-sm">Maple</span>
 				</a>
+			</div>
 
-				<NavigationMenu className="hidden sm:flex">
+			<div className="absolute left-1/2 hidden -translate-x-1/2 lg:block">
+				<NavigationMenu className="flex">
 					<NavigationMenuList>
 						<NavigationMenuItem>
-							<NavigationMenuTrigger className="h-8 bg-transparent hover:bg-muted/20 text-fg-muted hover:text-fg">
-								{m.nav_features()}
+							<NavigationMenuTrigger className="h-9 bg-transparent hover:bg-muted/20 text-[13px] text-fg-muted hover:text-fg data-popup-open:text-fg">
+								{m.nav_product()}
 							</NavigationMenuTrigger>
-							<NavigationMenuContent>
-								<div className="grid grid-cols-2 gap-1 p-2">
-									{featureLinks.map((link) => (
-										<NavigationMenuLink
-											key={link.href}
-											href={link.href}
-											className="whitespace-nowrap"
-										>
-											{link.label()}
-										</NavigationMenuLink>
-									))}
-								</div>
-							</NavigationMenuContent>
-						</NavigationMenuItem>
+							<NavigationMenuContent className="p-0">
+								<div className="w-[820px] max-w-[calc(100vw-1.5rem)]">
+									{/* Top: Features (2x4) + Use Cases + Integrations */}
+									<div className="grid grid-cols-12 gap-x-2 p-4">
+										<div className="col-span-6">
+											<div className="px-2">
+												<Eyebrow>{m.nav_features()}</Eyebrow>
+											</div>
+											<div className="mt-2 grid grid-cols-2 gap-0.5">
+												{featureLinks.map((link) => (
+													<MegaLink key={link.href} link={link} />
+												))}
+											</div>
+										</div>
 
-						<NavigationMenuItem>
-							<NavigationMenuTrigger className="h-8 bg-transparent hover:bg-muted/20 text-fg-muted hover:text-fg">
-								{m.nav_use_cases()}
-							</NavigationMenuTrigger>
-							<NavigationMenuContent>
-								<div className="p-2 min-w-[220px]">
-									{useCaseLinks.map((link) => (
-										<NavigationMenuLink key={link.href} href={link.href}>
-											{link.label()}
-										</NavigationMenuLink>
-									))}
-								</div>
-							</NavigationMenuContent>
-						</NavigationMenuItem>
+										<div className="col-span-3 border-l border-border pl-2">
+											<div className="px-2">
+												<Eyebrow>{m.nav_use_cases()}</Eyebrow>
+											</div>
+											<div className="mt-2 flex flex-col gap-0.5">
+												{useCaseLinks.map((link) => (
+													<MegaLink key={link.href} link={link} />
+												))}
+											</div>
+										</div>
 
-						<NavigationMenuItem>
-							<NavigationMenuTrigger className="h-8 bg-transparent hover:bg-muted/20 text-fg-muted hover:text-fg">
-								{m.nav_integrations()}
-							</NavigationMenuTrigger>
-							<NavigationMenuContent>
-								<div className="p-2 min-w-[220px]">
-									{integrationLinks.map((link) => (
-										<NavigationMenuLink key={link.href} href={link.href}>
-											{link.label()}
-										</NavigationMenuLink>
-									))}
+										<div className="col-span-3 border-l border-border pl-2">
+											<div className="px-2">
+												<Eyebrow>{m.nav_integrations()}</Eyebrow>
+											</div>
+											<div className="mt-2 flex flex-col gap-0.5">
+												{integrationLinks.map((link) => (
+													<MegaLink key={link.href} link={link} />
+												))}
+											</div>
+										</div>
+									</div>
+
+									{/* Compare row */}
+									<div className="border-t border-border px-4 pt-3 pb-4">
+										<div className="px-2">
+											<Eyebrow>{m.nav_compare()}</Eyebrow>
+										</div>
+										<div className="mt-2 grid grid-cols-4 gap-0.5">
+											{compareLinks.map((link) => (
+												<MegaLink key={link.href} link={link} />
+											))}
+										</div>
+									</div>
+
+									{/* Footer CTA strip */}
+									<NavigationMenuLink
+										href={l("/")}
+										className="group/cta flex items-center justify-between rounded-none border-t border-border bg-muted/10 px-6 py-3.5 hover:bg-muted/20"
+									>
+										<span className="text-xs font-medium text-fg">
+											{m.nav_product_footer()}
+										</span>
+										<span className="inline-flex items-center gap-1 text-xs text-primary transition-transform group-hover/cta:translate-x-0.5">
+											{m.nav_product_footer_cta()}
+										</span>
+									</NavigationMenuLink>
 								</div>
 							</NavigationMenuContent>
 						</NavigationMenuItem>
@@ -126,7 +226,7 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 						<NavigationMenuItem>
 							<a
 								href={l("/pricing")}
-								className="inline-flex h-8 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-xs font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
+								className="inline-flex h-9 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-[13px] font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
 							>
 								{m.nav_pricing()}
 							</a>
@@ -134,56 +234,68 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 
 						<NavigationMenuItem>
 							<a
-								href={l("/roadmap")}
-								className="inline-flex h-8 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-xs font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
-							>
-								{m.nav_roadmap()}
-							</a>
-						</NavigationMenuItem>
-
-						<NavigationMenuItem>
-							<a
 								href={l("/local")}
-								className="inline-flex h-8 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-xs font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
+								className="inline-flex h-9 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-[13px] font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
 							>
-								Local
+								{m.nav_local()}
 							</a>
 						</NavigationMenuItem>
 
 						<NavigationMenuItem>
 							<a
 								href="/docs"
-								className="inline-flex h-8 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-xs font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
+								className="inline-flex h-9 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-[13px] font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
 							>
-								Docs
+								{m.nav_docs()}
+							</a>
+						</NavigationMenuItem>
+
+						<NavigationMenuItem>
+							<a
+								href="/blog"
+								className="inline-flex h-9 w-max items-center justify-center bg-transparent px-2.5 py-1.5 text-[13px] font-medium text-fg-muted hover:bg-muted/20 hover:text-fg transition-all"
+							>
+								{m.nav_blog()}
 							</a>
 						</NavigationMenuItem>
 					</NavigationMenuList>
 				</NavigationMenu>
 			</div>
 
-			{/* Right group: GitHub + CTA + Mobile menu */}
-			<div className="flex items-center gap-3 sm:gap-6">
+			{/* Right group: GitHub + Log in + CTA + Mobile menu */}
+			<div className="flex items-center gap-3 sm:gap-4">
+				<GithubStarButton stars={stars} className="hidden sm:inline-flex" />
+
 				<a
-					href="https://github.com/Makisuo/maple"
-					target="_blank"
-					rel="noopener noreferrer"
-					className="text-fg-muted hover:text-fg transition-colors hidden sm:block"
+					href="https://app.maple.dev"
+					data-track="cta_click"
+					data-track-location="nav_login"
+					className="hidden text-[13px] font-medium text-fg-muted transition-colors hover:text-fg md:inline-flex"
 				>
-					<svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-						<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
-					</svg>
+					{m.nav_login()}
 				</a>
 
 				<a
 					href="https://app.maple.dev"
-					className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-all hover:bg-primary/80"
+					data-track="cta_click"
+					data-track-location="nav"
+					className={cn(
+						buttonVariants({ size: "sm" }),
+						"overflow-hidden transition-all duration-300",
+						ctaCollapsed
+							? "pointer-events-none max-w-0 border-0 px-0 opacity-0 -ml-3"
+							: "max-w-40 opacity-100 ml-0",
+					)}
+					aria-hidden={ctaCollapsed}
+					tabIndex={ctaCollapsed ? -1 : undefined}
 				>
 					<CTAButton />
 				</a>
 
+				{/* The centred nav list only fits from lg, so the sheet has to
+				    cover everything below it — not just below sm. */}
 				<button
-					className="sm:hidden p-1.5 text-fg-muted hover:text-fg transition-colors"
+					className="lg:hidden p-1.5 text-fg-muted hover:text-fg transition-colors"
 					onClick={() => setMenuOpen(true)}
 					aria-label="Open menu"
 				>
@@ -210,55 +322,28 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 					</SheetHeader>
 					<nav className="flex flex-col px-4 pb-6">
 						<div className="py-4 border-b border-border">
-							<span className="text-[11px] text-accent uppercase tracking-wider font-medium">
-								{m.nav_features()}
+							<span className="text-[11px] text-primary uppercase tracking-wider font-medium">
+								{m.nav_product()}
 							</span>
-							<div className="mt-3 flex flex-col gap-1">
-								{featureLinks.map((link) => (
-									<a
-										key={link.href}
-										href={link.href}
-										onClick={() => setMenuOpen(false)}
-										className="text-xs text-fg-muted hover:text-fg transition-colors py-2"
-									>
-										{link.label()}
-									</a>
-								))}
-							</div>
-						</div>
-
-						<div className="py-4 border-b border-border">
-							<span className="text-[11px] text-accent uppercase tracking-wider font-medium">
-								{m.nav_use_cases()}
-							</span>
-							<div className="mt-3 flex flex-col gap-1">
-								{useCaseLinks.map((link) => (
-									<a
-										key={link.href}
-										href={link.href}
-										onClick={() => setMenuOpen(false)}
-										className="text-xs text-fg-muted hover:text-fg transition-colors py-2"
-									>
-										{link.label()}
-									</a>
-								))}
-							</div>
-						</div>
-
-						<div className="py-4 border-b border-border">
-							<span className="text-[11px] text-accent uppercase tracking-wider font-medium">
-								{m.nav_integrations()}
-							</span>
-							<div className="mt-3 flex flex-col gap-1">
-								{integrationLinks.map((link) => (
-									<a
-										key={link.href}
-										href={link.href}
-										onClick={() => setMenuOpen(false)}
-										className="text-xs text-fg-muted hover:text-fg transition-colors py-2"
-									>
-										{link.label()}
-									</a>
+							<div className="mt-3 flex flex-col gap-5">
+								{mobileGroups.map((group) => (
+									<div key={group.title}>
+										<span className="text-[10px] text-fg-muted uppercase tracking-wider">
+											{group.title}
+										</span>
+										<div className="mt-1.5 flex flex-col gap-1">
+											{group.links.map((link) => (
+												<a
+													key={link.href}
+													href={link.href}
+													onClick={() => setMenuOpen(false)}
+													className="text-xs text-fg-muted hover:text-fg transition-colors py-1.5"
+												>
+													{link.label()}
+												</a>
+											))}
+										</div>
+									</div>
 								))}
 							</div>
 						</div>
@@ -272,25 +357,18 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 								{m.nav_pricing()}
 							</a>
 							<a
-								href={l("/roadmap")}
-								onClick={() => setMenuOpen(false)}
-								className="text-xs text-fg hover:text-fg transition-colors py-2 font-medium"
-							>
-								{m.nav_roadmap()}
-							</a>
-							<a
 								href={l("/local")}
 								onClick={() => setMenuOpen(false)}
 								className="text-xs text-fg hover:text-fg transition-colors py-2 font-medium"
 							>
-								Local
+								{m.nav_local()}
 							</a>
 							<a
 								href="/docs"
 								onClick={() => setMenuOpen(false)}
 								className="text-xs text-fg hover:text-fg transition-colors py-2 font-medium"
 							>
-								Docs
+								{m.nav_docs()}
 							</a>
 						</div>
 
@@ -299,16 +377,19 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 								href="https://github.com/Makisuo/maple"
 								target="_blank"
 								rel="noopener noreferrer"
-								className="flex items-center gap-2 text-xs text-fg-muted hover:text-fg transition-colors"
+								className="flex items-center justify-between text-xs text-fg-muted hover:text-fg transition-colors"
 							>
-								<svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-									<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
-								</svg>
-								GitHub
+								<span className="flex items-center gap-2">
+									<Octocat className="w-4 h-4" />
+									GitHub
+								</span>
+								{stars != null && <span className="tabular-nums">{formatStars(stars)}</span>}
 							</a>
 							<a
 								href="https://app.maple.dev"
-								className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition-all hover:bg-primary/80"
+								data-track="cta_click"
+								data-track-location="nav_mobile"
+								className={buttonVariants({ size: "sm" })}
 							>
 								<CTAButton />
 							</a>
@@ -320,10 +401,10 @@ function NavBarInner({ locale = "en" }: { locale?: string }) {
 	)
 }
 
-export function NavBar({ locale = "en" }: { locale?: string }) {
+export function NavBar({ locale = "en", stars }: { locale?: string; stars?: number | null }) {
 	return (
 		<ClerkProvider>
-			<NavBarInner locale={locale} />
+			<NavBarInner locale={locale} stars={stars} />
 		</ClerkProvider>
 	)
 }

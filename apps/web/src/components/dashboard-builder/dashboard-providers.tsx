@@ -1,4 +1,4 @@
-import { type ReactNode, useRef, useCallback } from "react"
+import { type ReactNode, useCallback } from "react"
 import {
 	DashboardTimeRange,
 	DashboardTimeRangeProvider,
@@ -7,8 +7,7 @@ import {
 import { useAtomSubscribe } from "@/lib/effect-atom"
 import type { TimeRange } from "@/components/dashboard-builder/types"
 
-export { DashboardTimeRangeProvider, useDashboardTimeRange }
-export type { ResolvedTimeRange } from "@/atoms/dashboard-time-range-atoms"
+export { useDashboardTimeRange }
 
 // Sync atom changes back to the dashboard store
 function DashboardTimeRangeSync({
@@ -16,12 +15,12 @@ function DashboardTimeRangeSync({
 }: {
 	onTimeRangeChange?: (timeRange: TimeRange) => void
 }) {
-	const callbackRef = useRef(onTimeRangeChange)
-	callbackRef.current = onTimeRangeChange
-
-	const stableCallback = useCallback((tr: TimeRange) => {
-		callbackRef.current?.(tr)
-	}, [])
+	const stableCallback = useCallback(
+		(tr: TimeRange) => {
+			onTimeRangeChange?.(tr)
+		},
+		[onTimeRangeChange],
+	)
 
 	const timeRangeAtom = DashboardTimeRange.use()
 	useAtomSubscribe(timeRangeAtom, stableCallback)

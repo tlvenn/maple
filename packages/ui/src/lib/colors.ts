@@ -19,19 +19,6 @@ export function getDepthColorClass(depth: number): string {
 }
 
 /**
- * Get a consistent color class for a service name.
- * Uses a simple hash to assign colors deterministically.
- */
-export function getServiceColorClass(serviceName: string): string {
-	let hash = 0
-	for (let i = 0; i < serviceName.length; i++) {
-		hash = serviceName.charCodeAt(i) + ((hash << 5) - hash)
-	}
-	const index = Math.abs(hash) % CHART_BG_CLASSES.length
-	return CHART_BG_CLASSES[index]
-}
-
-/**
  * Simple hash function for strings
  */
 function hashString(str: string): number {
@@ -82,19 +69,70 @@ export function extractClassName(spanName: string): string | null {
 }
 
 /**
+ * Get the hue for a service, derived purely from a hash of its name so a
+ * service keeps the same hue everywhere in the product (lists, timelines,
+ * service map) regardless of which other services are on screen.
+ */
+export function getServiceHueFromName(serviceName: string): number {
+	return SERVICE_HUES[hashString(serviceName) % SERVICE_HUES.length]
+}
+
+/**
+ * Lightness/chroma tiers layered on top of the 16 hues. A second hash
+ * dimension picks the tier, tripling the palette to 48 slots so services
+ * that land on neighboring hues (teal/cyan, blue/violet, …) still separate
+ * by depth. All tiers stay mid-lightness so they read on both themes.
+ */
+const SERVICE_COLOR_TIERS = [
+	{ l: 0.47, c: 0.17 },
+	{ l: 0.57, c: 0.15 },
+	{ l: 0.67, c: 0.12 },
+]
+
+function getServiceColorTier(serviceName: string): { l: number; c: number } {
+	const hash = hashString(serviceName)
+	return SERVICE_COLOR_TIERS[Math.floor(hash / SERVICE_HUES.length) % SERVICE_COLOR_TIERS.length]
+}
+
+/**
+ * The identity palette flattened to a single index space: `tier * 16 + hue`.
+ * Chart series resolution needs slot-addressable access so it can detect (and
+ * deterministically step past) two names that hash to the same color.
+ */
+export const IDENTITY_SLOT_COUNT = SERVICE_HUES.length * SERVICE_COLOR_TIERS.length
+
+/** The slot a name naturally hashes to — the same hue/tier pair as {@link getServiceColor}. */
+export function getIdentitySlot(name: string): number {
+	const hash = hashString(name)
+	const hueIndex = hash % SERVICE_HUES.length
+	const tierIndex = Math.floor(hash / SERVICE_HUES.length) % SERVICE_COLOR_TIERS.length
+	return tierIndex * SERVICE_HUES.length + hueIndex
+}
+
+/** The color occupying a given identity slot. Wraps, so any integer is valid. */
+export function getIdentityColorBySlot(slot: number): string {
+	const index = ((Math.floor(slot) % IDENTITY_SLOT_COUNT) + IDENTITY_SLOT_COUNT) % IDENTITY_SLOT_COUNT
+	const tier = SERVICE_COLOR_TIERS[Math.floor(index / SERVICE_HUES.length)]
+	const hue = SERVICE_HUES[index % SERVICE_HUES.length]
+	return `oklch(${tier.l} ${tier.c} ${hue})`
+}
+
+/**
+ * The canonical color for a service, deterministic from its name alone.
+ * Hue and lightness tier both derive from the name hash.
+ */
+export function getServiceColor(serviceName: string): string {
+	return getIdentityColorBySlot(getIdentitySlot(serviceName))
+}
+
+/**
  * Get a color style for a span based on its service and class name.
  * - Each service gets a distinct base hue
  * - Each class within a service gets a lightness/saturation variation
  * - Returns inline style object with background color and appropriate text color
  */
-export function getSpanColorStyle(
-	spanName: string,
-	serviceName: string,
-	services: string[],
-): React.CSSProperties {
-	// Get service index for base hue
-	const serviceIndex = services.indexOf(serviceName)
-	const baseHue = getServiceHue(serviceIndex, services.length)
+export function getSpanColorStyle(spanName: string, serviceName: string): React.CSSProperties {
+	const baseHue = getServiceHueFromName(serviceName)
 
 	// Extract class name for variation within service
 	const className = extractClassName(spanName)
@@ -123,58 +161,21 @@ export function getSpanColorStyle(
 }
 
 /**
- * Get a hue for a service index, using hand-picked hues for ≤16 services
- * and golden-angle distribution for larger counts to avoid collisions.
- */
-function getServiceHue(serviceIndex: number, totalServices: number): number {
-	if (totalServices <= SERVICE_HUES.length) {
-		return SERVICE_HUES[serviceIndex % SERVICE_HUES.length]
-	}
-	// Golden angle (≈137.508°) maximizes separation between adjacent indices
-	return (serviceIndex * 137.508) % 360
-}
-
-/**
- * Get a legend color for a service
- */
-export function getServiceLegendColor(serviceName: string, services: string[]): string {
-	const serviceIndex = services.indexOf(serviceName)
-	const hue = getServiceHue(serviceIndex, services.length)
-	return `oklch(0.55 0.15 ${hue})`
-}
-
-/**
  * Get a border accent color for a service (slightly darker/more saturated than background)
  */
-export function getServiceBorderColor(serviceName: string, services: string[]): string {
-	const serviceIndex = services.indexOf(serviceName)
-	const hue = getServiceHue(serviceIndex, services.length)
-	return `oklch(0.45 0.18 ${hue})`
+export function getServiceBorderColor(serviceName: string): string {
+	const tier = getServiceColorTier(serviceName)
+	return `oklch(${tier.l - 0.08} ${tier.c + 0.02} ${getServiceHueFromName(serviceName)})`
 }
 
 /**
  * Resolve a hue for a string value, used to color trace timeline bars by
  * an arbitrary attribute. Returns null for empty/missing values so callers
- * can render a neutral fallback.
- *
- * When indexHint is supplied (position of a service in the trace's services
- * array), routes through getServiceHue so the timeline shares hues with
- * getServiceLegendColor (legend swatches, span hierarchy, service map, etc.).
+ * can render a neutral fallback. Shares hues with getServiceColor.
  */
-export function getValueHue(
-	value: string | undefined | null,
-	indexHint?: number,
-	totalCount?: number,
-): number | null {
+export function getValueHue(value: string | undefined | null): number | null {
 	if (value == null || value === "") return null
-	if (indexHint != null && indexHint >= 0) {
-		return getServiceHue(indexHint, totalCount ?? SERVICE_HUES.length)
-	}
-	let hash = 0
-	for (let i = 0; i < value.length; i++) {
-		hash = value.charCodeAt(i) + ((hash << 5) - hash)
-	}
-	return SERVICE_HUES[Math.abs(hash) % SERVICE_HUES.length]
+	return SERVICE_HUES[hashString(value) % SERVICE_HUES.length]
 }
 
 /**

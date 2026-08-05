@@ -18,14 +18,26 @@ vi.mock("@tanstack/react-router", async () => {
 	}
 })
 
-vi.mock("@/components/layout/dashboard-layout", () => ({
-	DashboardLayout: ({ headerActions, children }: { headerActions?: ReactNode; children?: ReactNode }) => (
-		<div>
-			{headerActions}
-			{children}
-		</div>
-	),
-}))
+vi.mock("@/components/layout/dashboard-layout", () => {
+	// Pass-through shell: every region just renders its children, so a test can
+	// assert on header actions and page body without the sidebar/router chrome.
+	const passthrough = ({ children }: { children?: ReactNode }) => <div>{children}</div>
+	return {
+		DashboardLayout: {
+			Root: passthrough,
+			Breadcrumbs: () => null,
+			Body: passthrough,
+			Filters: passthrough,
+			Content: passthrough,
+			Sticky: passthrough,
+			Header: passthrough,
+			Scroll: passthrough,
+			RightPanel: passthrough,
+			Title: passthrough,
+			Description: passthrough,
+		},
+	}
+})
 
 vi.mock("@/components/logs/logs-table", () => ({
 	LogsTable: () => <div>logs-table</div>,
@@ -60,6 +72,7 @@ vi.mock("@/components/time-range-picker/time-range-header-controls", () => ({
 }))
 
 import * as LogsRoute from "./logs"
+import { component as LogsPage } from "./logs?tsr-split=component"
 
 describe("LogsPage live refresh scope", () => {
 	beforeEach(() => {
@@ -82,7 +95,7 @@ describe("LogsPage live refresh scope", () => {
 	})
 
 	it("does not attach route-level relative refresh rebasing", () => {
-		render(<LogsRoute.LogsPage />)
+		render(<LogsPage />)
 
 		expect(providerProps.timePreset).toBe("12h")
 		expect(providerProps.onRelativeRangeRefresh).toBeUndefined()

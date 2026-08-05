@@ -1,21 +1,10 @@
 /**
- * Utilities for running HTTP server effects at the boundary between Effect and
- * platform request handlers.
+ * Runs Effect HTTP server handlers at platform boundaries.
  *
- * This module is used to turn an effect that produces an `HttpServerResponse`
- * into a concrete handler, such as a Web `Request` handler, while applying
- * middleware, converting failures into HTTP responses, and preserving the
- * current `HttpServerRequest` in the Effect context. It also provides hooks for
- * adjusting a response immediately before it is sent and helpers for managing
- * the request `Scope`, especially when a streaming response must own that scope
- * until the stream completes.
- *
- * Handlers built here expect the per-request context to contain
- * `HttpServerRequest` and, for scoped resources, `Scope.Scope`. Failures are
- * reported and translated through `HttpServerError` / respondable conversions,
- * so unhandled defects generally become server error responses while request
- * aborts and already-sent responses need to be handled with the provided
- * middleware and scope utilities.
+ * This module turns effects that produce `HttpServerResponse` values into Web
+ * `Request` handlers and other server adapters. It also applies middleware,
+ * converts failures into responses, runs hooks before a response is sent, and
+ * manages request scopes for streamed responses.
  *
  * @since 4.0.0
  */
@@ -36,7 +25,7 @@ import { HttpServerRequest } from "./HttpServerRequest.ts"
 import * as Request from "./HttpServerRequest.ts"
 import type { HttpServerResponse } from "./HttpServerResponse.ts"
 import * as Response from "./HttpServerResponse.ts"
-import { appendPreResponseHandlerUnsafe, requestPreResponseHandlers } from "./internal/preResponseHandler.ts"
+import * as preResponseHandler from "./internal/preResponseHandler.ts"
 
 /**
  * Runs an HTTP server effect, sends the produced response with the supplied handler, and converts failures into HTTP responses.
@@ -57,7 +46,7 @@ export const toHandled = <E, R, EH, RH>(
       const fiber = Fiber.getCurrent()!
       reportCauseUnsafe(fiber, cause)
       const request = Context.getUnsafe(fiber.context, HttpServerRequest)
-      const handler = requestPreResponseHandlers.get(request.source)
+      const handler = preResponseHandler.requestPreResponseHandlers.get(request.source)
       const cont = cause.reasons.length === 0 ? Effect.succeed(response) : Effect.failCause(cause)
       if (handler === undefined) {
         ;(request as any)[handledSymbol] = true
@@ -80,7 +69,7 @@ export const toHandled = <E, R, EH, RH>(
     onSuccess: (response) => {
       const fiber = Fiber.getCurrent()!
       const request = Context.getUnsafe(fiber.context, HttpServerRequest)
-      const handler = requestPreResponseHandlers.get(request.source)
+      const handler = preResponseHandler.requestPreResponseHandlers.get(request.source)
       if (handler === undefined) {
         ;(request as any)[handledSymbol] = true
         return Effect.mapEager(handleResponse(request, response), () => response)
@@ -134,7 +123,7 @@ const handledSymbol = Symbol.for("effect/http/HttpEffect/handled")
  * Use only when another owner will close the scope; otherwise resources attached
  * to the request scope can leak.
  *
- * @category Scope
+ * @category resource management
  * @since 4.0.0
  */
 export const scopeDisableClose = (scope: Scope.Scope): void => {
@@ -142,9 +131,9 @@ export const scopeDisableClose = (scope: Scope.Scope): void => {
 }
 
 /**
- * For streaming server responses, transfers request scope ownership to the body stream so the scope closes when the stream exits.
+ * Returns a streaming server response that closes the request scope when the body stream exits.
  *
- * @category Scope
+ * @category resource management
  * @since 4.0.0
  */
 export const scopeTransferToStream = (
@@ -203,15 +192,16 @@ export const appendPreResponseHandler = (handler: PreResponseHandler): Effect.Ef
     return Effect.void
   })
 
-export {
-  /**
-   * Registers a pre-response handler for the supplied HTTP server request.
-   *
-   * @category fiber refs
-   * @since 4.0.0
-   */
-  appendPreResponseHandlerUnsafe
-}
+/**
+ * Registers a pre-response handler for the supplied HTTP server request.
+ *
+ * @category fiber refs
+ * @since 4.0.0
+ */
+export const appendPreResponseHandlerUnsafe: (
+  request: HttpServerRequest,
+  handler: PreResponseHandler
+) => void = preResponseHandler.appendPreResponseHandlerUnsafe
 
 /**
  * Runs an effect after registering a pre-response handler for the current HTTP server request.

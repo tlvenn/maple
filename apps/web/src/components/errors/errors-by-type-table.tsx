@@ -1,14 +1,17 @@
-import { Result } from "@/lib/effect-atom"
+import { formatNumber } from "@maple/ui/lib/format"
+import { TableSkeleton } from "@maple/ui/components/ui/table-skeleton"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
+import { Result, useAtomRefresh } from "@/lib/effect-atom"
 import { Fragment, useState } from "react"
 import { Link } from "@tanstack/react-router"
-import { formatDistanceToNow, format } from "date-fns"
+import { format } from "date-fns"
 import { ArrowRightIcon, ChevronDownIcon, ChevronRightIcon } from "@/components/icons"
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { type GetErrorsByTypeInput, type ErrorByType } from "@/api/warehouse/errors"
-import { formatDuration } from "@/lib/format"
+import { formatDuration } from "@maple/ui/lib/format"
 import { QueryErrorState } from "@/components/common/query-error-state"
 import {
 	getErrorDetailTracesResultAtom,
@@ -16,20 +19,6 @@ import {
 } from "@/lib/services/atoms/warehouse-query-atoms"
 import { HttpSpanLabel } from "@maple/ui/components/traces/http-span-label"
 import { useRefreshableAtomValue } from "@/hooks/use-refreshable-atom-value"
-
-function formatNumber(num: number): string {
-	if (num >= 1_000_000) {
-		return `${(num / 1_000_000).toFixed(1)}M`
-	}
-	if (num >= 1_000) {
-		return `${(num / 1_000).toFixed(1)}K`
-	}
-	return num.toLocaleString()
-}
-
-function formatTimeAgo(date: Date): string {
-	return formatDistanceToNow(date, { addSuffix: true })
-}
 
 function truncateErrorType(errorType: string, maxLength = 60): string {
 	if (errorType.length <= maxLength) return errorType
@@ -153,7 +142,9 @@ function ErrorDetailPanel({ errorRow, filters }: { errorRow: ErrorByType; filter
 											<span className="text-xs">
 												{formatDuration(trace.durationMicros / 1000)}
 											</span>
-											<span className="text-xs">{formatTimeAgo(trace.startTime)}</span>
+											<span className="text-xs">
+												{formatRelativeTime(trace.startTime)}
+											</span>
 										</div>
 									</Link>
 								))}
@@ -178,43 +169,28 @@ function ErrorDetailPanel({ errorRow, filters }: { errorRow: ErrorByType; filter
 	)
 }
 
+const SKELETON_COLUMNS = [
+	{ headClassName: "w-[32px]", skeleton: null },
+	{ header: "Error Type", skeleton: "w-64" },
+	{ header: "Count", headClassName: "w-[100px]", skeleton: "h-5 w-16" },
+	{
+		header: "Affected Services",
+		headClassName: "hidden md:table-cell w-[140px]",
+		cellClassName: "hidden md:table-cell",
+		skeleton: "w-20",
+	},
+	{
+		header: "Last Seen",
+		headClassName: "hidden md:table-cell w-[140px]",
+		cellClassName: "hidden md:table-cell",
+		skeleton: "w-24",
+	},
+]
+
 function LoadingState() {
 	return (
 		<div className="space-y-4">
-			<div className="rounded-md border overflow-auto">
-				<Table>
-					<TableHeader>
-						<TableRow>
-							<TableHead className="w-[32px]" />
-							<TableHead>Error Type</TableHead>
-							<TableHead className="w-[100px]">Count</TableHead>
-							<TableHead className="hidden md:table-cell w-[140px]">
-								Affected Services
-							</TableHead>
-							<TableHead className="hidden md:table-cell w-[140px]">Last Seen</TableHead>
-						</TableRow>
-					</TableHeader>
-					<TableBody>
-						{Array.from({ length: 5 }).map((_, i) => (
-							<TableRow key={i}>
-								<TableCell />
-								<TableCell>
-									<Skeleton className="h-4 w-64" />
-								</TableCell>
-								<TableCell>
-									<Skeleton className="h-5 w-16" />
-								</TableCell>
-								<TableCell className="hidden md:table-cell">
-									<Skeleton className="h-4 w-20" />
-								</TableCell>
-								<TableCell className="hidden md:table-cell">
-									<Skeleton className="h-4 w-24" />
-								</TableCell>
-							</TableRow>
-						))}
-					</TableBody>
-				</Table>
-			</div>
+			<TableSkeleton columns={SKELETON_COLUMNS} rows={5} />
 		</div>
 	)
 }
@@ -222,11 +198,13 @@ function LoadingState() {
 export function ErrorsByTypeTable({ filters }: ErrorsByTypeTableProps) {
 	const [expandedError, setExpandedError] = useState<string | null>(null)
 
-	const errorsResult = useRefreshableAtomValue(getErrorsByTypeResultAtom({ data: filters }))
+	const errorsAtom = getErrorsByTypeResultAtom({ data: filters })
+	const errorsResult = useRefreshableAtomValue(errorsAtom)
+	const refreshErrors = useAtomRefresh(errorsAtom)
 
 	return Result.builder(errorsResult)
 		.onInitial(() => <LoadingState />)
-		.onError((error) => <QueryErrorState error={error} />)
+		.onError((error) => <QueryErrorState error={error} onRetry={refreshErrors} />)
 		.onSuccess((response, result) => {
 			const errors = response.data ?? []
 
@@ -306,7 +284,7 @@ export function ErrorsByTypeTable({ filters }: ErrorsByTypeTableProps) {
 														{errorRow.affectedServicesCount !== 1 ? "s" : ""}
 													</TableCell>
 													<TableCell className="hidden md:table-cell text-sm text-muted-foreground">
-														{formatTimeAgo(errorRow.lastSeen)}
+														{formatRelativeTime(errorRow.lastSeen)}
 													</TableCell>
 												</TableRow>
 												{isExpanded && (

@@ -1,5 +1,5 @@
-import { useMemo, useId } from "react"
-import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts"
+import { memo, useMemo, useId } from "react"
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
 
 import type { BaseChartProps } from "../_shared/chart-types"
 import { throughputTimeSeriesData } from "../_shared/sample-data"
@@ -23,14 +23,17 @@ import {
 
 const VALUE_KEYS = ["throughput"]
 
-export function ThroughputAreaChart({
+// Memoized: these charts sit in synced grids whose parent rerenders on every
+// atom/query settle; with stable props the whole Recharts subtree is skipped.
+export const ThroughputAreaChart = memo(function ThroughputAreaChart({
 	data,
 	className,
 	legend,
 	tooltip,
 	rateMode,
-	referenceLines,
 	syncId,
+	overlay,
+	yAxisWidth,
 }: BaseChartProps) {
 	const id = useId()
 	const gradientId = `throughputGradient-${id.replace(/:/g, "")}`
@@ -138,15 +141,6 @@ export function ThroughputAreaChart({
 					)}
 				</defs>
 				<CartesianGrid vertical={false} />
-				{referenceLines?.map((rl, i) => (
-					<ReferenceLine
-						key={`release-${i}`}
-						x={rl.x}
-						stroke={rl.color ?? "var(--muted-foreground)"}
-						strokeDasharray={rl.strokeDasharray ?? "6 4"}
-						strokeWidth={1}
-					/>
-				))}
 				<XAxis
 					dataKey="bucket"
 					tickLine={false}
@@ -158,7 +152,7 @@ export function ThroughputAreaChart({
 					tickLine={false}
 					axisLine={false}
 					tickMargin={8}
-					width={rateLabel.length > 3 ? 90 : 60}
+					width={yAxisWidth ?? (rateLabel.length > 3 ? 90 : 60)}
 					tickFormatter={(value: number) => formatThroughput(value, rateLabel)}
 				/>
 				{tooltip !== "hidden" && (
@@ -168,17 +162,7 @@ export function ThroughputAreaChart({
 								labelFormatter={(_, payload) => {
 									if (!payload?.[0]?.payload?.bucket) return ""
 									const bucket = payload[0].payload.bucket as string
-									const release = referenceLines?.find((rl) => rl.x === bucket)
-									return (
-										<span>
-											{formatBucketLabel(bucket, axisContext, "tooltip")}
-											{release?.label && (
-												<span className="ml-2 text-muted-foreground">
-													Deploy: {release.label}
-												</span>
-											)}
-										</span>
-									)
+									return formatBucketLabel(bucket, axisContext, "tooltip")
 								}}
 								formatter={(value, name, item) => {
 									const nameStr = String(name)
@@ -310,7 +294,8 @@ export function ThroughputAreaChart({
 						isAnimationActive={false}
 					/>
 				)}
+				{overlay}
 			</AreaChart>
 		</ChartContainer>
 	)
-}
+})

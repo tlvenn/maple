@@ -1,5 +1,6 @@
 import { normalizeTimestamp } from "./format"
 import { getHttpInfo, type HttpInfo } from "./http"
+import { tracedFetch } from "./telemetry"
 
 export { getHttpInfo, type HttpInfo } from "./http"
 
@@ -17,11 +18,15 @@ async function apiRequest<T>(path: string, body: unknown): Promise<T> {
 	const headers: Record<string, string> = { "content-type": "application/json" }
 	if (token) headers.authorization = `Bearer ${token}`
 
-	const res = await fetch(`${API_BASE_URL}${path}`, {
-		method: "POST",
-		headers,
-		body: JSON.stringify(body),
-	})
+	const res = await tracedFetch(
+		`${API_BASE_URL}${path}`,
+		{
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+		},
+		"maple-api",
+	)
 
 	if (!res.ok) {
 		throw new Error(`API ${path} failed: ${res.status}`)
@@ -35,10 +40,14 @@ async function apiGet<T>(path: string): Promise<T> {
 	const headers: Record<string, string> = { accept: "application/json" }
 	if (token) headers.authorization = `Bearer ${token}`
 
-	const res = await fetch(`${API_BASE_URL}${path}`, {
-		method: "GET",
-		headers,
-	})
+	const res = await tracedFetch(
+		`${API_BASE_URL}${path}`,
+		{
+			method: "GET",
+			headers,
+		},
+		"maple-api",
+	)
 
 	if (!res.ok) {
 		throw new Error(`API ${path} failed: ${res.status}`)
@@ -206,6 +215,7 @@ export async function fetchServiceOverview(startTime: string, endTime: string): 
 		environment: string
 		spanCount: number
 		errorCount: number
+		estimatedErrorCount?: number
 		p50LatencyMs: number
 		p95LatencyMs: number
 		p99LatencyMs: number
@@ -224,6 +234,8 @@ export async function fetchServiceOverview(startTime: string, endTime: string): 
 			environment,
 			spanCount: Number(raw.spanCount ?? 0),
 			errorCount: Number(raw.errorCount ?? 0),
+			estimatedErrorCount:
+				raw.estimatedErrorCount == null ? undefined : Number(raw.estimatedErrorCount),
 			p50LatencyMs: Number(raw.p50LatencyMs ?? 0),
 			p95LatencyMs: Number(raw.p95LatencyMs ?? 0),
 			p99LatencyMs: Number(raw.p99LatencyMs ?? 0),
@@ -244,6 +256,10 @@ export async function fetchServiceOverview(startTime: string, endTime: string): 
 		const totalSpans = group.reduce((sum, r) => sum + r.spanCount, 0)
 		const totalErrors = group.reduce((sum, r) => sum + r.errorCount, 0)
 		const totalEstimated = group.reduce((sum, r) => sum + r.estimatedSpanCount, 0)
+		const hasEstimatedErrors = group.every(
+			(r) => r.estimatedErrorCount != null && Number.isFinite(r.estimatedErrorCount),
+		)
+		const totalEstimatedErrors = group.reduce((sum, r) => sum + (r.estimatedErrorCount ?? 0), 0)
 
 		const sampling = summarizeSampling(totalEstimated, totalSpans, durationSeconds)
 
@@ -265,7 +281,12 @@ export async function fetchServiceOverview(startTime: string, endTime: string): 
 			p50LatencyMs: p50,
 			p95LatencyMs: p95,
 			p99LatencyMs: p99,
-			errorRate: totalSpans > 0 ? totalErrors / totalSpans : 0,
+			errorRate:
+				hasEstimatedErrors && totalEstimated > 0
+					? totalEstimatedErrors / totalEstimated
+					: totalSpans > 0
+						? totalErrors / totalSpans
+						: 0,
 			throughput: sampling.hasSampling ? sampling.estimated : sampling.traced,
 			tracedThroughput: sampling.traced,
 			hasSampling: sampling.hasSampling,

@@ -8,7 +8,7 @@ import {
 	ServerIcon,
 	SquareTerminalIcon,
 } from "@/components/icons"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { ROLE_OPTIONS, type RoleOption } from "@/atoms/quick-start-atoms"
 
 const ROLE_LABELS: Record<RoleOption, string> = {
@@ -18,10 +18,7 @@ const ROLE_LABELS: Record<RoleOption, string> = {
 	founder: "Founder / CTO",
 }
 
-const ROLE_ICONS: Record<
-	RoleOption,
-	React.ComponentType<{ size?: number; className?: string }>
-> = {
+const ROLE_ICONS: Record<RoleOption, React.ComponentType<{ size?: number; className?: string }>> = {
 	engineer: SquareTerminalIcon,
 	devops_sre: ServerIcon,
 	eng_leader: ChartLineIcon,
@@ -38,8 +35,6 @@ export const QUALIFY_QUESTIONS = {
 		columns: 2,
 	},
 } as const
-
-export type QualifyQuestionId = keyof typeof QUALIFY_QUESTIONS
 
 const GRID_VARIANTS = {
 	hidden: {},
@@ -138,9 +133,7 @@ export function StepQualifyQuestion<T extends string>({
 										<Icon size={18} />
 									</div>
 								)}
-								<span className="text-[13px] leading-tight text-center">
-									{labels[opt]}
-								</span>
+								<span className="text-[13px] leading-tight text-center">{labels[opt]}</span>
 								{active && (
 									<motion.span
 										className="absolute top-2 right-2 text-primary"

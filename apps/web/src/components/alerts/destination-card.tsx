@@ -8,7 +8,7 @@ import {
 	PencilIcon,
 	TrashIcon,
 } from "@/components/icons"
-import { formatRelativeTime } from "@/lib/format"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
 import { Button } from "@maple/ui/components/ui/button"
 import { Card } from "@maple/ui/components/ui/card"
 import {
@@ -19,7 +19,7 @@ import {
 	DropdownMenuTrigger,
 } from "@maple/ui/components/ui/dropdown-menu"
 import { Switch } from "@maple/ui/components/ui/switch"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 
 interface DestinationCardProps {
 	destination: AlertDestinationDocument
@@ -48,12 +48,6 @@ export function DestinationCard({
 		<Card
 			className={cn("group relative overflow-hidden p-0 transition-colors", "hover:border-border/80")}
 		>
-			<span
-				aria-hidden
-				className="pointer-events-none absolute -left-12 -top-12 size-32 rounded-full opacity-0 blur-3xl transition-opacity duration-500 group-hover:opacity-60"
-				style={{ background: provider.accentBg }}
-			/>
-
 			<div className="relative flex flex-col gap-4 p-5 lg:flex-row lg:items-start lg:justify-between">
 				<div
 					className={cn(
@@ -71,7 +65,8 @@ export function DestinationCard({
 							<span
 								className="rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider"
 								style={{
-									borderColor: `${provider.accentText ?? provider.accent}55`,
+									// color-mix (not hex-alpha concat) so `light-dark()` accentText values work.
+									borderColor: `color-mix(in srgb, ${provider.accentText ?? provider.accent} 33%, transparent)`,
 									color: provider.accentText ?? provider.accent,
 									backgroundColor: provider.accentBg,
 								}}

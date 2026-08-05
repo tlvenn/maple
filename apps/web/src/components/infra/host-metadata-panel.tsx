@@ -1,16 +1,18 @@
-import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@maple/ui/components/ui/card"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@maple/ui/components/ui/tooltip"
-import { cn } from "@maple/ui/lib/utils"
+import { CopyButton } from "@maple/ui/components/ui/copy-button"
 
-import { CheckIcon, CopyIcon, ServerIcon } from "@/components/icons"
+import { ServerIcon } from "@/components/icons"
 import type { HostDetailSummaryResponse } from "@maple/domain/http"
-import { formatRelative } from "./format"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
 
 interface HostMetadataPanelProps {
 	summary: HostDetailSummaryResponse["data"]
 }
 
+// Candidate for DetailRail.MetaRow (@maple/ui) — same mono label/value pair, but
+// this one layers on copy-on-hover and an optional tooltip. Fold in if MetaRow
+// ever grows those.
 interface RowProps {
 	label: string
 	value: string | null | undefined
@@ -19,20 +21,7 @@ interface RowProps {
 }
 
 function Row({ label, value, copyValue, tooltip }: RowProps) {
-	const [copied, setCopied] = useState(false)
 	if (!value) return null
-
-	const handleCopy = async (e: React.MouseEvent) => {
-		e.preventDefault()
-		e.stopPropagation()
-		try {
-			await navigator.clipboard.writeText(copyValue ?? value)
-			setCopied(true)
-			window.setTimeout(() => setCopied(false), 1500)
-		} catch {
-			// ignore
-		}
-	}
 
 	const valueNode = (
 		<span className="break-all text-right font-mono text-[11px] tabular-nums text-foreground/85">
@@ -54,18 +43,14 @@ function Row({ label, value, copyValue, tooltip }: RowProps) {
 				) : (
 					valueNode
 				)}
-				<button
-					type="button"
-					onClick={handleCopy}
-					aria-label={`Copy ${label}`}
-					className={cn(
-						"flex size-5 items-center justify-center rounded text-muted-foreground transition-all",
-						"opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground",
-						copied && "opacity-100 text-[var(--severity-info)]",
-					)}
-				>
-					{copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
-				</button>
+				<CopyButton
+					value={copyValue ?? value}
+					label={label}
+					// One per row; the hover-revealed glyph is the feedback here.
+					toast={false}
+					iconSize={11}
+					className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+				/>
 			</div>
 		</div>
 	)
@@ -111,13 +96,13 @@ export function HostMetadataPanel({ summary }: HostMetadataPanelProps) {
 				<Section title="Lifecycle">
 					<Row
 						label="first seen"
-						value={formatRelative(summary.firstSeen)}
+						value={formatRelativeTime(summary.firstSeen)}
 						copyValue={summary.firstSeen}
 						tooltip={summary.firstSeen}
 					/>
 					<Row
 						label="last seen"
-						value={formatRelative(summary.lastSeen)}
+						value={formatRelativeTime(summary.lastSeen)}
 						copyValue={summary.lastSeen}
 						tooltip={summary.lastSeen}
 					/>

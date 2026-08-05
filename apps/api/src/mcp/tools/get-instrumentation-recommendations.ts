@@ -5,17 +5,17 @@ import {
 	validationError,
 	type McpToolRegistrar,
 } from "./types"
-import { formatNumber, formatTable } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatNumber, formatTable } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Option, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-warehouse"
-import { toMcpQueryError } from "../lib/map-warehouse-error"
-import { resolveTimeRange } from "../lib/time"
-import { RecommendationIssueService } from "@/services/RecommendationIssueService"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { toMcpQueryError } from "@/mcp/lib/map-warehouse-error"
+import { resolveTimeRange } from "@/mcp/lib/time"
+import { RecommendationIssueService } from "@/services/errors/RecommendationIssueService"
 import { RecommendationIssueStatus, type RecommendationIssueKind } from "@maple/domain/http"
 import { exploreAttributeKeys } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
+import { makeWarehouseExecutorFromTenant } from "@/services/warehouse/WarehouseQueryService"
 
 const decodeStatus = Schema.decodeUnknownOption(RecommendationIssueStatus)
 
@@ -77,14 +77,12 @@ export const deriveCoverageGaps = (
 	resourceKeys: ReadonlyArray<{ readonly key: string }>,
 ): ReadonlyArray<CoverageGap> => {
 	const present = new Set(resourceKeys.map((row) => row.key))
-	return COVERAGE_CHECKS.filter((check) => !check.keys.some((key) => present.has(key))).map(
-		(check) => ({
-			checkId: check.checkId,
-			attribute: check.label,
-			severity: "warn" as const,
-			reason: check.reason,
-		}),
-	)
+	return COVERAGE_CHECKS.filter((check) => !check.keys.some((key) => present.has(key))).map((check) => ({
+		checkId: check.checkId,
+		attribute: check.label,
+		severity: "warn" as const,
+		reason: check.reason,
+	}))
 }
 
 // v2 candidates (each needs a new warehouse aggregate, deliberately not in v1):
@@ -107,10 +105,7 @@ export function registerGetInstrumentationRecommendationsTool(server: McpToolReg
 				"Set to false to skip the resource-attribute coverage section (default: included)",
 			),
 		}),
-		Effect.fn("McpTool.getInstrumentationRecommendations")(function* ({
-			status,
-			include_coverage,
-		}) {
+		Effect.fn("McpTool.getInstrumentationRecommendations")(function* ({ status, include_coverage }) {
 			const tenant = yield* resolveTenant
 			yield* Effect.annotateCurrentSpan({
 				orgId: tenant.orgId,
@@ -138,7 +133,7 @@ export function registerGetInstrumentationRecommendationsTool(server: McpToolReg
 					(error) =>
 						new McpQueryError({
 							message: error.message,
-							pipe: "get_instrumentation_recommendations",
+							pipeName: "get_instrumentation_recommendations",
 							cause: error,
 						}),
 				),
@@ -147,7 +142,7 @@ export function registerGetInstrumentationRecommendationsTool(server: McpToolReg
 			const issues = reconciled.issues.filter(
 				(issue) => statusFilter === undefined || issue.status === statusFilter,
 			)
-			yield* Effect.annotateCurrentSpan("resultCount", issues.length)
+			yield* Effect.annotateCurrentSpan("result.rowCount", issues.length)
 
 			// Coverage degrades gracefully: if the warehouse is unavailable the issue list
 			// (possibly stale) still renders, with the coverage section marked unavailable.

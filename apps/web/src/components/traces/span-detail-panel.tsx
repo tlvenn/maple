@@ -1,31 +1,23 @@
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import { Result, useAtomValue } from "@/lib/effect-atom"
-import {
-	XmarkIcon,
-	ClockIcon,
-	CircleWarningIcon,
-	CircleInfoIcon,
-	SquareTerminalIcon,
-	ChevronDownIcon,
-	ChevronUpIcon,
-	CopyIcon,
-} from "@/components/icons"
-import { toast } from "sonner"
-import { useClipboard } from "@maple/ui/hooks/use-clipboard"
+import { XmarkIcon, ClockIcon, CircleInfoIcon, SquareTerminalIcon, ServerIcon } from "@/components/icons"
+import { ErrorSection } from "@maple/ui/components/error-section"
 
 import { Button } from "@maple/ui/components/ui/button"
-import { Alert, AlertTitle, AlertDescription } from "@maple/ui/components/ui/alert"
-import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@maple/ui/components/ui/collapsible"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@maple/ui/components/ui/tabs"
 import { ScrollArea } from "@maple/ui/components/ui/scroll-area"
 import { type Log, type LogsResponse } from "@/api/warehouse/logs"
 import { LogDetailSheet } from "@/components/logs/log-detail-sheet"
-import { formatDuration } from "@/lib/format"
-import { cn } from "@maple/ui/utils"
+import { formatDuration } from "@maple/ui/lib/format"
+import { cn } from "@maple/ui/lib/utils"
+import { getSpanKindLabel, getSpanStatusBadgeClass } from "@maple/ui/lib/span-kind"
 import { getCacheInfo, cacheResultStyles } from "@maple/ui/lib/cache"
-import { getServiceLegendColor } from "@maple/ui/lib/colors"
+import { getCloudPlatform, outcomeBadgeStyle } from "@maple/ui/lib/cloud-platforms"
+import { GlobeIcon } from "@maple/ui/components/icons"
+import { getServiceColor } from "@maple/ui/lib/colors"
+import { ServiceDot } from "@maple/ui/components/service-dot"
 import type { SpanNode, SpanDetailResult } from "@/api/warehouse/traces"
 import { disabledResultAtom } from "@/lib/services/atoms/disabled-result-atom"
 import { getSpanDetailResultAtom, listLogsResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
@@ -33,25 +25,75 @@ import { CopyableValue, AttributesTable, ResourceAttributesSection } from "@/com
 import { useTimezonePreference } from "@/hooks/use-timezone-preference"
 import { formatTimestampInTimezone } from "@/lib/timezone-format"
 import { HttpSpanLabel } from "@maple/ui/components/traces/http-span-label"
+import { getActiveInfraCorrelations } from "@/components/infra/infra-correlations"
+import { InfraCorrelationPanel, infraCorrelationWindow } from "@/components/infra/infra-correlation-panel"
 
 interface SpanDetailPanelProps {
 	span: SpanNode
-	services: string[]
 	onClose: () => void
+	/** Start of the whole trace (earliest span start) — anchors the position-in-trace bar. */
+	traceStartTime: string
+	totalDurationMs: number
+	className?: string
 }
 
-const statusStyles: Record<string, string> = {
-	Ok: "bg-severity-info/15 text-severity-info border-severity-info/30",
-	Error: "bg-severity-error/15 text-severity-error border-severity-error/30",
-	Unset: "bg-muted text-muted-foreground border-border",
+/**
+ * Label/value row that survives a narrow panel: the label holds its width, the value takes the rest
+ * and ellipsises. Values are click-to-copy, so a truncated display still yields the full string.
+ */
+function PlatformRow({
+	label,
+	children,
+	className,
+}: {
+	label: string
+	children: ReactNode
+	className?: string
+}) {
+	return (
+		<div className={cn("flex items-center justify-between gap-2 min-w-0", className)}>
+			<span className="text-muted-foreground shrink-0">{label}</span>
+			<span className="font-mono truncate text-right">{children}</span>
+		</div>
+	)
 }
 
-const kindLabels: Record<string, string> = {
-	SPAN_KIND_SERVER: "Server",
-	SPAN_KIND_CLIENT: "Client",
-	SPAN_KIND_PRODUCER: "Producer",
-	SPAN_KIND_CONSUMER: "Consumer",
-	SPAN_KIND_INTERNAL: "Internal",
+/**
+ * Where this span sits inside the whole trace: a muted track spanning the
+ * trace's wall-clock time, with the span's own window in its service color.
+ * Offsets are clamped so clock-skewed spans never paint outside the track.
+ */
+function SpanPositionBar({
+	span,
+	traceStartTime,
+	totalDurationMs,
+	color,
+}: {
+	span: SpanNode
+	traceStartTime: string
+	totalDurationMs: number
+	color: string
+}) {
+	const offsetMs = new Date(span.startTime).getTime() - new Date(traceStartTime).getTime()
+	if (!Number.isFinite(offsetMs) || totalDurationMs <= 0) return null
+
+	const offsetPct = Math.min(Math.max((offsetMs / totalDurationMs) * 100, 0), 100)
+	const widthPct = Math.min(Math.max((span.durationMs / totalDurationMs) * 100, 0.75), 100 - offsetPct)
+
+	return (
+		<div className="py-1">
+			<div className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted">
+				<div
+					className="absolute inset-y-0 rounded-full"
+					style={{ left: `${offsetPct}%`, width: `${widthPct}%`, backgroundColor: color }}
+				/>
+			</div>
+			<div className="mt-1 flex justify-between text-[10px] text-muted-foreground tabular-nums">
+				<span>+{formatDuration(Math.max(offsetMs, 0))}</span>
+				<span>{formatDuration(totalDurationMs)} total</span>
+			</div>
+		</div>
+	)
 }
 
 const severityStyles: Record<string, string> = {
@@ -79,106 +121,6 @@ function LogEntry({ log, timeZone, onClick }: { log: Log; timeZone: string; onCl
 			</div>
 			<p className="font-mono text-xs whitespace-pre-wrap break-all line-clamp-3">{log.body}</p>
 		</div>
-	)
-}
-
-interface ErrorSectionProps {
-	message: string
-	serviceName: string
-	spanName: string
-	attributes?: Record<string, string>
-}
-
-function formatErrorPrompt({ message, serviceName, spanName, attributes }: ErrorSectionProps): string {
-	const relevantKeys = [
-		"http.method",
-		"http.url",
-		"http.route",
-		"http.status_code",
-		"db.system.name",
-		"db.system",
-		"db.query.text",
-		"db.statement",
-		"rpc.method",
-		"rpc.service",
-		"messaging.system",
-		"messaging.operation",
-	]
-
-	const contextLines: string[] = []
-	if (attributes) {
-		for (const key of relevantKeys) {
-			if (attributes[key]) {
-				contextLines.push(`- ${key}: ${attributes[key]}`)
-			}
-		}
-	}
-
-	return `I'm debugging an error in my distributed system. Please help me understand and fix this issue.
-
-**Service:** ${serviceName}
-**Operation:** ${spanName}
-
-**Error:**
-\`\`\`
-${message}
-\`\`\`
-${
-	contextLines.length > 0
-		? `
-**Context:**
-${contextLines.join("\n")}
-`
-		: ""
-}
-What could be causing this error and how can I fix it?`
-}
-
-function ErrorSection({ message, serviceName, spanName, attributes }: ErrorSectionProps) {
-	const clipboard = useClipboard()
-	const [expanded, setExpanded] = useState(false)
-	const isLong = message.length > 120 || message.includes("\n")
-
-	const handleCopyPrompt = async () => {
-		const prompt = formatErrorPrompt({ message, serviceName, spanName, attributes })
-		await clipboard.copy(prompt)
-		toast.success("Copied error prompt to clipboard")
-	}
-
-	return (
-		<Alert variant="error" className="mx-3 my-2 rounded-md border-destructive/30">
-			<CircleWarningIcon size={14} />
-			<AlertTitle className="flex items-center justify-between">
-				<span>Error</span>
-				<Button
-					variant="ghost"
-					size="sm"
-					className="h-5 px-1.5 text-[10px] text-destructive hover:text-destructive/80 hover:bg-destructive/10"
-					onClick={handleCopyPrompt}
-				>
-					<CopyIcon size={10} className="mr-1" />
-					Copy as prompt
-				</Button>
-			</AlertTitle>
-			<AlertDescription>
-				{isLong ? (
-					<Collapsible open={expanded} onOpenChange={setExpanded}>
-						{!expanded && <p className="font-mono text-[11px] line-clamp-2">{message}</p>}
-						<CollapsibleTrigger className="text-[10px] text-destructive hover:text-destructive/80 mt-1 flex items-center gap-1">
-							{expanded ? "Show less" : "Show full error"}
-							{expanded ? <ChevronUpIcon size={10} /> : <ChevronDownIcon size={10} />}
-						</CollapsibleTrigger>
-						<CollapsibleContent>
-							<pre className="font-mono text-[11px] whitespace-pre-wrap break-all mt-2 p-2 bg-destructive/5 rounded max-h-48 overflow-auto">
-								{message}
-							</pre>
-						</CollapsibleContent>
-					</Collapsible>
-				) : (
-					<p className="font-mono text-[11px]">{message}</p>
-				)}
-			</AlertDescription>
-		</Alert>
 	)
 }
 
@@ -243,11 +185,17 @@ function SpanLogs({ traceId, spanId, timeZone }: { traceId: string; spanId: stri
 	)
 }
 
-export function SpanDetailPanel({ span, services, onClose }: SpanDetailPanelProps) {
+export function SpanDetailPanel({
+	span,
+	onClose,
+	traceStartTime,
+	totalDurationMs,
+	className,
+}: SpanDetailPanelProps) {
 	const { effectiveTimezone } = useTimezonePreference()
 	const cacheInfo = getCacheInfo(span.spanAttributes)
-	const statusStyle = statusStyles[span.statusCode] ?? statusStyles.Unset
-	const kindLabel = kindLabels[span.spanKind] ?? span.spanKind?.replace("SPAN_KIND_", "") ?? "Unknown"
+	const statusStyle = getSpanStatusBadgeClass(span.statusCode)
+	const kindLabel = getSpanKindLabel(span.spanKind)
 	const logsResult = useAtomValue(
 		span.traceId && span.spanId
 			? listLogsResultAtom({ data: { traceId: span.traceId, spanId: span.spanId, limit: 100 } })
@@ -267,10 +215,27 @@ export function SpanDetailPanel({ span, services, onClose }: SpanDetailPanelProp
 	)
 	const detailAttrs = Result.isSuccess(detailResult) ? detailResult.value : null
 
+	// Prefer the lazily-loaded full resource map; fall back to the trimmed span
+	// map so the tab can appear before the detail query resolves.
+	const infraAttrs = detailAttrs?.resourceAttributes ?? span.resourceAttributes
+	const hasInfra = getActiveInfraCorrelations(infraAttrs).length > 0
+
+	// Serverless/cloud platform annotations (Cloudflare, Vercel, …). The
+	// hierarchy query only projects a few keys (edge/outcome); the full field set
+	// arrives with the lazily-loaded detail attrs.
+	const platform = getCloudPlatform(detailAttrs?.spanAttributes ?? span.spanAttributes)
+
+	const serviceColor = getServiceColor(span.serviceName)
+
 	return (
-		<div className="flex flex-col h-full border-l bg-background overflow-hidden">
-			{/* Header */}
-			<div className="flex items-center justify-between border-b px-3 py-2 shrink-0">
+		<div className={cn("flex flex-col h-full border-l bg-background overflow-hidden", className)}>
+			{/* Header — the left rail carries the span's service identity color */}
+			<div className="relative flex items-center justify-between border-b px-3 py-2 shrink-0">
+				<span
+					aria-hidden
+					className="absolute inset-y-0 left-0 w-0.5"
+					style={{ backgroundColor: serviceColor }}
+				/>
 				<div className="flex-1 min-w-0 mr-2 overflow-hidden">
 					<CopyableValue value={span.spanName} className="block min-w-0 overflow-hidden">
 						<div className="min-w-0">
@@ -282,14 +247,13 @@ export function SpanDetailPanel({ span, services, onClose }: SpanDetailPanelProp
 							/>
 						</div>
 					</CopyableValue>
-					<div className="flex items-center gap-2 mt-0.5">
-						<Badge
-							variant="outline"
-							className="font-mono text-[10px]"
-							style={{ color: getServiceLegendColor(span.serviceName, services) }}
-						>
-							<CopyableValue value={span.serviceName}>{span.serviceName}</CopyableValue>
-						</Badge>
+					<div className="flex items-center gap-1.5 mt-0.5">
+						<ServiceDot serviceName={span.serviceName} className="size-1.5" />
+						<CopyableValue value={span.serviceName}>
+							<span className="font-mono text-[10px]" style={{ color: serviceColor }}>
+								{span.serviceName}
+							</span>
+						</CopyableValue>
 						<span className="text-[10px] text-muted-foreground">{kindLabel}</span>
 					</div>
 				</div>
@@ -343,19 +307,71 @@ export function SpanDetailPanel({ span, services, onClose }: SpanDetailPanelProp
 				</div>
 			)}
 
+			{/* Cloud platform summary (Cloudflare, Vercel, …) */}
+			{platform && (
+				<div className="@container/platform border-b px-3 py-2 text-xs shrink-0 space-y-1.5">
+					<div className="flex items-center gap-1.5">
+						<platform.Icon size={12} className={cn("shrink-0", platform.accentClassName)} />
+						<span className="font-medium">{platform.label}</span>
+						{platform.outcome && (
+							<Badge
+								variant="outline"
+								className={cn(
+									"text-[10px] font-medium ml-auto",
+									outcomeBadgeStyle(platform.outcome.bad),
+								)}
+							>
+								{platform.outcome.value}
+							</Badge>
+						)}
+					</div>
+					{/* Two columns only once the panel is wide enough for them to hold real values. */}
+					<div className="grid grid-cols-1 gap-x-4 gap-y-1 text-[11px] @min-[22rem]/platform:grid-cols-2">
+						{platform.edge && (
+							<PlatformRow label="Edge">
+								<span className="inline-flex items-center gap-1">
+									<GlobeIcon size={10} className="shrink-0" />
+									{platform.edge}
+								</span>
+							</PlatformRow>
+						)}
+						{platform.location && <PlatformRow label="Location">{platform.location}</PlatformRow>}
+						{platform.fields.map((field) => (
+							<PlatformRow
+								key={field.label}
+								label={field.label}
+								className={field.wide ? "@min-[22rem]/platform:col-span-2" : undefined}
+							>
+								{field.copyable ? (
+									<CopyableValue value={field.value}>
+										{field.display ?? field.value}
+									</CopyableValue>
+								) : (
+									(field.display ?? field.value)
+								)}
+							</PlatformRow>
+						))}
+					</div>
+				</div>
+			)}
+
 			{/* Error section */}
 			{span.statusCode === "Error" && span.statusMessage && (
 				<ErrorSection
 					message={span.statusMessage}
-					serviceName={span.serviceName}
-					spanName={span.spanName}
-					attributes={detailAttrs?.spanAttributes ?? span.spanAttributes}
+					prompt={{
+						serviceName: span.serviceName,
+						operation: span.spanName,
+						attributes: detailAttrs?.spanAttributes ?? span.spanAttributes,
+					}}
 				/>
 			)}
 
 			{/* Tabs content */}
 			<Tabs defaultValue="details" className="flex-1 flex flex-col min-h-0">
-				<TabsList variant="underline" className="shrink-0 px-4">
+				{/* TabsList is w-fit, so in a narrow panel it would overflow and the last tab would be
+				    clipped out of reach — cap it and let it scroll instead. */}
+				<TabsList variant="underline" className="shrink-0 max-w-full overflow-x-auto px-4">
 					<TabsTrigger value="details">
 						<CircleInfoIcon size={14} /> Details
 					</TabsTrigger>
@@ -367,62 +383,53 @@ export function SpanDetailPanel({ span, services, onClose }: SpanDetailPanelProp
 							</Badge>
 						)}
 					</TabsTrigger>
+					{hasInfra && (
+						<TabsTrigger value="infrastructure">
+							<ServerIcon size={14} /> Infrastructure
+						</TabsTrigger>
+					)}
 				</TabsList>
 
 				<TabsContent value="details" className="flex-1 min-h-0 mt-0">
 					<ScrollArea className="h-full">
 						<div className="p-3 space-y-3">
-							{/* Timing info */}
+							{/* Timing + identifiers, with the span's position inside the trace */}
 							<div className="space-y-1">
-								<h4 className="text-xs font-medium text-muted-foreground">Timing</h4>
+								<h4 className="text-xs font-medium text-muted-foreground">Span</h4>
 								<div className="rounded-md border p-2 space-y-1 text-xs">
-									<div className="flex justify-between">
-										<span className="text-muted-foreground">Start Time</span>
-										<span className="font-mono">
-											<CopyableValue value={span.startTime}>
-												{formatTimestampInTimezone(span.startTime, {
-													timeZone: effectiveTimezone,
-													withMilliseconds: true,
-												})}
-											</CopyableValue>
-										</span>
-									</div>
-									<div className="flex justify-between">
-										<span className="text-muted-foreground">Duration</span>
-										<span className="font-mono">
-											<CopyableValue value={formatDuration(span.durationMs)}>
-												{formatDuration(span.durationMs)}
-											</CopyableValue>
-										</span>
-									</div>
-								</div>
-							</div>
-
-							{/* IDs */}
-							<div className="space-y-1">
-								<h4 className="text-xs font-medium text-muted-foreground">Identifiers</h4>
-								<div className="rounded-md border p-2 space-y-1 text-xs">
-									<div className="flex justify-between">
-										<span className="text-muted-foreground">Span ID</span>
-										<span className="font-mono">
-											<CopyableValue value={span.spanId}>{span.spanId}</CopyableValue>
-										</span>
-									</div>
-									<div className="flex justify-between">
-										<span className="text-muted-foreground">Trace ID</span>
-										<span className="font-mono">
-											<CopyableValue value={span.traceId}>{span.traceId}</CopyableValue>
-										</span>
-									</div>
+									{!span.isMissing && (
+										<SpanPositionBar
+											span={span}
+											traceStartTime={traceStartTime}
+											totalDurationMs={totalDurationMs}
+											color={serviceColor}
+										/>
+									)}
+									<PlatformRow label="Start Time">
+										<CopyableValue value={span.startTime}>
+											{formatTimestampInTimezone(span.startTime, {
+												timeZone: effectiveTimezone,
+												withMilliseconds: true,
+											})}
+										</CopyableValue>
+									</PlatformRow>
+									<PlatformRow label="Duration">
+										<CopyableValue value={formatDuration(span.durationMs)}>
+											{formatDuration(span.durationMs)}
+										</CopyableValue>
+									</PlatformRow>
+									<PlatformRow label="Span ID">
+										<CopyableValue value={span.spanId}>{span.spanId}</CopyableValue>
+									</PlatformRow>
+									<PlatformRow label="Trace ID">
+										<CopyableValue value={span.traceId}>{span.traceId}</CopyableValue>
+									</PlatformRow>
 									{span.parentSpanId && (
-										<div className="flex justify-between">
-											<span className="text-muted-foreground">Parent Span ID</span>
-											<span className="font-mono">
-												<CopyableValue value={span.parentSpanId}>
-													{span.parentSpanId}
-												</CopyableValue>
-											</span>
-										</div>
+										<PlatformRow label="Parent Span ID">
+											<CopyableValue value={span.parentSpanId}>
+												{span.parentSpanId}
+											</CopyableValue>
+										</PlatformRow>
 									)}
 								</div>
 							</div>
@@ -477,6 +484,21 @@ export function SpanDetailPanel({ span, services, onClose }: SpanDetailPanelProp
 						<SpanLogs traceId={span.traceId} spanId={span.spanId} timeZone={effectiveTimezone} />
 					</ScrollArea>
 				</TabsContent>
+
+				{hasInfra && (
+					<TabsContent value="infrastructure" className="flex-1 min-h-0 mt-0">
+						<ScrollArea className="h-full">
+							<div className="p-3">
+								<InfraCorrelationPanel
+									resourceAttributes={infraAttrs}
+									{...infraCorrelationWindow(span.startTime, {
+										spanDurationMs: span.durationMs,
+									})}
+								/>
+							</div>
+						</ScrollArea>
+					</TabsContent>
+				)}
 			</Tabs>
 		</div>
 	)

@@ -75,25 +75,10 @@ const stats = [
 </section>
 
 <script>
+	import { bindCopyButtons } from "../../lib/copy-to-clipboard";
 	// Progressive enhancement: wire copy buttons. Without JS the command is still
 	// fully visible and selectable — the button just does nothing.
-	for (const cmd of document.querySelectorAll<HTMLElement>(".lh__cmd[data-copy]")) {
-		const btn = cmd.querySelector<HTMLButtonElement>(".lh__copy");
-		const text = cmd.dataset.copy ?? "";
-		btn?.addEventListener("click", async () => {
-			try {
-				await navigator.clipboard.writeText(text);
-				btn.textContent = "copied";
-				btn.classList.add("is-done");
-				setTimeout(() => {
-					btn.textContent = "copy";
-					btn.classList.remove("is-done");
-				}, 1400);
-			} catch {
-				/* clipboard blocked — no-op */
-			}
-		});
-	}
+	bindCopyButtons({ hostSelector: ".lh__cmd[data-copy]", buttonSelector: ".lh__copy" });
 </script>
 
 <style>
@@ -110,7 +95,7 @@ const stats = [
 	}
 	.lh__hl {
 		font-family: var(--font-mono);
-		color: var(--accent);
+		color: var(--primary);
 		font-size: 13px;
 	}
 
@@ -156,7 +141,7 @@ const stats = [
 		margin-top: 4px;
 	}
 	.lh__prompt {
-		color: var(--accent);
+		color: var(--primary);
 		user-select: none;
 	}
 	.lh__cmd code {
@@ -186,8 +171,8 @@ const stats = [
 		transition: color 140ms ease, border-color 140ms ease;
 	}
 	.lh__copy:hover {
-		color: var(--accent);
-		border-color: color-mix(in oklab, var(--accent) 50%, var(--border));
+		color: var(--primary);
+		border-color: color-mix(in oklab, var(--primary) 50%, var(--border));
 	}
 	.lh__copy.is-done {
 		color: var(--chart-3);
@@ -220,7 +205,7 @@ const stats = [
 	}
 	.lh__row--amber .lh__row-val,
 	.lh__row--amber {
-		color: var(--accent);
+		color: var(--primary);
 	}
 	.lh__row--green .lh__row-val,
 	.lh__row--green {

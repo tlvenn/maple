@@ -4,12 +4,14 @@
 // DSL-based query definitions for error aggregation and timeseries.
 // ---------------------------------------------------------------------------
 
-import * as CH from "../expr"
-import { param } from "../param"
-import { from, fromQuery, type CHQuery, type ColumnAccessor } from "../query"
-import type { ColumnDefs } from "../types"
-import { unionAll, type CHUnionQuery } from "../union"
-import { compileCH } from "../compile"
+import * as CH from "@maple-dev/clickhouse-builder/expr"
+// From the root, not `/expr`: these overloads take a `CHQuery`, keeping the
+// subquery's params, table names and column types checked.
+import { exists, inSubquery } from "@maple-dev/clickhouse-builder"
+import { param } from "@maple-dev/clickhouse-builder"
+import { from, fromQuery, type CHQuery, type ColumnAccessor } from "@maple-dev/clickhouse-builder"
+import type { ColumnDefs } from "@maple-dev/clickhouse-builder/types"
+import { unionAll, type CHUnionQuery } from "@maple-dev/clickhouse-builder"
 import {
 	ErrorEvents,
 	ErrorEventsByTime,
@@ -18,7 +20,28 @@ import {
 	TraceListMv,
 	Traces,
 } from "../tables"
-import { buildProjectedMapExpr } from "./query-helpers"
+import {
+	buildProjectedMapExpr,
+	inclusionValues,
+	inclusionCondition,
+	matchOrIn,
+	type FacetOutput,
+} from "./query-helpers"
+import { httpDisplaySpanName } from "../../traces-shared"
+
+function errorEventsTableForRecentScan(opts: {
+	fingerprintHashes?: readonly string[]
+}): typeof ErrorEvents | typeof ErrorEventsByTime {
+	// Fingerprint-filtered lookups align with error_events' key
+	// (OrgId, FingerprintHash, Timestamp). Broad recent-window scans align with
+	// error_events_by_time's key (OrgId, Timestamp, FingerprintHash).
+	return opts.fingerprintHashes?.length ? ErrorEvents : ErrorEventsByTime
+}
+
+const fingerprintHashLiteral = (hash: string) => CH.toUInt64(CH.lit(hash))
+const fingerprintHashEq = (expr: CH.Expr<number>, hash: string) => expr.eq(fingerprintHashLiteral(hash))
+const fingerprintHashIn = (expr: CH.Expr<number>, hashes: readonly string[]) =>
+	CH.inExprList(expr, hashes.map(fingerprintHashLiteral))
 
 // ---------------------------------------------------------------------------
 // Errors by type
@@ -49,7 +72,7 @@ export interface ErrorsByTypeOutput {
 }
 
 export function errorsByTypeQuery(opts: ErrorsByTypeOpts) {
-	return from(ErrorEvents)
+	return from(errorEventsTableForRecentScan(opts))
 		.select(($) => ({
 			fingerprintHash: CH.toString_($.FingerprintHash),
 			errorLabel: CH.any_($.ErrorLabel),
@@ -67,7 +90,7 @@ export function errorsByTypeQuery(opts: ErrorsByTypeOpts) {
 			opts.services?.length ? CH.inList($.ServiceName, opts.services) : undefined,
 			opts.deploymentEnvs?.length ? CH.inList($.DeploymentEnv, opts.deploymentEnvs) : undefined,
 			opts.fingerprintHashes?.length
-				? CH.inList(CH.toString_($.FingerprintHash), opts.fingerprintHashes)
+				? fingerprintHashIn($.FingerprintHash, opts.fingerprintHashes)
 				: undefined,
 		])
 		.groupBy("fingerprintHash")
@@ -98,7 +121,7 @@ export function errorsTimeseriesQuery(opts: ErrorsTimeseriesOpts) {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			CH.toString_($.FingerprintHash).eq(opts.fingerprintHash),
+			fingerprintHashEq($.FingerprintHash, opts.fingerprintHash),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),
 			opts.services?.length ? CH.inList($.ServiceName, opts.services) : undefined,
@@ -136,6 +159,21 @@ const TREE_SPAN_ATTR_KEYS = [
 	"cache.name",
 	"cache.operation",
 	"cache.lookup_performed",
+	// Generic OpenTelemetry database-client spans — the `db.system.name` signal
+	// (with the legacy `db.system` fallback) lets the trace views detect a DB
+	// span and render its summary badge without waiting for the per-span lazy
+	// detail fetch. The full `db.*` field set (namespace, operation, rows,
+	// server, …) is loaded lazily by `spanDetailQuery` for the detail panel.
+	"db.system.name",
+	"db.system",
+	// Cloudflare Workers Observability — read by `getCloudflareInfo` to mark
+	// Worker spans and render the edge-location + outcome badges in the tree
+	// views. The full set (ray id, cpu/wall time, script version, geo city) is
+	// lazy-loaded per-span by `spanDetailQuery` for the detail panel.
+	"cloud.platform",
+	"cloudflare.colo",
+	"faas.invoked_region",
+	"cloudflare.outcome",
 ] as const
 
 /**
@@ -151,11 +189,13 @@ const TREE_RESOURCE_ATTR_KEYS = ["deployment.environment", "deployment.commit_sh
  * keeps the earliest spans (ORDER BY StartTime ASC) so the root and its subtree
  * stay connected.
  */
-const SPAN_HIERARCHY_MAX_SPANS = 5_000
+export const SPAN_HIERARCHY_MAX_SPANS = 5_000
 
 export interface SpanHierarchyOpts {
 	traceId: string
 	spanId?: string
+	/** Override the default cap for callers that fetch one sentinel row. */
+	limit?: number
 	/**
 	 * When true, the generated SQL adds `Timestamp BETWEEN startTime AND endTime`
 	 * filters using parameter placeholders. Callers must then pass `startTime`
@@ -182,64 +222,55 @@ export interface SpanHierarchyOutput {
 }
 
 export function spanHierarchyQuery(opts: SpanHierarchyOpts) {
-	return from(TraceDetailSpans)
-		.select(($) => {
-			// HTTP span name rewriting: "http.server GET" + route → "GET /api/users"
-			const route = $.SpanAttributes.get("http.route")
-			const urlPath = $.SpanAttributes.get("url.path")
-			const httpRewriteExpr = CH.if_(
-				$.SpanName.like("http.server %")
-					.or($.SpanName.in_("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
-					.and(route.neq("").or(urlPath.neq(""))),
-				CH.concat(
-					CH.if_(
-						$.SpanName.like("http.server %"),
-						CH.replaceOne($.SpanName, "http.server ", ""),
-						$.SpanName,
+	return (
+		from(TraceDetailSpans)
+			.select(($) => {
+				// HTTP span name rewriting: "http.server GET" + route → "GET /api/users".
+				// Shared with the materialized view and the trace-list span-name filter.
+				const httpRewriteExpr = httpDisplaySpanName(
+					$.SpanName,
+					$.SpanAttributes.get("http.route"),
+					$.SpanAttributes.get("url.path"),
+				)
+
+				const relationshipExpr = opts.spanId
+					? CH.if_($.SpanId.eq(opts.spanId), CH.lit("target"), CH.lit("related"))
+					: CH.lit("related")
+
+				return {
+					traceId: $.TraceId,
+					spanId: $.SpanId,
+					parentSpanId: $.ParentSpanId,
+					spanName: httpRewriteExpr,
+					serviceName: $.ServiceName,
+					spanKind: $.SpanKind,
+					durationMs: $.Duration.div(1000000),
+					startTime: $.Timestamp,
+					statusCode: $.StatusCode,
+					statusMessage: $.StatusMessage,
+					// Trimmed maps — only the keys the tree views render. Full maps are
+					// fetched per-span on demand via spanDetailQuery.
+					spanAttributes: CH.toJSONString(
+						buildProjectedMapExpr(TREE_SPAN_ATTR_KEYS, "SpanAttributes"),
 					),
-					CH.lit(" "),
-					CH.if_(route.neq(""), route, urlPath),
-				),
-				$.SpanName,
-			)
-
-			const relationshipExpr = opts.spanId
-				? CH.if_($.SpanId.eq(opts.spanId), CH.lit("target"), CH.lit("related"))
-				: CH.lit("related")
-
-			return {
-				traceId: $.TraceId,
-				spanId: $.SpanId,
-				parentSpanId: $.ParentSpanId,
-				spanName: httpRewriteExpr,
-				serviceName: $.ServiceName,
-				spanKind: $.SpanKind,
-				durationMs: $.Duration.div(1000000),
-				startTime: $.Timestamp,
-				statusCode: $.StatusCode,
-				statusMessage: $.StatusMessage,
-				// Trimmed maps — only the keys the tree views render. Full maps are
-				// fetched per-span on demand via spanDetailQuery.
-				spanAttributes: CH.toJSONString(
-					buildProjectedMapExpr(TREE_SPAN_ATTR_KEYS, "SpanAttributes"),
-				),
-				resourceAttributes: CH.toJSONString(
-					buildProjectedMapExpr(TREE_RESOURCE_ATTR_KEYS, "ResourceAttributes"),
-				),
-				relationship: relationshipExpr,
-			}
-		})
-		.where(($) => [
-			$.TraceId.eq(opts.traceId),
-			$.OrgId.eq(param.string("orgId")),
-			CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.gte(param.dateTime("startTime"))),
-			CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.lte(param.dateTime("endTime"))),
-		])
-		// ORDER BY + LIMIT bounds pathological traces — the earliest spans keep
-		// the root subtree connected. buildSpanTree (web) re-sorts children anyway.
-		.orderBy(["startTime", "asc"])
-		.limit(SPAN_HIERARCHY_MAX_SPANS)
-		.format("JSON")
+					resourceAttributes: CH.toJSONString(
+						buildProjectedMapExpr(TREE_RESOURCE_ATTR_KEYS, "ResourceAttributes"),
+					),
+					relationship: relationshipExpr,
+				}
+			})
+			.where(($) => [
+				$.TraceId.eq(opts.traceId),
+				$.OrgId.eq(param.string("orgId")),
+				CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.gte(param.dateTime("startTime"))),
+				CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.lte(param.dateTime("endTime"))),
+			])
+			// ORDER BY + LIMIT bounds pathological traces — the earliest spans keep
+			// the root subtree connected. buildSpanTree (web) re-sorts children anyway.
+			.orderBy(["startTime", "asc"])
+			.limit(opts.limit ?? SPAN_HIERARCHY_MAX_SPANS)
+			.format("JSON")
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +291,14 @@ export interface SpanDetailOpts {
 export interface SpanDetailOutput {
 	readonly traceId: string
 	readonly spanId: string
+	readonly parentSpanId: string
+	readonly spanName: string
+	readonly serviceName: string
+	readonly spanKind: string
+	readonly durationMs: number
+	readonly startTime: string
+	readonly statusCode: string
+	readonly statusMessage: string
 	readonly spanAttributes: string
 	readonly resourceAttributes: string
 }
@@ -275,6 +314,18 @@ export function spanDetailQuery(opts: SpanDetailOpts) {
 		.select(($) => ({
 			traceId: $.TraceId,
 			spanId: $.SpanId,
+			parentSpanId: $.ParentSpanId,
+			spanName: httpDisplaySpanName(
+				$.SpanName,
+				$.SpanAttributes.get("http.route"),
+				$.SpanAttributes.get("url.path"),
+			),
+			serviceName: $.ServiceName,
+			spanKind: $.SpanKind,
+			durationMs: $.Duration.div(1000000),
+			startTime: $.Timestamp,
+			statusCode: $.StatusCode,
+			statusMessage: $.StatusMessage,
 			spanAttributes: CH.toJSONString($.SpanAttributes),
 			resourceAttributes: CH.toJSONString($.ResourceAttributes),
 		}))
@@ -284,6 +335,40 @@ export function spanDetailQuery(opts: SpanDetailOpts) {
 			$.OrgId.eq(param.string("orgId")),
 			CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.gte(param.dateTime("startTime"))),
 			CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.lte(param.dateTime("endTime"))),
+		])
+		.limit(1)
+		.format("JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Trace timestamp probe — resolve any one span timestamp for a trace
+// ---------------------------------------------------------------------------
+
+export interface TraceTimeProbeOutput {
+	readonly timestamp: string
+}
+
+/**
+ * Cheap timestamp resolver for a trace. `trace_detail_spans` is partitioned by
+ * `toDate(Timestamp)`, so a trace lookup with no time predicate must seek across
+ * every daily partition. When the caller has no timestamp (direct URL, shared
+ * link, AI surface), this probe resolves one: selecting only `Timestamp`, with
+ * no `ORDER BY` and `LIMIT 1`, ClickHouse reads ~one granule per partition and
+ * stops — far cheaper than the full `spanHierarchyQuery` projection. The caller
+ * then derives a ±1h window so the real query can prune partitions.
+ *
+ * Even the probe pays the every-partition seek when unbounded, so callers
+ * should first try `narrowByTime: true` with a recent `startTime` lower bound
+ * (pruning to the last few partitions) and only fall back to the unbounded
+ * probe when the trace is older than that window.
+ */
+export function traceTimeProbeQuery(opts: { traceId: string; narrowByTime?: boolean }) {
+	return from(TraceDetailSpans)
+		.select(($) => ({ timestamp: $.Timestamp }))
+		.where(($) => [
+			$.TraceId.eq(opts.traceId),
+			$.OrgId.eq(param.string("orgId")),
+			CH.whenTrue(!!opts.narrowByTime, () => $.Timestamp.gte(param.dateTime("startTime"))),
 		])
 		.limit(1)
 		.format("JSON")
@@ -303,6 +388,16 @@ export interface TracesDurationStatsOpts {
 	httpStatusCode?: string
 	deploymentEnv?: string
 	namespace?: string
+	/**
+	 * Multi-value spellings, compiled to `IN (...)` against trace_list_mv's
+	 * pre-extracted columns. Each wins over its scalar counterpart when non-empty.
+	 */
+	serviceNames?: readonly string[]
+	spanNames?: readonly string[]
+	httpMethods?: readonly string[]
+	httpStatusCodes?: readonly string[]
+	deploymentEnvs?: readonly string[]
+	namespaces?: readonly string[]
 	matchModes?: {
 		serviceName?: "contains"
 		spanName?: "contains"
@@ -320,6 +415,12 @@ export interface TracesDurationStatsOutput {
 
 export function tracesDurationStatsQuery(opts: TracesDurationStatsOpts) {
 	const mm = opts.matchModes
+	const services = inclusionValues(opts.serviceName, opts.serviceNames)
+	const spanNames = inclusionValues(opts.spanName, opts.spanNames)
+	const httpMethods = inclusionValues(opts.httpMethod, opts.httpMethods)
+	const httpStatusCodes = inclusionValues(opts.httpStatusCode, opts.httpStatusCodes)
+	const envs = inclusionValues(opts.deploymentEnv, opts.deploymentEnvs)
+	const namespaces = inclusionValues(opts.namespace, opts.namespaces)
 
 	return from(TraceListMv)
 		.select(($) => ({
@@ -332,30 +433,22 @@ export function tracesDurationStatsQuery(opts: TracesDurationStatsOpts) {
 			$.OrgId.eq(param.string("orgId")),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),
-			CH.when(opts.serviceName, (v: string) =>
-				mm?.serviceName === "contains"
-					? CH.positionCaseInsensitive($.ServiceName, CH.lit(v)).gt(0)
-					: $.ServiceName.eq(v),
+			CH.when(services, (v: readonly string[]) =>
+				matchOrIn($.ServiceName, v, mm?.serviceName === "contains"),
 			),
-			CH.when(opts.spanName, (v: string) =>
-				mm?.spanName === "contains"
-					? CH.positionCaseInsensitive($.SpanName, CH.lit(v)).gt(0)
-					: $.SpanName.eq(v),
+			CH.when(spanNames, (v: readonly string[]) =>
+				matchOrIn($.SpanName, v, mm?.spanName === "contains"),
 			),
 			CH.whenTrue(!!opts.hasError, () => $.HasError.eq(1)),
 			CH.when(opts.minDurationMs, (v: number) => $.Duration.gte(v * 1000000)),
 			CH.when(opts.maxDurationMs, (v: number) => $.Duration.lte(v * 1000000)),
-			CH.when(opts.httpMethod, (v: string) => $.HttpMethod.eq(v)),
-			CH.when(opts.httpStatusCode, (v: string) => $.HttpStatusCode.eq(v)),
-			CH.when(opts.deploymentEnv, (v: string) =>
-				mm?.deploymentEnv === "contains"
-					? CH.positionCaseInsensitive($.DeploymentEnv, CH.lit(v)).gt(0)
-					: $.DeploymentEnv.eq(v),
+			CH.when(httpMethods, (v: readonly string[]) => inclusionCondition($.HttpMethod, v)),
+			CH.when(httpStatusCodes, (v: readonly string[]) => inclusionCondition($.HttpStatusCode, v)),
+			CH.when(envs, (v: readonly string[]) =>
+				matchOrIn($.DeploymentEnv, v, mm?.deploymentEnv === "contains"),
 			),
-			CH.when(opts.namespace, (v: string) =>
-				mm?.serviceNamespace === "contains"
-					? CH.positionCaseInsensitive($.ServiceNamespace, CH.lit(v)).gt(0)
-					: $.ServiceNamespace.eq(v),
+			CH.when(namespaces, (v: readonly string[]) =>
+				matchOrIn($.ServiceNamespace, v, mm?.serviceNamespace === "contains"),
 			),
 		])
 		.format("JSON")
@@ -364,6 +457,14 @@ export function tracesDurationStatsQuery(opts: TracesDurationStatsOpts) {
 // ---------------------------------------------------------------------------
 // Traces facets (UNION ALL — 6 facet dimensions on trace_list_mv)
 // ---------------------------------------------------------------------------
+
+export type TracesFacetDimension =
+	| "service"
+	| "spanName"
+	| "httpMethod"
+	| "httpStatus"
+	| "deploymentEnv"
+	| "serviceNamespace"
 
 export interface TracesFacetsOpts {
 	serviceName?: string
@@ -375,6 +476,16 @@ export interface TracesFacetsOpts {
 	httpStatusCode?: string
 	deploymentEnv?: string
 	namespace?: string
+	/**
+	 * Multi-value spellings, compiled to `IN (...)` against trace_list_mv's
+	 * pre-extracted columns. Each wins over its scalar counterpart when non-empty.
+	 */
+	serviceNames?: readonly string[]
+	spanNames?: readonly string[]
+	httpMethods?: readonly string[]
+	httpStatusCodes?: readonly string[]
+	deploymentEnvs?: readonly string[]
+	namespaces?: readonly string[]
 	matchModes?: {
 		serviceName?: "contains"
 		spanName?: "contains"
@@ -387,13 +498,11 @@ export interface TracesFacetsOpts {
 	resourceFilterKey?: string
 	resourceFilterValue?: string
 	resourceFilterValueMatchMode?: "contains"
+	/** When set, compile only this dimension's UNION branch (single-list consumers). */
+	facet?: TracesFacetDimension
 }
 
-export interface TracesFacetsOutput {
-	readonly name: string
-	readonly count: number
-	readonly facetType: string
-}
+export type TracesFacetsOutput = FacetOutput
 
 export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFacetsOutput> {
 	const baseWhere = ($: ColumnAccessor<typeof TraceListMv.columns>): Array<CH.Condition | undefined> => {
@@ -403,37 +512,30 @@ export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFa
 			$.Timestamp.lte(param.dateTime("endTime")),
 		]
 
-		if (opts.serviceName) {
-			conditions.push(
-				opts.matchModes?.serviceName === "contains"
-					? CH.positionCaseInsensitive($.ServiceName, CH.lit(opts.serviceName)).gt(0)
-					: $.ServiceName.eq(opts.serviceName),
-			)
+		const services = inclusionValues(opts.serviceName, opts.serviceNames)
+		const spanNames = inclusionValues(opts.spanName, opts.spanNames)
+		const httpMethods = inclusionValues(opts.httpMethod, opts.httpMethods)
+		const httpStatusCodes = inclusionValues(opts.httpStatusCode, opts.httpStatusCodes)
+		const envs = inclusionValues(opts.deploymentEnv, opts.deploymentEnvs)
+		const namespaces = inclusionValues(opts.namespace, opts.namespaces)
+
+		if (services) {
+			conditions.push(matchOrIn($.ServiceName, services, opts.matchModes?.serviceName === "contains"))
 		}
-		if (opts.spanName) {
-			conditions.push(
-				opts.matchModes?.spanName === "contains"
-					? CH.positionCaseInsensitive($.SpanName, CH.lit(opts.spanName)).gt(0)
-					: $.SpanName.eq(opts.spanName),
-			)
+		if (spanNames) {
+			conditions.push(matchOrIn($.SpanName, spanNames, opts.matchModes?.spanName === "contains"))
 		}
 		if (opts.hasError) conditions.push($.HasError.eq(1))
 		if (opts.minDurationMs != null) conditions.push($.Duration.gte(opts.minDurationMs * 1000000))
 		if (opts.maxDurationMs != null) conditions.push($.Duration.lte(opts.maxDurationMs * 1000000))
-		if (opts.httpMethod) conditions.push($.HttpMethod.eq(opts.httpMethod))
-		if (opts.httpStatusCode) conditions.push($.HttpStatusCode.eq(opts.httpStatusCode))
-		if (opts.deploymentEnv) {
-			conditions.push(
-				opts.matchModes?.deploymentEnv === "contains"
-					? CH.positionCaseInsensitive($.DeploymentEnv, CH.lit(opts.deploymentEnv)).gt(0)
-					: $.DeploymentEnv.eq(opts.deploymentEnv),
-			)
+		if (httpMethods) conditions.push(inclusionCondition($.HttpMethod, httpMethods))
+		if (httpStatusCodes) conditions.push(inclusionCondition($.HttpStatusCode, httpStatusCodes))
+		if (envs) {
+			conditions.push(matchOrIn($.DeploymentEnv, envs, opts.matchModes?.deploymentEnv === "contains"))
 		}
-		if (opts.namespace) {
+		if (namespaces) {
 			conditions.push(
-				opts.matchModes?.serviceNamespace === "contains"
-					? CH.positionCaseInsensitive($.ServiceNamespace, CH.lit(opts.namespace)).gt(0)
-					: $.ServiceNamespace.eq(opts.namespace),
+				matchOrIn($.ServiceNamespace, namespaces, opts.matchModes?.serviceNamespace === "contains"),
 			)
 		}
 
@@ -447,20 +549,19 @@ export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFa
 				opts.attributeFilterValueMatchMode === "contains"
 					? CH.positionCaseInsensitive(attrCol, CH.lit(opts.attributeFilterValue ?? "")).gt(0)
 					: attrCol.eq(opts.attributeFilterValue ?? "")
-			const innerSql = compileCH(
-				from(Traces, "t_attr")
-					.select(() => ({ _: CH.lit(1) }))
-					.where(() => [
-						CH.dynamicColumn("t_attr.TraceId").eq(CH.outerRef("TraceId")),
-						CH.dynamicColumn("t_attr.OrgId").eq(param.string("orgId")),
-						CH.dynamicColumn<string>("t_attr.Timestamp").gte(param.dateTime("startTime")),
-						CH.dynamicColumn<string>("t_attr.Timestamp").lte(param.dateTime("endTime")),
-						matchCond,
-					]),
-				{},
-				{ skipFormat: true },
+			conditions.push(
+				exists(
+					from(Traces, "t_attr")
+						.select(() => ({ _: CH.lit(1) }))
+						.where(() => [
+							CH.dynamicColumn("t_attr.TraceId").eq(CH.outerRef("TraceId")),
+							CH.dynamicColumn("t_attr.OrgId").eq(param.string("orgId")),
+							CH.dynamicColumn<string>("t_attr.Timestamp").gte(param.dateTime("startTime")),
+							CH.dynamicColumn<string>("t_attr.Timestamp").lte(param.dateTime("endTime")),
+							matchCond,
+						]),
+				),
 			)
-			conditions.push(CH.exists(innerSql.sql))
 		}
 		if (opts.resourceFilterKey) {
 			const resCol = CH.mapGet(
@@ -471,20 +572,19 @@ export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFa
 				opts.resourceFilterValueMatchMode === "contains"
 					? CH.positionCaseInsensitive(resCol, CH.lit(opts.resourceFilterValue ?? "")).gt(0)
 					: resCol.eq(opts.resourceFilterValue ?? "")
-			const innerSql = compileCH(
-				from(Traces, "t_res")
-					.select(() => ({ _: CH.lit(1) }))
-					.where(() => [
-						CH.dynamicColumn("t_res.TraceId").eq(CH.outerRef("TraceId")),
-						CH.dynamicColumn("t_res.OrgId").eq(param.string("orgId")),
-						CH.dynamicColumn<string>("t_res.Timestamp").gte(param.dateTime("startTime")),
-						CH.dynamicColumn<string>("t_res.Timestamp").lte(param.dateTime("endTime")),
-						matchCond,
-					]),
-				{},
-				{ skipFormat: true },
+			conditions.push(
+				exists(
+					from(Traces, "t_res")
+						.select(() => ({ _: CH.lit(1) }))
+						.where(() => [
+							CH.dynamicColumn("t_res.TraceId").eq(CH.outerRef("TraceId")),
+							CH.dynamicColumn("t_res.OrgId").eq(param.string("orgId")),
+							CH.dynamicColumn<string>("t_res.Timestamp").gte(param.dateTime("startTime")),
+							CH.dynamicColumn<string>("t_res.Timestamp").lte(param.dateTime("endTime")),
+							matchCond,
+						]),
+				),
 			)
-			conditions.push(CH.exists(innerSql.sql))
 		}
 
 		return conditions
@@ -507,13 +607,28 @@ export function tracesFacetsQuery(opts: TracesFacetsOpts): CHUnionQuery<TracesFa
 			.orderBy(["count", "desc"])
 			.limit(limit)
 
+	const facetBranches: Record<TracesFacetDimension, () => ReturnType<typeof makeFacetQuery>> = {
+		service: () => makeFacetQuery("ServiceName", "service"),
+		spanName: () => makeFacetQuery("SpanName", "spanName", ($) => $.SpanName.neq(""), 20),
+		httpMethod: () => makeFacetQuery("HttpMethod", "httpMethod", ($) => $.HttpMethod.neq(""), 20),
+		httpStatus: () => makeFacetQuery("HttpStatusCode", "httpStatus", ($) => $.HttpStatusCode.neq(""), 20),
+		deploymentEnv: () =>
+			makeFacetQuery("DeploymentEnv", "deploymentEnv", ($) => $.DeploymentEnv.neq(""), 20),
+		serviceNamespace: () =>
+			makeFacetQuery("ServiceNamespace", "serviceNamespace", ($) => $.ServiceNamespace.neq(""), 20),
+	}
+
+	if (opts.facet) {
+		return unionAll(facetBranches[opts.facet]()).format("JSON")
+	}
+
 	return unionAll(
-		makeFacetQuery("ServiceName", "service"),
-		makeFacetQuery("SpanName", "spanName", ($) => $.SpanName.neq(""), 20),
-		makeFacetQuery("HttpMethod", "httpMethod", ($) => $.HttpMethod.neq(""), 20),
-		makeFacetQuery("HttpStatusCode", "httpStatus", ($) => $.HttpStatusCode.neq(""), 20),
-		makeFacetQuery("DeploymentEnv", "deploymentEnv", ($) => $.DeploymentEnv.neq(""), 20),
-		makeFacetQuery("ServiceNamespace", "serviceNamespace", ($) => $.ServiceNamespace.neq(""), 20),
+		facetBranches.service(),
+		facetBranches.spanName(),
+		facetBranches.httpMethod(),
+		facetBranches.httpStatus(),
+		facetBranches.deploymentEnv(),
+		facetBranches.serviceNamespace(),
 		from(TraceListMv)
 			.select(() => ({
 				name: CH.lit("error"),
@@ -535,14 +650,11 @@ export interface ErrorsFacetsOpts {
 	fingerprintHashes?: readonly string[]
 }
 
-export interface ErrorsFacetsOutput {
-	readonly name: string
-	readonly count: number
-	readonly facetType: string
-}
+export type ErrorsFacetsOutput = FacetOutput
 
 export function errorsFacetsQuery(opts: ErrorsFacetsOpts): CHUnionQuery<ErrorsFacetsOutput> {
-	const baseWhere = ($: ColumnAccessor<typeof ErrorEvents.columns>): Array<CH.Condition | undefined> => [
+	const table = errorEventsTableForRecentScan(opts)
+	const baseWhere = ($: ColumnAccessor<typeof table.columns>): Array<CH.Condition | undefined> => [
 		$.OrgId.eq(param.string("orgId")),
 		$.Timestamp.gte(param.dateTime("startTime")),
 		$.Timestamp.lte(param.dateTime("endTime")),
@@ -550,11 +662,11 @@ export function errorsFacetsQuery(opts: ErrorsFacetsOpts): CHUnionQuery<ErrorsFa
 		opts.services?.length ? CH.inList($.ServiceName, opts.services) : undefined,
 		opts.deploymentEnvs?.length ? CH.inList($.DeploymentEnv, opts.deploymentEnvs) : undefined,
 		opts.fingerprintHashes?.length
-			? CH.inList(CH.toString_($.FingerprintHash), opts.fingerprintHashes)
+			? fingerprintHashIn($.FingerprintHash, opts.fingerprintHashes)
 			: undefined,
 	]
 
-	const serviceQuery = from(ErrorEvents)
+	const serviceQuery = from(table)
 		.select(($) => ({
 			name: $.ServiceName,
 			count: CH.count(),
@@ -565,7 +677,7 @@ export function errorsFacetsQuery(opts: ErrorsFacetsOpts): CHUnionQuery<ErrorsFa
 		.orderBy(["count", "desc"])
 		.limit(100)
 
-	const envQuery = from(ErrorEvents)
+	const envQuery = from(table)
 		.select(($) => ({
 			name: $.DeploymentEnv,
 			count: CH.count(),
@@ -577,7 +689,7 @@ export function errorsFacetsQuery(opts: ErrorsFacetsOpts): CHUnionQuery<ErrorsFa
 		.limit(100)
 
 	// error_type facet groups by the human-readable ErrorLabel (display facet).
-	const errorTypeQuery = from(ErrorEvents)
+	const errorTypeQuery = from(table)
 		.select(($) => ({
 			name: $.ErrorLabel,
 			count: CH.count(),
@@ -611,7 +723,7 @@ export interface ErrorsSummaryOutput {
 }
 
 export function errorsSummaryQuery(opts: ErrorsSummaryOpts) {
-	const errorSub = from(ErrorEvents)
+	const errorSub = from(errorEventsTableForRecentScan(opts))
 		.select(($) => ({
 			totalErrors: CH.count(),
 			affectedServicesCount: CH.uniq($.ServiceName),
@@ -625,7 +737,7 @@ export function errorsSummaryQuery(opts: ErrorsSummaryOpts) {
 			opts.services?.length ? CH.inList($.ServiceName, opts.services) : undefined,
 			opts.deploymentEnvs?.length ? CH.inList($.DeploymentEnv, opts.deploymentEnvs) : undefined,
 			opts.fingerprintHashes?.length
-				? CH.inList(CH.toString_($.FingerprintHash), opts.fingerprintHashes)
+				? fingerprintHashIn($.FingerprintHash, opts.fingerprintHashes)
 				: undefined,
 		])
 
@@ -720,12 +832,10 @@ export interface ErrorIssuesOutput {
 }
 
 export function errorIssuesQuery(opts: ErrorIssuesOpts) {
-	// Reads the time-ordered sibling (sorted OrgId, Timestamp, FingerprintHash): this is a
-	// recent-window scan grouped across fingerprints, so a Timestamp-leading sort key lets
-	// ClickHouse prune to the window instead of scanning the org's whole day-partition.
-	// Per-fingerprint occurrence lookups use errorIssueTimeseriesQuery / *SampleTracesQuery,
-	// which stay on the FingerprintHash-ordered `error_events`.
-	return from(ErrorEventsByTime)
+	// Broad issue scans use the time-ordered sibling so ClickHouse prunes by
+	// (OrgId, Timestamp). When the caller narrows to known fingerprints, switch
+	// back to the FingerprintHash-ordered table.
+	return from(errorEventsTableForRecentScan(opts))
 		.select(($) => ({
 			fingerprintHash: CH.toString_($.FingerprintHash),
 			serviceName: CH.any_($.ServiceName),
@@ -745,13 +855,51 @@ export function errorIssuesQuery(opts: ErrorIssuesOpts) {
 			opts.services?.length ? CH.inList($.ServiceName, opts.services) : undefined,
 			opts.deploymentEnvs?.length ? CH.inList($.DeploymentEnv, opts.deploymentEnvs) : undefined,
 			opts.fingerprintHashes?.length
-				? CH.inList(CH.toString_($.FingerprintHash), opts.fingerprintHashes)
+				? fingerprintHashIn($.FingerprintHash, opts.fingerprintHashes)
 				: undefined,
 			opts.exceptionTypes?.length ? CH.inList($.ExceptionType, opts.exceptionTypes) : undefined,
 		])
 		.groupBy("fingerprintHash")
 		.orderBy(["count", "desc"])
 		.limit(opts.limit ?? 50)
+		.format("JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Error fingerprints — distinct fingerprint hashes observed in a scope
+// ---------------------------------------------------------------------------
+
+export interface ErrorFingerprintsOpts {
+	services?: readonly string[]
+	deploymentEnvs?: readonly string[]
+	limit?: number
+}
+
+export interface ErrorFingerprintsOutput {
+	readonly fingerprintHash: string
+}
+
+/**
+ * The distinct error fingerprints seen for a service/environment scope in a
+ * window. Backs the issue list's deployment-environment filter: the Postgres
+ * `error_issues` rows carry no environment (a fingerprint spans environments),
+ * so the filter intersects against the fingerprints the warehouse actually
+ * observed in the selected environment.
+ */
+export function errorFingerprintsQuery(opts: ErrorFingerprintsOpts) {
+	return from(ErrorEventsByTime)
+		.select(($) => ({
+			fingerprintHash: CH.toString_($.FingerprintHash),
+		}))
+		.where(($) => [
+			$.OrgId.eq(param.string("orgId")),
+			$.Timestamp.gte(param.dateTime("startTime")),
+			$.Timestamp.lte(param.dateTime("endTime")),
+			opts.services?.length ? CH.inList($.ServiceName, opts.services) : undefined,
+			opts.deploymentEnvs?.length ? CH.inList($.DeploymentEnv, opts.deploymentEnvs) : undefined,
+		])
+		.groupBy("fingerprintHash")
+		.limit(opts.limit ?? 1000)
 		.format("JSON")
 }
 
@@ -772,7 +920,7 @@ export function errorIssueTimeseriesQuery() {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			CH.toString_($.FingerprintHash).eq(param.string("fingerprintHash")),
+			$.FingerprintHash.eq(CH.toUInt64(param.string("fingerprintHash"))),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),
 		])
@@ -806,7 +954,7 @@ export function errorIssueSampleTracesQuery(opts: { limit?: number }) {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			CH.toString_($.FingerprintHash).eq(param.string("fingerprintHash")),
+			$.FingerprintHash.eq(CH.toUInt64(param.string("fingerprintHash"))),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),
 		])
@@ -850,7 +998,7 @@ export function errorDetailTracesQuery(opts: ErrorDetailTracesOpts) {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			CH.toString_($.FingerprintHash).eq(opts.fingerprintHash),
+			fingerprintHashEq($.FingerprintHash, opts.fingerprintHash),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),
 			CH.whenTrue(!!opts.rootOnly, () => $.ParentSpanId.eq("")),
@@ -860,9 +1008,11 @@ export function errorDetailTracesQuery(opts: ErrorDetailTracesOpts) {
 		.orderBy(["lastErrorSeen", "desc"])
 		.limit(limit)
 
-	// Outer query: join traces with error subquery
-	return from(Traces)
-		.innerJoinQuery(errorSub, "e", (main, e) => main.TraceId.eq(e.TraceId))
+	// Outer query: fetch all spans for the matching traces. Use an IN-filtered
+	// small subquery instead of an INNER JOIN so ClickHouse can apply the
+	// trace-detail projection's (OrgId, TraceId, SpanId) sort key while reading
+	// `trace_detail_spans`.
+	return from(TraceDetailSpans)
 		.select(($) => ({
 			traceId: $.TraceId,
 			startTime: CH.min_($.Timestamp),
@@ -874,6 +1024,10 @@ export function errorDetailTracesQuery(opts: ErrorDetailTracesOpts) {
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
+			inSubquery(
+				$.TraceId,
+				fromQuery(errorSub, "matching_traces").select(($$) => ({ TraceId: $$.TraceId })),
+			),
 			$.Timestamp.gte(param.dateTime("startTime")),
 			$.Timestamp.lte(param.dateTime("endTime")),
 		])

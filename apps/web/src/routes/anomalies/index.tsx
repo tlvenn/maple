@@ -1,17 +1,13 @@
 import { useCallback, useMemo } from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import { Result, useAtomRefresh } from "@/lib/effect-atom"
-import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { useIntervalRefresh } from "@/hooks/use-interval-refresh"
 import { useListNavigation } from "@/hooks/use-list-navigation"
 import { useRetainedRefreshableResultValue } from "@/hooks/use-retained-refreshable-result-value"
-import {
-	AnomaliesFilterSidebar,
-	type AnomalyFilters,
-} from "@/components/anomalies/anomalies-filter-sidebar"
+import { AnomaliesFilterSidebar, type AnomalyFilters } from "@/components/anomalies/anomalies-filter-sidebar"
 import {
 	ANOMALY_GROUP_ORDER,
 	AnomalyGroup,
@@ -19,10 +15,11 @@ import {
 	type AnomalyGroupKey,
 } from "@/components/anomalies/anomaly-group"
 import { AnomalyLiveIndicator } from "@/components/anomalies/anomaly-live-indicator"
-import { IssuesToolbar } from "@/components/errors/issues-toolbar"
+import { ListToolbar } from "@/components/common/list-toolbar"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import { Button } from "@maple/ui/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@maple/ui/components/ui/empty"
+import { ErrorState } from "@/components/common/error-state"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import type { AnomalyIncidentDocument, AnomalyIncidentId } from "@maple/domain/http"
 
@@ -50,7 +47,7 @@ const searchSchema = Schema.Struct({
 	live: Schema.optional(Schema.Boolean),
 })
 
-export const Route = effectRoute(createFileRoute("/anomalies/"))({
+export const Route = createFileRoute("/anomalies/")({
 	component: AnomaliesPage,
 	validateSearch: Schema.toStandardSchemaV1(searchSchema),
 })
@@ -65,10 +62,7 @@ function AnomaliesPage() {
 	const live = search.live ?? status === "open"
 
 	const incidentsQueryAtom = MapleApiAtomClient.query("anomalies", "listIncidents", {
-		query:
-			status === "all"
-				? { limit: INCIDENTS_PAGE_LIMIT }
-				: { status, limit: INCIDENTS_PAGE_LIMIT },
+		query: status === "all" ? { limit: INCIDENTS_PAGE_LIMIT } : { status, limit: INCIDENTS_PAGE_LIMIT },
 		reactivityKeys: ["anomalyIncidents"],
 	})
 	// Retain the previous list across tab switches so the page never collapses
@@ -128,9 +122,10 @@ function AnomaliesPage() {
 		filters.envs !== undefined
 
 	const toolbar = (
-		<IssuesToolbar
+		<ListToolbar
 			tabs={TOOLBAR_TABS}
 			active={status}
+			label="Filter anomalies"
 			countNoun={["anomaly", "anomalies"]}
 			totalCount={Result.isSuccess(incidentsResult) ? filtered.length : undefined}
 			onChange={(value) =>
@@ -144,36 +139,45 @@ function AnomaliesPage() {
 		/>
 	)
 
-	const layoutProps = {
-		breadcrumbs: [{ label: "Anomalies" }],
-		title: "Anomalies",
-		description: PAGE_DESCRIPTION,
-		headerActions: (
-			<AnomalyLiveIndicator
-				live={live}
-				onToggle={(next) =>
-					navigate({
-						search: (prev) => ({
-							...prev,
-							live: next === (status === "open") ? undefined : next,
-						}),
-					})
-				}
-			/>
-		),
-		filterSidebar: (
-			<AnomaliesFilterSidebar
-				incidents={allIncidents}
-				filters={filters}
-				onChange={updateFilter}
-				onClear={clearFilters}
-			/>
-		),
-	}
+	// The three Result branches share one shell. With the compound layout that's a
+	// local component taking `children`, rather than a props object spread three ways.
+	const AnomaliesShell = ({ children }: { children: React.ReactNode }) => (
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs items={[{ label: "Anomalies" }]} />
+			<DashboardLayout.Body>
+				<DashboardLayout.Filters>
+					<AnomaliesFilterSidebar
+						incidents={allIncidents}
+						filters={filters}
+						onChange={updateFilter}
+						onClear={clearFilters}
+					/>
+				</DashboardLayout.Filters>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header title="Anomalies" description={PAGE_DESCRIPTION}>
+							<AnomalyLiveIndicator
+								live={live}
+								onToggle={(next) =>
+									navigate({
+										search: (prev) => ({
+											...prev,
+											live: next === (status === "open") ? undefined : next,
+										}),
+									})
+								}
+							/>
+						</DashboardLayout.Header>
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>{children}</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
+	)
 
 	return Result.builder(incidentsResult)
 		.onInitial(() => (
-			<DashboardLayout {...layoutProps}>
+			<AnomaliesShell>
 				<div>
 					{toolbar}
 					<div className="space-y-px p-2">
@@ -182,24 +186,21 @@ function AnomaliesPage() {
 						))}
 					</div>
 				</div>
-			</DashboardLayout>
+			</AnomaliesShell>
 		))
 		.onError((error) => (
-			<DashboardLayout {...layoutProps}>
+			<AnomaliesShell>
 				<div>
 					{toolbar}
 					<div className="p-4">
-						<Empty>
-							<EmptyHeader>
-								<EmptyTitle>Failed to load anomalies</EmptyTitle>
-								<EmptyDescription>
-									{error.message ?? "Try refreshing or check API logs."}
-								</EmptyDescription>
-							</EmptyHeader>
-						</Empty>
+						<ErrorState
+							error={error}
+							title="Failed to load anomalies"
+							onRetry={refreshIncidents}
+						/>
 					</div>
 				</div>
-			</DashboardLayout>
+			</AnomaliesShell>
 		))
 		.onSuccess(() => (
 			<AnomaliesPageBody
@@ -208,7 +209,7 @@ function AnomaliesPage() {
 				hasActiveFilters={hasActiveFilters}
 				onClearFilters={clearFilters}
 				toolbar={toolbar}
-				layoutProps={layoutProps}
+				Shell={AnomaliesShell}
 			/>
 		))
 		.render()
@@ -220,14 +221,14 @@ function AnomaliesPageBody({
 	hasActiveFilters,
 	onClearFilters,
 	toolbar,
-	layoutProps,
+	Shell,
 }: {
 	incidents: ReadonlyArray<AnomalyIncidentDocument>
 	status: StatusTab
 	hasActiveFilters: boolean
 	onClearFilters: () => void
 	toolbar: React.ReactNode
-	layoutProps: Omit<React.ComponentProps<typeof DashboardLayout>, "children">
+	Shell: (props: { children: React.ReactNode }) => React.ReactElement
 }) {
 	const navigate = useNavigate({ from: Route.fullPath })
 
@@ -240,7 +241,7 @@ function AnomaliesPageBody({
 			map.set(key, bucket)
 		}
 		// Cluster each bucket by service+env so the anomalies one event produces
-		// (error spikes, error rate, log volume on the same service) sit together;
+		// (error-frequency, error-rate, and log-volume changes on one service) sit together;
 		// clusters order by their freshest incident, rows within by recency.
 		for (const bucket of map.values()) {
 			const clusterKey = (i: AnomalyIncidentDocument) => `${i.serviceName}\u0000${i.deploymentEnv}`
@@ -289,7 +290,7 @@ function AnomaliesPageBody({
 	})
 
 	return (
-		<DashboardLayout {...layoutProps}>
+		<Shell>
 			<div>
 				{toolbar}
 				{incidents.length === 0 ? (
@@ -330,7 +331,7 @@ function AnomaliesPageBody({
 					</div>
 				)}
 			</div>
-		</DashboardLayout>
+		</Shell>
 	)
 }
 

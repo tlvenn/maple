@@ -290,6 +290,8 @@ export interface AlertRuleRow {
 	enabled: boolean
 	severity: string
 	serviceNames: string[]
+	/** Deployment environments the rule is scoped to. Empty means all. */
+	environments: string[]
 	signalType: string
 	comparator: string
 	threshold: number
@@ -308,6 +310,14 @@ export interface CreateAlertRuleData {
 	rule: AlertRuleRow
 }
 
+export interface UpdateAlertRuleData {
+	rule: AlertRuleRow
+}
+
+export interface DeleteAlertRuleData {
+	id: string
+}
+
 export interface AlertRuleDetailRow extends AlertRuleRow {
 	serviceNames: string[]
 	excludeServiceNames: string[]
@@ -316,9 +326,6 @@ export interface AlertRuleDetailRow extends AlertRuleRow {
 	consecutiveBreachesRequired: number
 	consecutiveHealthyRequired: number
 	renotifyIntervalMinutes: number
-	metricName: string | null
-	metricType: string | null
-	metricAggregation: string | null
 	apdexThresholdMs: number | null
 	queryBuilderDraft: Record<string, unknown> | null
 	rawQuerySql: string | null
@@ -370,6 +377,8 @@ export interface AlertCheckRow {
 	incidentId: string | null
 	incidentTransition: string
 	evaluationDurationMs: number
+	errorMessage: string | null
+	errorCategory: string | null
 }
 
 export interface ListAlertChecksData {
@@ -378,6 +387,7 @@ export interface ListAlertChecksData {
 	breached: number
 	healthy: number
 	skipped: number
+	errored: number
 	transitions: number
 	checks: AlertCheckRow[]
 }
@@ -613,7 +623,7 @@ export interface WidgetInspectionSummary {
 	timeRange?: {
 		startTime: string
 		endTime: string
-		source: "override" | "dashboard" | "fallback"
+		source: "override" | "widget" | "dashboard" | "fallback"
 	}
 }
 
@@ -630,7 +640,7 @@ export interface InspectChartDataData {
 	timeRange: {
 		startTime: string
 		endTime: string
-		source: "override" | "dashboard" | "fallback"
+		source: "override" | "widget" | "dashboard" | "fallback"
 	}
 	queries: InspectChartQueryResult[]
 	verdict: InspectChartVerdict
@@ -777,10 +787,25 @@ export interface SearchSessionsData {
 	timeRange: { start: string; end: string }
 	sessions: ReadonlyArray<{
 		sessionId: string
-		matchCount: number
-		firstTimestamp: string
-		lastTimestamp: string
-		firstUrl: string
+		/** The session's end-user id, or "" for an anonymous session. */
+		userId: string
+		startTime: string
+		durationMs: number | null
+		status: string
+		browserName: string
+		osName: string
+		deviceType: string
+		country: string
+		serviceName: string
+		pageViews: number
+		clickCount: number
+		errorCount: number
+		traceCount: number
+		urlInitial: string
+		/** Count of in-session events matching the event predicates. Present only when
+		 *  an event filter (event_type / level / http_status_min / url / message /
+		 *  trace_id) was applied. */
+		matchCount?: number
 	}>
 }
 
@@ -818,6 +843,10 @@ export interface GetSessionTracesData {
 		pageViews: number
 		clickCount: number
 		errorCount: number
+		/** Engaged time (ms) from session_events gaps; null if no distilled events. */
+		activeTimeMs: number | null
+		/** Idle time (ms) — the long-gap complement of active time. */
+		idleTimeMs: number | null
 	}
 	totalTraceCount: number
 	traces: ReadonlyArray<{
@@ -866,7 +895,43 @@ export interface GetInstrumentationRecommendationsData {
 	total: number
 }
 
+export interface SetupAuditCheckRow {
+	/** Stable check id, e.g. `CFG-ALERT-03`. */
+	id: string
+	category: string
+	title: string
+	severity: "critical" | "warn" | "info"
+	status: "pass" | "fail" | "skip"
+	detail: string | null
+	affected: ReadonlyArray<{ kind: string; name: string; note: string | null }>
+	affectedCount: number
+	fixHint: string
+}
+
+export interface AuditSetupData {
+	generatedAt: string
+	/** `no_data` means the org has never received telemetry, so no check ran. */
+	dataStatus: "ok" | "no_data"
+	telemetryChecksAvailable: boolean
+	summary: { critical: number; warn: number; info: number; pass: number; skip: number }
+	checks: ReadonlyArray<SetupAuditCheckRow>
+	openRecommendationCount: number
+}
+
+export interface RunSqlData {
+	/** The fully macro-expanded SQL that was executed (org filter + time bounds inlined). */
+	expandedSql: string
+	rowCount: number
+	columns: ReadonlyArray<string>
+	/** Returned rows, capped for the response. */
+	rows: ReadonlyArray<Record<string, unknown>>
+	/** True when `rows` was truncated below the full result set for display. */
+	truncated: boolean
+	timeRange: { start: string; end: string }
+}
+
 export type StructuredToolOutput =
+	| { tool: "run_sql"; data: RunSqlData }
 	| { tool: "search_sessions"; data: SearchSessionsData }
 	| { tool: "get_session_transcript"; data: GetSessionTranscriptData }
 	| { tool: "get_session_traces"; data: GetSessionTracesData }
@@ -886,6 +951,8 @@ export type StructuredToolOutput =
 	| { tool: "list_alert_incidents"; data: ListAlertIncidentsData }
 	| { tool: "list_alert_checks"; data: ListAlertChecksData }
 	| { tool: "create_alert_rule"; data: CreateAlertRuleData }
+	| { tool: "update_alert_rule"; data: UpdateAlertRuleData }
+	| { tool: "delete_alert_rule"; data: DeleteAlertRuleData }
 	| { tool: "get_alert_rule"; data: GetAlertRuleData }
 	| { tool: "list_dashboards"; data: ListDashboardsData }
 	| { tool: "get_dashboard"; data: GetDashboardData }
@@ -904,6 +971,7 @@ export type StructuredToolOutput =
 			tool: "get_instrumentation_recommendations"
 			data: GetInstrumentationRecommendationsData
 	  }
+	| { tool: "audit_setup"; data: AuditSetupData }
 	| { tool: "get_incident_timeline"; data: GetIncidentTimelineData }
 	| { tool: "inspect_chart_data"; data: InspectChartDataData }
 	| { tool: "list_error_issues"; data: ListErrorIssuesData }

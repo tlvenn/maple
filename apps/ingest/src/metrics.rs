@@ -41,6 +41,43 @@ static ORG_THROTTLED_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+static ORG_DATA_LOSS_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_org_data_loss_total")
+        .with_description(
+            "Requests rejected in a way that loses the sender's telemetry, by org and signal",
+        )
+        .build()
+});
+
+static BACKPRESSURE_SHED_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_backpressure_shed_total")
+        .with_description("Frames shed because a lane's bounded export channel was full")
+        .build()
+});
+
+static REPLAY_SESSION_TRUNCATED_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_replay_session_truncated_total")
+        .with_description("Replay sessions that reached their maximum recorded byte size")
+        .build()
+});
+
+static REPLAY_SESSION_CHUNK_DROPPED_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_replay_session_chunk_dropped_total")
+        .with_description("Replay chunks rejected because their session was already truncated")
+        .build()
+});
+
+static REPLAY_BLOB_PUT_FAILED_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_replay_blob_put_failed_total")
+        .with_description("Replay chunks rejected because their payload could not be stored")
+        .build()
+});
+
 static CLOUDFLARE_BATCHES_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
     METER
         .u64_counter("ingest_cloudflare_batches_total")
@@ -100,7 +137,7 @@ static FORWARD_RESPONSES_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
 static NATIVE_ROWS_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
     METER
         .u64_counter("ingest_native_rows_total")
-        .with_description("Rows accepted by the native Tinybird pipeline")
+        .with_description("Rows accepted by the native warehouse pipeline")
         .build()
 });
 
@@ -129,6 +166,27 @@ static TINYBIRD_EXPORT_RETRIES_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| 
     METER
         .u64_counter("ingest_tinybird_export_retries_total")
         .with_description("Retry attempts while exporting to Tinybird")
+        .build()
+});
+
+static CLICKHOUSE_EXPORT_ROWS_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_clickhouse_export_rows_total")
+        .with_description("Rows successfully exported to self-managed ClickHouse")
+        .build()
+});
+
+static CLICKHOUSE_EXPORT_DROPPED_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_clickhouse_export_dropped_total")
+        .with_description("Rows dropped while exporting to self-managed ClickHouse")
+        .build()
+});
+
+static CLICKHOUSE_EXPORT_RETRIES_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("ingest_clickhouse_export_retries_total")
+        .with_description("Retry attempts while exporting to self-managed ClickHouse")
         .build()
 });
 
@@ -257,7 +315,7 @@ static NATIVE_ACCEPT_DURATION_SECONDS: LazyLock<Histogram<f64>> = LazyLock::new(
     METER
         .f64_histogram("ingest_native_accept_duration_seconds")
         .with_unit("s")
-        .with_description("Native Tinybird pipeline accept latency")
+        .with_description("Native warehouse pipeline accept latency")
         .build()
 });
 
@@ -266,6 +324,14 @@ static TINYBIRD_EXPORT_DURATION_SECONDS: LazyLock<Histogram<f64>> = LazyLock::ne
         .f64_histogram("ingest_tinybird_export_duration_seconds")
         .with_unit("s")
         .with_description("Tinybird export request latency")
+        .build()
+});
+
+static CLICKHOUSE_EXPORT_DURATION_SECONDS: LazyLock<Histogram<f64>> = LazyLock::new(|| {
+    METER
+        .f64_histogram("ingest_clickhouse_export_duration_seconds")
+        .with_unit("s")
+        .with_description("Self-managed ClickHouse export request latency")
         .build()
 });
 
@@ -324,6 +390,62 @@ pub fn org_throttled(org_id: &str, reason: &'static str) {
     );
 }
 
+/// A request was rejected in a way that destroys the sender's telemetry — an
+/// undecodable body or an invalid OTLP payload (see `rejection_loses_data`).
+///
+/// Carries `org_id`, which `ingest_requests_total` deliberately does not. That
+/// omission is why a bug rejecting 99.2% of one org's logs read as a diffuse
+/// platform-wide ~19% and nobody looked: the shape of the failure — *one* tenant
+/// at *total* loss — was averaged away. Labeling is affordable here precisely
+/// because this counter only moves when something is broken; a healthy fleet
+/// emits no series at all.
+pub fn org_data_loss(org_id: &str, signal: &str, error_kind: &str) {
+    ORG_DATA_LOSS_TOTAL.add(
+        1,
+        &[
+            KeyValue::new("org_id", org_id.to_string()),
+            KeyValue::new("signal", signal.to_string()),
+            KeyValue::new("error_kind", error_kind.to_string()),
+        ],
+    );
+}
+
+/// A frame was shed because its export lane's bounded channel was full
+/// (backpressure) — typically a stalled destination that cannot drain fast
+/// enough. Counted per shed event, symmetric with `org_throttled`.
+pub fn backpressure_shed(org_id: &str, destination: &str, signal: &str) {
+    BACKPRESSURE_SHED_TOTAL.add(
+        1,
+        &[
+            KeyValue::new("org_id", org_id.to_string()),
+            KeyValue::new("destination", destination.to_string()),
+            KeyValue::new("signal", signal.to_string()),
+        ],
+    );
+}
+
+/// A replay session crossed its byte ceiling — counted once, on the chunk that
+/// crossed it. Recording stops here; every later chunk lands in
+/// `replay_session_chunk_dropped`.
+pub fn replay_session_truncated(org_id: &str) {
+    REPLAY_SESSION_TRUNCATED_TOTAL.add(1, &[KeyValue::new("org_id", org_id.to_string())]);
+}
+
+/// A chunk was rejected because its session had already been truncated. A high
+/// ratio against `replay_session_truncated` means one org keeps recording long
+/// after it stopped being stored — worth an SDK-side sampling conversation.
+pub fn replay_session_chunk_dropped(org_id: &str) {
+    REPLAY_SESSION_CHUNK_DROPPED_TOTAL.add(1, &[KeyValue::new("org_id", org_id.to_string())]);
+}
+
+/// A replay chunk's payload could not be written to the blob store, so the
+/// chunk was rejected and no index row was enqueued. The SDK does not retry, so
+/// every increment here is a permanent gap in a recording — this should sit at
+/// zero, and it is the signal to watch during the R2 cutover.
+pub fn replay_blob_put_failed(org_id: &str) {
+    REPLAY_BLOB_PUT_FAILED_TOTAL.add(1, &[KeyValue::new("org_id", org_id.to_string())]);
+}
+
 /// Current in-flight request count for an org.
 pub fn org_requests_in_flight(org_id: &str, value: u64) {
     ORG_REQUESTS_IN_FLIGHT.record(value, &[KeyValue::new("org_id", org_id.to_string())]);
@@ -378,19 +500,38 @@ pub fn cloudflare_records(dataset: &str, count: u64) {
     CLOUDFLARE_RECORDS_TOTAL.add(count, &[KeyValue::new("dataset", dataset.to_string())]);
 }
 
-/// A WAL append was rejected because the shard file is full.
-pub fn wal_shard_full(shard: usize) {
-    WAL_SHARD_FULL_TOTAL.add(1, &[KeyValue::new("shard", shard.to_string())]);
+/// A WAL append was rejected because the lane file is full. `shard` is the real
+/// shard; `destination` distinguishes the per-destination lane within it.
+pub fn wal_shard_full(shard: usize, destination: &str) {
+    WAL_SHARD_FULL_TOTAL.add(
+        1,
+        &[
+            KeyValue::new("shard", shard.to_string()),
+            KeyValue::new("destination", destination.to_string()),
+        ],
+    );
 }
 
 /// Bytes committed in a single WAL append.
-pub fn wal_commit_bytes(shard: usize, bytes: u64) {
-    WAL_COMMIT_BYTES.record(bytes, &[KeyValue::new("shard", shard.to_string())]);
+pub fn wal_commit_bytes(shard: usize, destination: &str, bytes: u64) {
+    WAL_COMMIT_BYTES.record(
+        bytes,
+        &[
+            KeyValue::new("shard", shard.to_string()),
+            KeyValue::new("destination", destination.to_string()),
+        ],
+    );
 }
 
-/// Current WAL shard file size.
-pub fn wal_shard_bytes(shard: usize, bytes: u64) {
-    WAL_SHARD_BYTES.record(bytes, &[KeyValue::new("shard", shard.to_string())]);
+/// Current WAL lane file size.
+pub fn wal_shard_bytes(shard: usize, destination: &str, bytes: u64) {
+    WAL_SHARD_BYTES.record(
+        bytes,
+        &[
+            KeyValue::new("shard", shard.to_string()),
+            KeyValue::new("destination", destination.to_string()),
+        ],
+    );
 }
 
 /// Current bytes queued for export for an org.
@@ -400,7 +541,8 @@ pub fn org_queue_bytes(org_id: &str, bytes: u64) {
 
 /// Latency and exported-byte size of a completed WAL export batch.
 pub fn export_batch_completed(shard: usize, signal: &str, duration_secs: f64, exported_bytes: u64) {
-    EXPORT_BATCH_DURATION_SECONDS.record(duration_secs, &[KeyValue::new("shard", shard.to_string())]);
+    EXPORT_BATCH_DURATION_SECONDS
+        .record(duration_secs, &[KeyValue::new("shard", shard.to_string())]);
     WAL_EXPORTED_BYTES.record(
         exported_bytes,
         &[
@@ -433,12 +575,15 @@ pub fn forward_duration(signal: &str, upstream_pool: &str, duration_secs: f64) {
     );
 }
 
-/// Native Tinybird pipeline accept latency.
+/// Native warehouse pipeline accept latency.
 pub fn native_accept_duration(signal: &str, duration_secs: f64) {
-    NATIVE_ACCEPT_DURATION_SECONDS.record(duration_secs, &[KeyValue::new("signal", signal.to_string())]);
+    NATIVE_ACCEPT_DURATION_SECONDS.record(
+        duration_secs,
+        &[KeyValue::new("signal", signal.to_string())],
+    );
 }
 
-/// Rows accepted by the native Tinybird pipeline.
+/// Rows accepted by the native warehouse pipeline.
 pub fn native_rows(signal: &str, count: u64) {
     NATIVE_ROWS_TOTAL.add(count, &[KeyValue::new("signal", signal.to_string())]);
 }
@@ -474,6 +619,38 @@ pub fn tinybird_export_dropped(datasource: &str, status: &str, rows: u64) {
 /// A Tinybird export attempt was retried (`status` is an HTTP code or `transport`).
 pub fn tinybird_export_retry(datasource: &str, status: &str) {
     TINYBIRD_EXPORT_RETRIES_TOTAL.add(
+        1,
+        &[
+            KeyValue::new("datasource", datasource.to_string()),
+            KeyValue::new("status", status.to_string()),
+        ],
+    );
+}
+
+/// A successful ClickHouse export: latency and exported row count.
+pub fn clickhouse_export_succeeded(datasource: &str, status: &str, duration_secs: f64, rows: u64) {
+    let attrs = [
+        KeyValue::new("datasource", datasource.to_string()),
+        KeyValue::new("status", status.to_string()),
+    ];
+    CLICKHOUSE_EXPORT_DURATION_SECONDS.record(duration_secs, &attrs);
+    CLICKHOUSE_EXPORT_ROWS_TOTAL.add(rows, &attrs);
+}
+
+/// Rows dropped while exporting to ClickHouse (`status` is a bucket or internal reason).
+pub fn clickhouse_export_dropped(datasource: &str, status: &str, rows: u64) {
+    CLICKHOUSE_EXPORT_DROPPED_TOTAL.add(
+        rows,
+        &[
+            KeyValue::new("datasource", datasource.to_string()),
+            KeyValue::new("status", status.to_string()),
+        ],
+    );
+}
+
+/// A ClickHouse export attempt was retried (`status` is a bucket or internal reason).
+pub fn clickhouse_export_retry(datasource: &str, status: &str) {
+    CLICKHOUSE_EXPORT_RETRIES_TOTAL.add(
         1,
         &[
             KeyValue::new("datasource", datasource.to_string()),

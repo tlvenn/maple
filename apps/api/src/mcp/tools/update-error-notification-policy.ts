@@ -7,14 +7,10 @@ import {
 	type McpToolRegistrar,
 } from "./types"
 import { Effect, Option, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-warehouse"
-import { ErrorsService } from "@/services/ErrorsService"
-import {
-	AlertDestinationId,
-	AlertSeverity,
-	ErrorNotificationPolicyUpsertRequest,
-} from "@maple/domain/http"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { ErrorsService } from "@/services/errors/ErrorsService"
+import { AlertDestinationId, AlertSeverity, ErrorNotificationPolicyUpsertRequest } from "@maple/domain/http"
 
 const decodeSeverity = Schema.decodeUnknownOption(AlertSeverity)
 const decodeDestinationId = Schema.decodeUnknownEffect(AlertDestinationId)
@@ -49,14 +45,14 @@ export function registerUpdateErrorNotificationPolicyTool(server: McpToolRegistr
 			min_occurrence_count,
 			severity,
 		}) {
-			let decodedSeverity: AlertSeverity | undefined
-			if (severity !== undefined) {
-				const parsed = decodeSeverity(severity)
-				if (Option.isNone(parsed)) {
-					return validationError(`Invalid severity: ${severity}. Must be one of: warning, critical.`)
-				}
-				decodedSeverity = parsed.value
+			// `severity` is optional; when present it must decode to a valid
+			// AlertSeverity. Model the parsed-or-absent value as an Option.
+			const parsedSeverity =
+				severity === undefined ? Option.none<AlertSeverity>() : decodeSeverity(severity)
+			if (severity !== undefined && Option.isNone(parsedSeverity)) {
+				return validationError(`Invalid severity: ${severity}. Must be one of: warning, critical.`)
 			}
+			const decodedSeverity = Option.getOrUndefined(parsedSeverity)
 
 			const tenant = yield* resolveTenant
 			const errors = yield* ErrorsService
@@ -82,7 +78,7 @@ export function registerUpdateErrorNotificationPolicyTool(server: McpToolRegistr
 							(cause) =>
 								new McpQueryError({
 									message: `Invalid alert destination ID: ${token}`,
-									pipe: "update_error_notification_policy",
+									pipeName: "update_error_notification_policy",
 									cause,
 								}),
 						),
@@ -95,12 +91,14 @@ export function registerUpdateErrorNotificationPolicyTool(server: McpToolRegistr
 			if (min_occurrence_count !== undefined) patch.minOccurrenceCount = min_occurrence_count
 			if (decodedSeverity !== undefined) patch.severity = decodedSeverity
 
-			const decodedPatch = yield* Schema.decodeUnknownEffect(ErrorNotificationPolicyUpsertRequest)(patch).pipe(
+			const decodedPatch = yield* Schema.decodeUnknownEffect(ErrorNotificationPolicyUpsertRequest)(
+				patch,
+			).pipe(
 				Effect.mapError(
 					(error) =>
 						new McpQueryError({
 							message: `Invalid notification policy payload: ${String(error)}`,
-							pipe: "update_error_notification_policy",
+							pipeName: "update_error_notification_policy",
 							cause: error,
 						}),
 				),
@@ -114,7 +112,7 @@ export function registerUpdateErrorNotificationPolicyTool(server: McpToolRegistr
 							Effect.fail(
 								new McpQueryError({
 									message: error.message,
-									pipe: "update_error_notification_policy",
+									pipeName: "update_error_notification_policy",
 									cause: error,
 								}),
 							),
@@ -122,7 +120,7 @@ export function registerUpdateErrorNotificationPolicyTool(server: McpToolRegistr
 							Effect.fail(
 								new McpQueryError({
 									message: error.message,
-									pipe: "update_error_notification_policy",
+									pipeName: "update_error_notification_policy",
 									cause: error,
 								}),
 							),

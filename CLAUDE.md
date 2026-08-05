@@ -1,193 +1,165 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Maple is an OpenTelemetry observability platform: TanStack Start (React 19, Vite) + Effect on the
+backend, ClickHouse/Tinybird as the warehouse.
 
-## Project Overview
+## Workspace layout
 
-Maple is an OpenTelemetry observability platform built with TanStack Start (React meta-framework) and Tinybird as the backend data platform. It provides real-time visualization of traces, logs, and metrics from distributed systems.
+Three roots, and the split is a rule, not a habit:
 
-## Local Dev Login
+- **`apps/*`** — deployables (web, api, ingest, alerting, cli, landing, …).
+- **`packages/*`** — shared code that **knows Maple**: its schema, tables, API, or product.
+  `domain`, `query-engine`, `ui`, `db`, `auth`, `effect-sdk`, `browser`, …
+- **`lib/*`** — libraries with **zero Maple knowledge**, extractable to their own repo tomorrow.
+  `clickhouse-builder`, `effect-cloudflare`, `effect-db`, `effect-router`, `cache`,
+  `otel-helpers`, `unitflow`.
 
-Sign in at `https://web.localhost` with the Clerk test account:
+The test for `lib/` is "could this ship as a standalone OSS library?" — not "is it published?"
+and not "did we write it?". Publishability is a `package.json` fact, not a directory fact:
+`packages/effect-sdk` and `packages/browser` are both published. **New packages go in
+`packages/` unless they pass the lib test.**
 
-- Email: `david+clerk_test@gmail.com`
-- Password: `password1!`
+Anything in `lib/` that starts importing `@maple/domain` has stopped qualifying — move it to
+`packages/` rather than weakening the rule.
 
-Use this when you need an authenticated browser session to verify UI flows end-to-end.
+## Local dev
 
-## Commands
+Sign in at `https://web.localhost` with the Clerk test account `david+clerk_test@gmail.com` /
+`Maple-Dev-Kx92qZ!` when you need an authenticated browser session.
 
 ```bash
-# Development
-bun dev              # Run all apps via turbo; each app's `dev` script invokes portless
-                     # URLs: https://[<worktree>.]<app>.localhost
-bun typecheck        # TypeScript type checking
-
-# Skip portless for a single app (raw ports, no proxy)
-bun --filter=@maple/web dev:app
-
-# First-time setup (once per machine): install portless's local CA into your system trust store
-npx portless trust
-
-# Testing
-bun test             # Run Vitest tests
-
-# Production
-bun build            # Build for production
-bun preview          # Preview production build
-
-# Tinybird (data platform)
-bun tinybird:dev     # Local development mode
-bun tinybird:build   # Build Tinybird project
-bun tinybird:deploy  # Deploy to Tinybird Cloud
+bun dev                        # all apps via turbo → https://[<worktree>.]<app>.localhost
+bun --filter=@maple/web dev:app # single app, raw port, no portless proxy
+bun run test                   # Vitest via turbo (NOT `bun test` — that's Bun's own runner)
+bun typecheck
+bun run tinybird:manifest      # regenerate after editing datasources.ts
+bun db:up && bun db:migrate:local   # docker Postgres for wrangler dev (vitest uses embedded PGlite)
+bun run --cwd apps/api tinybird:deploy   # tinybird:dev / :build / :deploy live in apps/api
 ```
 
-## Architecture
+Toolchain (bun/node/rust/python) is pinned in [`mise.toml`](mise.toml); `mise run setup` does
+first-time install + `.env.local` + portless CA. mise is optional but bump versions there when
+upgrading a runtime (keep `bun` in sync with `packageManager`).
 
-### Tech Stack
+## Warehouse queries
 
-- **Framework:** TanStack Start (React 19, Vite, Nitro)
-- **Routing:** TanStack Router with file-based routing
-- **Data Fetching:** TanStack React Query
-- **Backend API:** Tinybird SDK for analytics queries
-- **UI:** shadcn components (Base UI), Tailwind CSS 4, Nucleo Icons
-- **Charts:** Recharts
+**No Tinybird pipes/endpoints exist.** All backend queries use the ClickHouse DSL in
+`@maple/query-engine` and run through `WarehouseQueryService.compiledQuery()`, which routes to the
+Tinybird SDK or ClickHouse per org config. Never `fetch()` `/v0/sql` directly.
 
-### Directory Structure
+Subpath exports: `./ch` (DSL + `compile`), `./runtime` (dashboard/alert lowering, `evaluate`,
+cache keys), `./execution` (`makeWarehouseExecutor` — retry, error mapping, OrgId scoping, spans),
+`./caching` (edge/bucket caches behind a `CacheBackend` port), `./profiles` (cost profiles →
+`SETTINGS`), `./observability` (MCP/agent helpers). The **root barrel stays driver-free** so web/cli
+can import it; only `apps/api` touches the other subpaths (`WarehouseQueryService.ts` injects the
+drivers, `QueryEngineService.ts` the caches).
 
-```
-src/
-├── routes/           # File-based routing (TanStack Router)
-│   ├── __root.tsx    # Root layout
-│   └── traces/       # Trace pages ($traceId for dynamic routes)
-├── api/tinybird/     # Server functions for Tinybird queries
-├── components/
-│   ├── ui/           # shadcn UI components
-│   ├── dashboard/    # Dashboard-specific components
-│   ├── traces/       # Trace visualization (flamegraph, span hierarchy)
-│   └── logs/         # Log display components
-├── tinybird/         # Auto-generated Tinybird type definitions
-├── lib/              # Utilities (tinybird client, query-client, formatters)
-└── hooks/            # React hooks
+To add a query: define it in `packages/query-engine/src/ch/queries/*.ts` with
+`from(Table).select(...).where(...)` + `param.*` placeholders, export from `src/ch/index.ts`, then:
+
+```typescript
+const compiled = CH.compile(CH.myQuery({ limit: 50 }), { orgId, startTime, endTime })
+const rows = yield * warehouse.compiledQuery(tenant, compiled, { profile: "list", context: "myQuery" })
 ```
 
-### Data Flow
+`compiledQuery` runs the SQL and decodes rows through the query's `rowSchema` (if declared);
+`profile` defaults to `"aggregation"` when omitted (`"unbounded"` is the explicit opt-out). There is
+no `castRows` — a cast that looked type-safe hid wire-format drift.
 
-1. React components in `/routes` define pages with file-based routing
-2. Server functions in `/api/tinybird/` use `createServerFn` from TanStack Start
-3. Server functions validate inputs with Zod and query Tinybird
-4. React Query manages client-side caching and state
+- Every query **must** filter `OrgId` (`$.OrgId.eq(param.string("orgId"))`) — enforced at runtime.
+- `context` labels the `executeSql` span (`query.context`), which also carries `db.query.text`,
+  `db.query.fingerprint`, `db.duration_ms`, `result.rowCount`, `orgId`, `query.profile`.
+- **64-bit ints arrive as numbers on every backend**: ClickHouse-protocol clients pin
+  `output_format_json_quote_64bit_integers=0` (`BackendDialect.unquote64BitIntegers`), matching the
+  Tinybird SDK. Two rules remain: (1) identity UInt64s (hashes/ids) must be `toString()`-wrapped in
+  the SELECT — values above 2^53 corrupt as JS numbers; the SQL-catalog e2e sweep enforces this.
+  (2) `rowSchema`s still use `CH.CHNumber`, never `Schema.Number`, so a gateway/readonly cluster
+  that refuses the setting (quoted wire) keeps decoding.
+- `packages/domain/src/tinybird/endpoints.ts` is **type-only** — no `defineEndpoint()` calls.
 
-### Auto-Generated Files (do not edit manually)
+## Application database (PlanetScale Postgres)
 
-- `src/routeTree.gen.ts` - Generated from route files
+Relational state (issues, alert rules, dashboards, org config, keys) is Drizzle/`pgTable` in
+`packages/db/src/schema/`, one PS branch per deployed stage (`main`=prd, `stg`), reached from
+Workers via the Hyperdrive binding `MAPLE_DB`.
 
-### Warehouse Query Pattern
+- App code keeps epoch-ms numbers and converts at the drizzle boundary (`new Date(ms)` writing,
+  `.getTime()` reading; `msToDate`/`dateToMs` in `apps/api/src/lib/time.ts`). Never read driver
+  write-result shapes — use `.returning()` + length. `count(*)` needs `::int` (bigint → string).
+- Layers: `DatabasePgLive` (Workers, short-lived postgres.js client per `execute`) and
+  `DatabasePgliteLive` (tests/local; `createTestDb()` in `apps/api/src/lib/test-pglite.ts`).
+- Migrations: `bun run --cwd packages/db db:generate`; CI applies them against the branch's DIRECT
+  port 5432 (never a pooler) before `alchemy deploy`. PGlite applies them at layer build.
+- **PR preview deploys are disabled** (2026-08, cost). `deploy-pr-preview.yml` triggers on the
+  `closed` event only, so it tears down pre-cutover stacks and never deploys a new one; restore
+  `types: [opened, synchronize, reopened, closed]` to re-enable.
+- **PR previews have no application database** either (PS-DEV branches billed continuously and
+  ate the Hyperdrive config cap) — this is the state previews return to when re-enabled.
+  `resolveDatabaseMode` in
+  `packages/infra/src/cloudflare/stage.ts` returns `"none"` for `pr`, so no `MAPLE_DB` is bound
+  and `DatabasePgLive` fails every query with a `DatabaseError` — DB-backed routes 500, the rest
+  of the preview works. To restore: return `"managed"` for `pr` and re-add the PlanetScale +
+  Electric steps to `.github/workflows/deploy-pr-preview.yml` (the scripts are kept, dormant).
+- The ingest gateway resolves ingest keys from the same Postgres via PSBouncer (6432, no Hyperdrive).
 
-**IMPORTANT:** Maple no longer uses Tinybird pipes/endpoints. All backend queries go through the ClickHouse DSL in `@maple/query-engine` and execute via `WarehouseQueryService.sqlQuery()`. The deployed Tinybird project contains only datasources and materialized views — zero pipes. The service routes to either Tinybird SDK or ClickHouse depending on org config.
+## Conventions
 
-The "engine" lives in `@maple/query-engine`, organized by concern (each is its own subpath export):
-
-- `./ch` — the ClickHouse DSL (`from().select().where()`, `compile`, table/function defs) + `compilePipeQuery` (the named-query registry backing `WarehouseExecutor.query`).
-- `./runtime` — the dashboard/alert lowering: validation, `QuerySpec` → CH, the `evaluate`/`evaluateRawSql` paths, cache-key builders, and the raw-SQL macro safety pass. Generic over tenant (`T extends QueryTenant`).
-- `./execution` — the warehouse executor: `makeWarehouseExecutor(deps)` owns SQL run, retry, error mapping, client cache, OrgId scoping, and span instrumentation. The host app injects driver construction (`WarehouseClient`-style `createClient`) + per-org config resolution (`OrgWarehouseConfig`-style `resolveConfig`); the ClickHouse/Tinybird SDKs stay in `apps/api/src/lib/WarehouseQueryService.ts` (the only place those drivers are imported).
-- `./caching` — `EdgeCacheService` (blob) + `BucketCacheService` (timeseries) behind a `CacheBackend` port; the Cloudflare Workers KV backend lives in `apps/api/src/lib/CacheBackendLive.ts` (keeps `globalThis.caches` out of the web/cli bundles).
-- `./profiles` — query cost profiles (discovery/list/aggregation/explain/unbounded) → CH `SETTINGS`.
-- `./observability` — high-level MCP/agent functions (`searchTraces`, `findErrors`, …) over the abstract `WarehouseExecutor` port.
-
-The package **root barrel stays pure** (no driver/KV/DB imports) so it can feed the web/cli bundles; execution/caching/runtime are reachable only via their explicit subpaths, which only `apps/api` imports. `apps/api/src/lib/WarehouseQueryService.ts` is thin wiring (drivers + config resolution) that composes `makeWarehouseExecutor`; `apps/api/src/services/QueryEngineService.ts` is thin wiring (the edge/bucket caches) that composes the `./runtime` lowering.
-
-Pattern (see `apps/api/src/routes/query-engine.http.ts` and `apps/api/src/services/QueryEngineService.ts` for examples):
-
-1. **Define the query** as a DSL function in `packages/query-engine/src/ch/queries/*.ts` using `from(Table).select(...).where(...)` and `param.string/int/dateTime(name)` placeholders.
-2. **Export it** from `packages/query-engine/src/ch/index.ts` so it's reachable via `import { CH } from "@maple/query-engine"`.
-3. **Call it** from a service or route handler. Pass a `context` string in `SqlQueryOptions` so the executeSql span carries a semantic label (`query.context`) you can filter traces on:
-    ```typescript
-    const compiled = CH.compile(CH.myQuery({ limit: 50 }), {
-    	orgId,
-    	startTime, // ISO or Tinybird datetime string — resolveParam() quotes it
-    	endTime,
-    })
-    const rows = yield * warehouse
-    	.sqlQuery(tenant, compiled.sql, { profile: "list", context: "myQuery" })
-    	.pipe(Effect.mapError(mapTinybirdError))
-    const typedRows = compiled.castRows(rows)
+- **Imports:** `@/` path alias. `src/routeTree.gen.ts` is generated — don't edit.
+- **Schemas:** Effect Schema, not Zod, for everything new. Wrap with `Schema.toStandardSchemaV1()`
+  for TanStack Router `validateSearch`. `Schema.optionalKey()` for JSON-decoded HTTP/domain schemas;
+  `Schema.optional()` only where `undefined` is a real JS value (search params, MCP tool params).
+- **Effect:** source is vendored at `.context/effect/` (subtree of Effect-TS/effect-smol).
+- **LLM core:** `lib/llm` (`@maple/llm`) is a vendored copy of `anomalyco/opencode`'s
+  `packages/llm`, pinned by SHA in `lib/llm/UPSTREAM.json` and re-synced with
+  `bun run llm:sync`. Don't reformat it and don't put Maple behaviour inside it — see
+  `lib/llm/MAPLE.md`.
+- **Span status codes:** Title case — `"Ok"`, `"Error"`, `"Unset"`.
+- **UI:** shadcn/Base UI + Tailwind 4 (`npx shadcn@latest add <component>`), Recharts, Nucleo icons.
+  Find an icon in the local Nucleo DB, then port it into `apps/web/src/components/icons/` by copying
+  an existing component (currentColor, camelCase attrs) and exporting it from `index.ts`:
+    ```bash
+    sqlite3 "~/Library/Application Support/Nucleo/icons/data.sqlite3" \
+      "SELECT id, name, set_id FROM icons WHERE klass='outline' AND grid=24 AND name LIKE '%search%';"
     ```
-4. **`sqlQuery` enforces `OrgId` scoping** — every query must include an `OrgId` filter (enforced by `WarehouseQueryService`). DSL queries satisfy this via `$.OrgId.eq(param.string("orgId"))` in their `.where()`.
 
-`packages/domain/src/tinybird/endpoints.ts` is **type-only** — it holds `*Output` / `*Params` shapes for consumers that want to reference query result types. Do not add `defineEndpoint()` calls; they won't be deployed.
+## Self-observability (trace loop prevention)
 
-Never use raw `fetch()` calls to `/v0/sql` — always go through `warehouse.sqlQuery()` with a DSL-compiled query.
+The API traces itself through the ingest gateway, so dashboard traffic generates traces. Keep
+`HttpMiddleware.withTracerDisabledWhen()` (skips `/health` + `OPTIONS`) and be careful adding spans
+to per-request hot paths like token validation. OTLP export bypasses the API, so it can't recurse.
 
-**Trace annotations on `WarehouseQueryService.executeSql`:** every SQL execution leaves a span carrying `db.query.text` (full SQL up to 16 KB), `db.query.length`, `db.query.fingerprint` (stable hash with literals normalized), `db.query.truncated`, `db.duration_ms`, `db.system.name`, `result.rowCount`, `orgId`, `tenant.userId`, `query.context`, and `query.profile`. When debugging slow queries, pull a trace and filter on these. (Spans recorded before 2026-06 carry the legacy `db.statement*`/`db.system` spellings; warehouse read paths coalesce both.)
+`apps/ingest` (Rust) self-instruments over OTLP/HTTP to its own `INGEST_FORWARD_OTLP_ENDPOINT`
+(startup guard refuses a loopback endpoint), as `service.name="ingest"`, `maple_org_id="internal"`,
+and `deployment.environment.name` **dual-emitted** as the legacy `deployment.environment` because
+the Tinybird MVs still pre-extract the old key. Custom fields use the `maple.*` namespace. Span
+status follows OTEL HTTP semconv for SERVER spans: **only 5xx is `Error`, 4xx rejections are `Ok`**
+(`otel_status_for_rejection` in `apps/ingest/src/main.rs`) so error dashboards aren't flooded by
+expected 401/402/429s. Operational metrics (`apps/ingest/src/metrics.rs`) push via OTLP every 30s —
+there is no Prometheus `/metrics` endpoint. At high QPS set `OTEL_TRACES_SAMPLER=parentbased_traceidratio`.
 
-## Environment Variables
+## Docs (`docs/`)
 
-```
-TINYBIRD_HOST=http://localhost:7181   # Local dev or cloud endpoint
-TINYBIRD_TOKEN=<token>                # Tinybird API token
-```
+`api-v2.md` (v2 public API spec) · `sampling-throughput.md` · `persistence.md` ·
+`sst-fork-workflow.md` · `local-mode.md` (single-binary CLI + embedded chDB) ·
+`tinybird-pr-branches.md` · `otel-spec/` (OTel spec map @ v1.58.0 — start at its README).
 
-## Key Conventions
+## Picking models for subagents and workflows
 
-- **Path Alias:** Use `@/` for imports (e.g., `@/components/ui/button`)
-- **TypeScript:** Strict mode enabled with no unused variables
-- **Server Functions:** Always validate inputs with Zod schemas
-- **Effect Schema:** Use Effect Schema instead of Zod for all new schemas (route search params, server function validation). Use `Schema.toStandardSchemaV1()` to wrap Effect Schemas for TanStack Router's `validateSearch`. Use `Schema.optionalKey()` for optional fields in JSON-decoded HTTP schemas (domain models), and `Schema.optional()` only for JS-side schemas (route search params, MCP tool params) where `undefined` is a valid value.
-- **Components:** Add UI components via `npx shadcn@latest add <component>`
+Higher = better. Cost reflects what I actually pay, not list price.
 
-### Nucleo Icons
+| Model    | Cost | Intelligence | Taste |
+| -------- | ---- | ------------ | ----- |
+| gpt-5.6  | 10   | 9            | 7     |
+| gpt-5.5  | 9    | 8            | 5     |
+| sonnet-5 | 5    | 5            | 7     |
+| opus-4.8 | 4    | 7            | 8     |
+| fable-5  | 2    | 9            | 9     |
 
-Icons are sourced from the local Nucleo library and converted to React components in `apps/web/src/components/icons/`.
-
-**Finding icons:** Query the Nucleo SQLite database:
-
-```bash
-sqlite3 "~/Library/Application Support/Nucleo/icons/data.sqlite3" \
-  "SELECT id, name, set_id FROM icons WHERE klass='outline' AND grid=24 AND name LIKE '%search-term%';"
-```
-
-**Previewing:** Open the SVG to verify:
-
-```bash
-open "~/Library/Application Support/Nucleo/icons/sets/{set_id}/{id}.svg"
-```
-
-**Adding to project:** Copy an existing icon component from `apps/web/src/components/icons/`, replace SVG content with new icon (applying same transformations: currentColor, camelCase attrs), and add export to `index.ts`.
-
-## Effect Patterns Reference
-
-Use `/Users/maki/Documents/superwall/app` as the reference implementation for Effect patterns (HTTP middleware, services, layers). Effect source code is at `.context/effect/` (git subtree of [Effect-TS/effect-smol](https://github.com/Effect-TS/effect-smol)).
-
-## Data Conventions
-
-- **Span Status Codes:** Use title case (`"Ok"`, `"Error"`, `"Unset"`), not uppercase
-
-## Documentation
-
-End-user and platform documentation lives in `docs/`:
-
-- `docs/sampling-throughput.md` — How Maple handles sampling-aware throughput metrics
-- `docs/persistence.md` — Database persistence and migration operations
-- `docs/sst-fork-workflow.md` — Running maple against a local SST fork, syncing with upstream, and opening PRs from fork branches
-- `docs/local-mode.md` — Local mode (single Bun-compiled `maple` binary from `apps/cli`: CLI + OTLP-ingest/query server + bundled UI, talking to embedded chDB via `bun:ffi`→libchdb), the `/local/query` contract, dev workflow, and the 2-file release bundle
-- `docs/tinybird-pr-branches.md` — Per-PR ephemeral Tinybird branches for preview deploys (`--last-partition` data, branch lifecycle wired into `deploy-pr-preview.yml`)
-
-## Self-Observability (Trace Loop Prevention)
-
-The Maple API traces itself via `@effect/opentelemetry` → ingest gateway → collector → Tinybird. This creates a feedback loop: viewing traces in the dashboard generates API calls, which create more traces.
-
-**Mitigations already in place:**
-
-- `HttpMiddleware.withTracerDisabledWhen()` skips `/health` and `OPTIONS` requests
-- OTLP batch export (async, doesn't block requests)
-
-**When modifying tracing code:**
-
-- NEVER remove the `withTracerDisabledWhen` filter — it prevents noisy health check spans
-- Be careful adding spans to high-frequency internal paths (e.g., auth token validation on every request)
-- The OTLP export itself does NOT go through the API (it goes directly to the ingest gateway), so it won't create recursive traces
-
-**`apps/ingest` self-instrumentation:**
-
-The Rust ingest gateway self-instruments via OTLP/HTTP, exporting to its own `INGEST_FORWARD_OTLP_ENDPOINT` (so its traces flow through the same downstream collector → Tinybird as customer traffic). It identifies itself with `service.name="ingest"` (canonical — replaces the legacy Prometheus-scrape `ingest-proxy` label), `service.version` (`CARGO_PKG_VERSION`), `service.instance.id` (per-process UUID), `deployment.environment.name` (resolved from `MAPLE_ENVIRONMENT` first — matches the alchemy convention from `resolveDeploymentEnvironment(stage)` — then `RAILWAY_ENVIRONMENT_NAME`, then `DEPLOYMENT_ENV`, defaulting to `development`; also dual-emitted as the legacy `deployment.environment` because every Tinybird MV (`service_overview_spans_mv` et al.) still pre-extracts the legacy key — drop only after those MVs migrate to coalesce both), and `maple_org_id="internal"` (override via `MAPLE_INTERNAL_ORG_ID` env). Every inbound OTLP-forward and Cloudflare-logpush request creates a `Server`-kind span (`POST /v1/{signal}`, `POST /v1/logpush/...`) with HTTP semconv attributes (`http.request.method`, `http.route`, `http.request.body.size`, `http.response.status_code`, `error.type`); custom fields use the `maple.*` vendor namespace (`maple.signal`, `maple.org_id`, `maple.ingest.payload_format`, `maple.ingest.item_count`, etc.). The downstream forward is a child `Client`-kind span with `url.full`, `server.address`, and `http.response.status_code`. Span status is set via `otel.status_code` following the OTEL HTTP semconv rule for SERVER spans: **only 5xx is `Error`; 4xx client rejections are `Ok`** (see `otel_status_for_rejection` in `apps/ingest/src/main.rs`). This keeps the error dashboards (which only count `StatusCode='Error'`) attributing genuine ingest/forward failures — including the auth-resolver-unavailable 503 — while NOT flooding them with expected 4xx rejections (missing/invalid ingest key 401, billing-limit 402, throttle 429, oversized/undecodable payload). Those 4xx rejections stay fully observable via `http.response.status_code`, `error.type`, and the request metrics. This is safe because the span is exported to the downstream collector, not back through the ingest service. A startup loopback guard refuses to set up the exporter if `INGEST_FORWARD_OTLP_ENDPOINT` resolves to the gateway's own bind port. At high QPS, set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG=0.1`. The gateway's own operational metrics (request/forward/export counters and histograms, in-flight gauges, WAL telemetry — defined in `apps/ingest/src/metrics.rs`) are also exported via OTLP: a `PeriodicReader` pushes them every 30s to `INGEST_FORWARD_OTLP_ENDPOINT/v1/metrics`, so they flow through the same collector → Tinybird pipeline as traces and land in the `metrics_*` datasources scoped to the `internal` org. There is no longer a `/metrics` Prometheus endpoint — `init_metrics` shares the loopback/skip-dev guard and the per-process `service.instance.id` with `init_tracing`.
+- Defaults, not limits — escalate to a smarter model without asking if output misses the bar.
+  When axes conflict: intelligence > taste > cost.
+- Bulk/mechanical work (clear-spec implementation, migrations, data analysis): gpt-5.5.
+- User-facing work (UI, copy, API design) needs taste ≥ 7. Reviews: fable-5 or opus-4.8.
+- **Never use Haiku.**
+- Claude models run via the Agent/Workflow `model` param. gpt-5.5 is only reachable through the
+  Codex plugin (`/codex:rescue`, `:status`, `:result`, `:cancel`, `:transfer`); inside a workflow,
+  wrap it — spawn a `model: 'sonnet'`, `effort: 'low'` agent that runs `codex exec` via Bash.

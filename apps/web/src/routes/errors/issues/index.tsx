@@ -1,21 +1,39 @@
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useMemo, useReducer, useState } from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
-import { Result, useAtomValue } from "@/lib/effect-atom"
-import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
+import type { V2ErrorIssue } from "@maple/domain/http/v2"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { useListNavigation } from "@/hooks/use-list-navigation"
 import { IssueGroup } from "@/components/errors/issue-group"
 import { IssuesBulkBar } from "@/components/errors/issues-bulk-bar"
-import { IssuesToolbar } from "@/components/errors/issues-toolbar"
+import { ListToolbar } from "@/components/common/list-toolbar"
 import { severityRank } from "@/components/errors/severity-badge"
 import { useIssueMutations } from "@/components/errors/use-issue-mutations"
-import type { SelectToggleEvent } from "@/components/errors/issue-row"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { IssueRow, type SelectToggleEvent } from "@/components/errors/issue-row"
+import {
+	clearedSelection,
+	type IssueSelectionMsg,
+	type IssueSelectionState,
+	initialIssueSelection,
+	toggledSelection,
+	updateIssueSelection,
+} from "@/lib/models/issue-selection"
+import { Result, useAtomRefresh, useAtomValue } from "@/lib/effect-atom"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
+import { runMapleApiV2 } from "@/lib/collections/api-runner"
+import {
+	appendUniqueErrorIssues,
+	buildErrorIssueListQuery,
+	errorIssueFromV2,
+	type ErrorIssueListQuery,
+} from "@/lib/services/error-issues"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
+import { Button } from "@maple/ui/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@maple/ui/components/ui/empty"
+import { ErrorState } from "@/components/common/error-state"
 import type { ErrorIssueDocument, ErrorIssueId, WorkflowState } from "@maple/domain/http"
 
 const FILTER_VALUES = [
@@ -57,8 +75,6 @@ const GROUP_ORDER: ReadonlyArray<WorkflowState> = [
 	"wontfix",
 ]
 
-const ISSUES_PAGE_LIMIT = 100
-
 const SEVERITY_FILTER_VALUES = ["all", "critical", "high", "medium", "low", "unset"] as const
 type SeverityFilterValue = (typeof SEVERITY_FILTER_VALUES)[number]
 
@@ -88,10 +104,73 @@ const searchSchema = Schema.Struct({
 	kind: Schema.optional(Schema.Literals(["error", "alert"])),
 })
 
-export const Route = effectRoute(createFileRoute("/errors/issues/"))({
+export const Route = createFileRoute("/errors/issues/")({
 	component: IssuesPage,
 	validateSearch: Schema.toStandardSchemaV1(searchSchema),
 })
+
+/** The page chrome every phase renders: breadcrumbs + title + toolbar. */
+function IssuesPageFrame({ toolbar, children }: { toolbar: React.ReactNode; children: React.ReactNode }) {
+	return (
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[{ label: "Errors", href: "/errors" }, { label: "Issues" }]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header
+							title="Issues"
+							description="Errors grouped into triage, in-progress, and resolved work."
+						/>
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>
+						<div>
+							{toolbar}
+							{children}
+						</div>
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
+	)
+}
+
+function IssuesSkeleton({ toolbar }: { toolbar: React.ReactNode }) {
+	return (
+		<IssuesPageFrame toolbar={toolbar}>
+			<div className="space-y-px p-2">
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+			</div>
+		</IssuesPageFrame>
+	)
+}
+
+function IssuesLoadError({
+	toolbar,
+	message,
+	onRetry = () => window.location.reload(),
+}: {
+	toolbar: React.ReactNode
+	message?: string
+	onRetry?: () => void
+}) {
+	return (
+		<IssuesPageFrame toolbar={toolbar}>
+			<div className="p-4">
+				<ErrorState
+					error={message ?? "The issues stream could not be loaded."}
+					title="Failed to load issues"
+					onRetry={onRetry}
+				/>
+			</div>
+		</IssuesPageFrame>
+	)
+}
 
 function IssuesPage() {
 	const search = Route.useSearch()
@@ -100,30 +179,32 @@ function IssuesPage() {
 	const severityFilter: SeverityFilterValue = search.severity ?? "all"
 	const kindFilter = search.kind ?? "all"
 
-	const issuesQueryAtom = MapleApiAtomClient.query("errors", "listIssues", {
-		query: {
-			...(activeFilter === "all" ? {} : { workflowState: activeFilter }),
-			...(severityFilter === "all" ? {} : { severity: severityFilter }),
-			...(kindFilter === "all" ? {} : { kind: kindFilter }),
-			limit: ISSUES_PAGE_LIMIT,
-		},
-		reactivityKeys: ["errorIssues"],
+	const listQuery = buildErrorIssueListQuery({
+		workflowState: activeFilter,
+		severity: severityFilter,
+		kind: kindFilter,
 	})
-	const issuesResult = useAtomValue(issuesQueryAtom)
-	const mutations = useIssueMutations()
+	const result = useAtomValue(
+		MapleApiV2AtomClient.query("errorIssues", "list", {
+			query: listQuery,
+			reactivityKeys: ["errorIssues"],
+		}),
+	)
+	const refresh = useAtomRefresh(
+		MapleApiV2AtomClient.query("errorIssues", "list", {
+			query: listQuery,
+			reactivityKeys: ["errorIssues"],
+		}),
+	)
 
-	const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
-	const anchorRef = useRef<string | null>(null)
-
-	const totalCount = Result.isSuccess(issuesResult) ? issuesResult.value.issues.length : undefined
-
-	const toolbar = (
-		<IssuesToolbar
+	const toolbar = (totalCount?: number) => (
+		<ListToolbar
 			tabs={TOOLBAR_TABS}
 			active={activeFilter}
+			label="Filter issues"
+			countNoun={["issue", "issues"]}
 			totalCount={totalCount}
 			onChange={(value) => {
-				setSelectedIds(new Set())
 				navigate({
 					search: (prev) => ({
 						...prev,
@@ -136,7 +217,6 @@ function IssuesPage() {
 					<Select
 						value={kindFilter}
 						onValueChange={(value) => {
-							setSelectedIds(new Set())
 							navigate({
 								search: (prev) => ({
 									...prev,
@@ -157,7 +237,6 @@ function IssuesPage() {
 					<Select
 						value={severityFilter}
 						onValueChange={(value) => {
-							setSelectedIds(new Set())
 							navigate({
 								search: (prev) => ({
 									...prev,
@@ -185,85 +264,119 @@ function IssuesPage() {
 		/>
 	)
 
-	return Result.builder(issuesResult)
-		.onInitial(() => (
-			<DashboardLayout
-				breadcrumbs={[{ label: "Errors", href: "/errors" }, { label: "Issues" }]}
-				title="Issues"
-				description="Errors grouped into triage, in-progress, and resolved work."
-			>
-				<div>
-					{toolbar}
-					<div className="space-y-px p-2">
-						<Skeleton className="h-9 w-full" />
-						<Skeleton className="h-9 w-full" />
-						<Skeleton className="h-9 w-full" />
-						<Skeleton className="h-9 w-full" />
-						<Skeleton className="h-9 w-full" />
-					</div>
-				</div>
-			</DashboardLayout>
-		))
-		.onError((error) => (
-			<DashboardLayout
-				breadcrumbs={[{ label: "Errors", href: "/errors" }, { label: "Issues" }]}
-				title="Issues"
-				description="Errors grouped into triage, in-progress, and resolved work."
-			>
-				<div>
-					{toolbar}
-					<div className="p-4">
-						<Empty>
-							<EmptyHeader>
-								<EmptyTitle>Failed to load issues</EmptyTitle>
-								<EmptyDescription>
-									{error.message ?? "Try refreshing or check API logs."}
-								</EmptyDescription>
-							</EmptyHeader>
-						</Empty>
-					</div>
-				</div>
-			</DashboardLayout>
-		))
-		.onSuccess((response) => {
-			const issues = response.issues
-			return (
-				<IssuesPageBody
-					issues={issues}
-					isRefreshing={issuesResult.waiting}
-					activeFilter={activeFilter}
-					mutations={mutations}
-					selectedIds={selectedIds}
-					setSelectedIds={setSelectedIds}
-					anchorRef={anchorRef}
-					toolbar={toolbar}
-				/>
-			)
-		})
-		.render()
+	if (Result.isInitial(result)) return <IssuesSkeleton toolbar={toolbar()} />
+	if (Result.isFailure(result)) {
+		return (
+			<IssuesLoadError
+				toolbar={toolbar()}
+				message="The issues list could not be loaded."
+				onRetry={refresh}
+			/>
+		)
+	}
+
+	return (
+		<IssuesReadyBody
+			key={`${activeFilter}:${severityFilter}:${kindFilter}`}
+			initialPage={result.value}
+			listQuery={listQuery}
+			toolbar={toolbar}
+			activeFilter={activeFilter}
+		/>
+	)
 }
 
-interface IssuesPageBodyProps {
+interface SelectionBinding {
+	selection: IssueSelectionState
+	dispatchSelection: (msg: IssueSelectionMsg) => void
+}
+
+const selectionReducer = (state: IssueSelectionState, message: IssueSelectionMsg): IssueSelectionState =>
+	updateIssueSelection(state, message)[0]
+
+interface IssuesReadyBodyProps {
+	initialPage: {
+		readonly data: ReadonlyArray<V2ErrorIssue>
+		readonly next_cursor: string | null
+		readonly has_more: boolean
+	}
+	listQuery: ErrorIssueListQuery
+	toolbar: (totalCount?: number) => React.ReactNode
+	activeFilter: FilterValue
+}
+
+function IssuesReadyBody({ initialPage, listQuery, activeFilter, toolbar }: IssuesReadyBodyProps) {
+	const [selection, dispatchSelection] = useReducer(selectionReducer, initialIssueSelection)
+	const [extraIssues, setExtraIssues] = useState<ReadonlyArray<ErrorIssueDocument>>([])
+	const [nextCursorOverride, setNextCursorOverride] = useState<string | null | undefined>(undefined)
+	const [loadingMore, setLoadingMore] = useState(false)
+	const firstPageIssues = useMemo(() => initialPage.data.map(errorIssueFromV2), [initialPage.data])
+	const issues = useMemo(
+		() => appendUniqueErrorIssues(firstPageIssues, extraIssues),
+		[firstPageIssues, extraIssues],
+	)
+	const nextCursor = nextCursorOverride === undefined ? initialPage.next_cursor : nextCursorOverride
+
+	const resetLoadedPages = useCallback(() => {
+		setExtraIssues([])
+		setNextCursorOverride(undefined)
+		dispatchSelection(clearedSelection)
+	}, [])
+	const mutations = useIssueMutations(resetLoadedPages)
+
+	const loadMore = useCallback(async () => {
+		if (nextCursor === null || loadingMore) return
+		setLoadingMore(true)
+		try {
+			const page = await runMapleApiV2((client) =>
+				client.errorIssues.list({ query: { ...listQuery, cursor: nextCursor } }),
+			)
+			setExtraIssues((current) => appendUniqueErrorIssues(current, page.data.map(errorIssueFromV2)))
+			setNextCursorOverride(page.next_cursor)
+		} catch {
+			toastManager.add({ title: "More issues could not be loaded", type: "error" })
+		} finally {
+			setLoadingMore(false)
+		}
+	}, [listQuery, loadingMore, nextCursor])
+
+	return (
+		<IssuesPageBody
+			issues={issues}
+			activeFilter={activeFilter}
+			toolbar={toolbar}
+			mutations={mutations}
+			selection={selection}
+			dispatchSelection={dispatchSelection}
+			hasMore={nextCursor !== null}
+			loadingMore={loadingMore}
+			onLoadMore={loadMore}
+		/>
+	)
+}
+
+interface IssuesPageBodyProps extends SelectionBinding {
 	issues: ReadonlyArray<ErrorIssueDocument>
-	isRefreshing: boolean
 	activeFilter: FilterValue
 	mutations: ReturnType<typeof useIssueMutations>
-	selectedIds: Set<string>
-	setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>
-	anchorRef: React.MutableRefObject<string | null>
-	toolbar: React.ReactNode
+	toolbar: (totalCount?: number) => React.ReactNode
+	hasMore: boolean
+	loadingMore: boolean
+	onLoadMore: () => void
 }
 
 function IssuesPageBody({
 	issues,
-	isRefreshing,
 	activeFilter,
 	mutations,
-	selectedIds,
-	setSelectedIds,
-	anchorRef,
+	selection,
+	dispatchSelection,
 	toolbar,
+	hasMore,
+	loadingMore,
+	onLoadMore,
 }: IssuesPageBodyProps) {
+	const selectedIds = selection.selectedIds
 	const grouped = useMemo(() => {
 		const map = new Map<WorkflowState, ErrorIssueDocument[]>()
 		for (const issue of issues) {
@@ -303,31 +416,19 @@ function IssuesPageBody({
 
 	const flatIssueIds = useMemo(() => flatIssues.map((i) => i.id as string), [flatIssues])
 
+	// The shift-range/anchor logic now lives in the pure reducer
+	// (updateIssueSelection); the row just reports the toggle + the current
+	// visible order and the model figures out the rest.
 	const toggleSelection = useCallback(
 		(id: string, event: Pick<SelectToggleEvent, "shiftKey">) => {
-			setSelectedIds((prev) => {
-				const next = new Set(prev)
-				if (event.shiftKey && anchorRef.current) {
-					const a = flatIssueIds.indexOf(anchorRef.current)
-					const b = flatIssueIds.indexOf(id)
-					if (a !== -1 && b !== -1) {
-						const [lo, hi] = a < b ? [a, b] : [b, a]
-						for (let i = lo; i <= hi; i++) next.add(flatIssueIds[i]!)
-						return next
-					}
-				}
-				if (next.has(id)) next.delete(id)
-				else next.add(id)
-				anchorRef.current = id
-				return next
-			})
+			dispatchSelection(toggledSelection(id, event.shiftKey, flatIssueIds))
 		},
-		[flatIssueIds, anchorRef, setSelectedIds],
+		[dispatchSelection, flatIssueIds],
 	)
 
 	const clearSelection = useCallback(() => {
-		setSelectedIds(new Set())
-	}, [setSelectedIds])
+		dispatchSelection(clearedSelection)
+	}, [dispatchSelection])
 
 	const navigate = useNavigate({ from: Route.fullPath })
 
@@ -362,50 +463,92 @@ function IssuesPageBody({
 		},
 		[setFocusedId],
 	)
+	const showGroupHeaders = activeFilter === "all"
 
 	return (
-		<DashboardLayout
-			breadcrumbs={[{ label: "Errors", href: "/errors" }, { label: "Issues" }]}
-			title="Issues"
-			description="Errors grouped into triage, in-progress, and resolved work."
-		>
-			<div
-				className={isRefreshing ? "opacity-60 transition-opacity" : undefined}
-				aria-busy={isRefreshing}
-			>
-				{toolbar}
-				{issues.length === 0 ? (
-					<div className="p-4">
-						<Empty>
-							<EmptyHeader>
-								<EmptyTitle>No issues</EmptyTitle>
-								<EmptyDescription>
-									{activeFilter === "triage"
-										? "No issues in triage. Nice."
-										: `No issues in state "${FILTER_LABEL[activeFilter]}".`}
-								</EmptyDescription>
-							</EmptyHeader>
-						</Empty>
-					</div>
-				) : (
-					<div>
-						{visibleGroups.map((state) => (
-							<IssueGroup
-								key={state}
-								state={state}
-								issues={grouped.get(state) ?? []}
-								mutations={mutations}
-								selectedIds={selectedIds}
-								focusedId={focusedId}
-								onSelectToggle={handleSelectToggle}
-								onFocus={handleFocus}
-							/>
-						))}
-					</div>
-				)}
-			</div>
-			<IssuesBulkBar selectedIds={selectedArray} mutations={mutations} onClear={clearSelection} />
-		</DashboardLayout>
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[{ label: "Errors", href: "/errors" }, { label: "Issues" }]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header
+							title="Issues"
+							description="Errors grouped into triage, in-progress, and resolved work."
+						/>
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>
+						<div>
+							{toolbar(issues.length)}
+							{issues.length === 0 ? (
+								<div className="p-4">
+									<Empty>
+										<EmptyHeader>
+											<EmptyTitle>No issues</EmptyTitle>
+											<EmptyDescription>
+												No issues match the {FILTER_LABEL[activeFilter].toLowerCase()}{" "}
+												workflow and current severity/source filters.
+											</EmptyDescription>
+										</EmptyHeader>
+									</Empty>
+								</div>
+							) : (
+								<div>
+									{showGroupHeaders ? (
+										visibleGroups.map((state) => (
+											<IssueGroup
+												key={state}
+												state={state}
+												issues={grouped.get(state) ?? []}
+												mutations={mutations}
+												selectedIds={selectedIds}
+												focusedId={focusedId}
+												onSelectToggle={handleSelectToggle}
+												onFocus={handleFocus}
+											/>
+										))
+									) : (
+										<div role="list" className="divide-y divide-border/40">
+											{flatIssues.map((issue) => (
+												<div role="listitem" key={issue.id}>
+													<IssueRow
+														issue={issue}
+														mutations={mutations}
+														selected={selectedIds.has(issue.id)}
+														focused={focusedId === issue.id}
+														onSelectToggle={handleSelectToggle}
+														onFocus={handleFocus}
+													/>
+												</div>
+											))}
+										</div>
+									)}
+									{hasMore ? (
+										<div className="flex justify-center border-t border-border/60 p-3">
+											<Button
+												type="button"
+												variant="outline"
+												size="sm"
+												loading={loadingMore}
+												onClick={onLoadMore}
+											>
+												Load more
+											</Button>
+										</div>
+									) : null}
+								</div>
+							)}
+						</div>
+						<IssuesBulkBar
+							selectedIds={selectedArray}
+							mutations={mutations}
+							onClear={clearSelection}
+						/>
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
 	)
 }
 

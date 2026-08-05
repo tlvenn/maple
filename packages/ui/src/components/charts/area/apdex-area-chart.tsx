@@ -1,5 +1,5 @@
-import { useId, useMemo } from "react"
-import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts"
+import { memo, useId, useMemo } from "react"
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
 
 import type { BaseChartProps } from "../_shared/chart-types"
 import { apdexTimeSeriesData } from "../_shared/sample-data"
@@ -21,13 +21,16 @@ const baseChartConfig = {
 	apdexScore: { label: "Apdex", color: "var(--chart-apdex)" },
 } satisfies ChartConfig
 
-export function ApdexAreaChart({
+// Memoized: these charts sit in synced grids whose parent rerenders on every
+// atom/query settle; with stable props the whole Recharts subtree is skipped.
+export const ApdexAreaChart = memo(function ApdexAreaChart({
 	data,
 	className,
 	legend,
 	tooltip,
-	referenceLines,
 	syncId,
+	overlay,
+	yAxisWidth,
 }: BaseChartProps) {
 	const id = useId()
 	const gradientId = `apdexGradient-${id.replace(/:/g, "")}`
@@ -68,15 +71,6 @@ export function ApdexAreaChart({
 					)}
 				</defs>
 				<CartesianGrid vertical={false} />
-				{referenceLines?.map((rl, i) => (
-					<ReferenceLine
-						key={`release-${i}`}
-						x={rl.x}
-						stroke={rl.color ?? "var(--muted-foreground)"}
-						strokeDasharray={rl.strokeDasharray ?? "6 4"}
-						strokeWidth={1}
-					/>
-				))}
 				<XAxis
 					dataKey="bucket"
 					tickLine={false}
@@ -84,7 +78,13 @@ export function ApdexAreaChart({
 					tickMargin={8}
 					tickFormatter={(v) => formatBucketLabel(v, axisContext, "tick")}
 				/>
-				<YAxis domain={[0, 1]} tickLine={false} axisLine={false} tickMargin={8} width={50} />
+				<YAxis
+					domain={[0, 1]}
+					tickLine={false}
+					axisLine={false}
+					tickMargin={8}
+					width={yAxisWidth ?? 50}
+				/>
 				{tooltip !== "hidden" && (
 					<ChartTooltip
 						content={
@@ -92,17 +92,7 @@ export function ApdexAreaChart({
 								labelFormatter={(_, payload) => {
 									if (!payload?.[0]?.payload?.bucket) return ""
 									const bucket = payload[0].payload.bucket as string
-									const release = referenceLines?.find((rl) => rl.x === bucket)
-									return (
-										<span>
-											{formatBucketLabel(bucket, axisContext, "tooltip")}
-											{release?.label && (
-												<span className="ml-2 text-muted-foreground">
-													Deploy: {release.label}
-												</span>
-											)}
-										</span>
-									)
+									return formatBucketLabel(bucket, axisContext, "tooltip")
 								}}
 								formatter={(value, name, item) => {
 									const nameStr = String(name)
@@ -151,7 +141,8 @@ export function ApdexAreaChart({
 						isAnimationActive={false}
 					/>
 				)}
+				{overlay}
 			</AreaChart>
 		</ChartContainer>
 	)
-}
+})

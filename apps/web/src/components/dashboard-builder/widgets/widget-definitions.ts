@@ -5,6 +5,7 @@ import {
 	XmarkIcon,
 	GridIcon,
 	ChartBarIcon,
+	ChartBarHorizontalIcon,
 	ChartLineIcon,
 	type IconComponent,
 } from "@/components/icons"
@@ -288,6 +289,7 @@ function buildBreakdownQuery(
 		aggregation: string
 		groupBy: string[]
 		name?: string
+		legend?: string
 	},
 ): QueryBuilderQueryDraft {
 	const draft = createQueryDraft(index)
@@ -300,6 +302,7 @@ function buildBreakdownQuery(
 		groupBy: overrides.groupBy,
 		addOns: { groupBy: true, having: false, orderBy: false, limit: true, legend: false },
 		limit: "10",
+		legend: overrides.legend ?? draft.legend,
 	}
 	return overrides.dataSource === "logs"
 		? { ...base, dataSource: "logs" }
@@ -321,7 +324,7 @@ export const piePresets: WidgetPresetDefinition[] = [
 						dataSource: "traces",
 						whereClause: "has_error = true",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 				],
 				formulas: [],
@@ -350,7 +353,7 @@ export const piePresets: WidgetPresetDefinition[] = [
 						dataSource: "logs",
 						whereClause: "",
 						aggregation: "count",
-						groupBy: ["severity_text"],
+						groupBy: ["severity"],
 					}),
 				],
 				formulas: [],
@@ -379,7 +382,7 @@ export const piePresets: WidgetPresetDefinition[] = [
 						dataSource: "traces",
 						whereClause: "root_only = true",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 				],
 				formulas: [],
@@ -411,7 +414,7 @@ export const funnelPresets: WidgetPresetDefinition[] = [
 						dataSource: "traces",
 						whereClause: "root_only = true",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 				],
 				formulas: [],
@@ -440,7 +443,7 @@ export const funnelPresets: WidgetPresetDefinition[] = [
 						dataSource: "traces",
 						whereClause: "has_error = true",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 				],
 				formulas: [],
@@ -457,22 +460,22 @@ export const funnelPresets: WidgetPresetDefinition[] = [
 	},
 ]
 
-export const histogramPresets: WidgetPresetDefinition[] = [
+export const hbarPresets: WidgetPresetDefinition[] = [
 	{
-		id: "histogram-trace-duration",
-		name: "Trace Duration Distribution",
-		description: "Spread of root span durations across buckets",
-		icon: ChartBarIcon,
-		visualization: "histogram",
+		id: "hbar-top-operations",
+		name: "Busiest Operations",
+		description: "Top span names by volume, each as a share of the total",
+		icon: ChartBarHorizontalIcon,
+		visualization: "hbar",
 		dataSource: {
 			endpoint: "custom_query_builder_breakdown",
 			params: {
 				queries: [
 					buildBreakdownQuery(0, {
 						dataSource: "traces",
-						whereClause: "root_only = true",
+						whereClause: "",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["span.name"],
 					}),
 				],
 				formulas: [],
@@ -481,9 +484,90 @@ export const histogramPresets: WidgetPresetDefinition[] = [
 			},
 		},
 		display: {
+			title: "Busiest Operations",
+			chartId: "query-builder-hbar",
+			unit: "number",
+		},
+	},
+	{
+		id: "hbar-spans-by-service",
+		name: "Spans by Service",
+		description: "Span volume per service, ranked",
+		icon: PulseIcon,
+		visualization: "hbar",
+		dataSource: {
+			endpoint: "custom_query_builder_breakdown",
+			params: {
+				queries: [
+					buildBreakdownQuery(0, {
+						dataSource: "traces",
+						whereClause: "",
+						aggregation: "count",
+						groupBy: ["service.name"],
+					}),
+				],
+				formulas: [],
+				comparison: { mode: "none", includePercentChange: false },
+				debug: false,
+			},
+		},
+		display: {
+			title: "Spans by Service",
+			chartId: "query-builder-hbar",
+			unit: "number",
+		},
+	},
+]
+
+export const histogramPresets: WidgetPresetDefinition[] = [
+	{
+		id: "histogram-trace-duration",
+		name: "Trace Duration Distribution",
+		description: "Distribution of recent root span durations",
+		icon: ChartBarIcon,
+		visualization: "histogram",
+		// A list of raw root-span durations, bucketized client-side by the
+		// histogram chart — a count-by-service breakdown is NOT a duration
+		// distribution (MAP-49).
+		dataSource: {
+			endpoint: "custom_query_builder_list",
+			params: {
+				queries: [
+					{
+						id: "preset-histogram-durations",
+						name: "A",
+						enabled: true,
+						dataSource: "traces",
+						signalSource: "default",
+						metricName: "",
+						metricType: "sum",
+						isMonotonic: false,
+						whereClause: "root_only = true",
+						aggregation: "count",
+						stepInterval: "",
+						orderByDirection: "desc",
+						addOns: {
+							groupBy: false,
+							having: false,
+							orderBy: false,
+							limit: false,
+							legend: false,
+						},
+						groupBy: [],
+						having: "",
+						orderBy: "",
+						limit: "",
+						legend: "",
+					},
+				],
+				limit: 200,
+				columns: ["durationMs"],
+			},
+		},
+		display: {
 			title: "Trace Duration Distribution",
 			chartId: "query-builder-histogram",
-			unit: "number",
+			unit: "duration_ms",
 			histogram: { bucketCount: 30 },
 		},
 	},
@@ -501,7 +585,7 @@ export const histogramPresets: WidgetPresetDefinition[] = [
 						dataSource: "logs",
 						whereClause: "",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 				],
 				formulas: [],
@@ -531,17 +615,19 @@ export const heatmapPresets: WidgetPresetDefinition[] = [
 				queries: [
 					buildBreakdownQuery(0, {
 						name: "A",
+						legend: "Errors",
 						dataSource: "traces",
 						whereClause: "has_error = true",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 					buildBreakdownQuery(1, {
 						name: "B",
+						legend: "OK",
 						dataSource: "traces",
 						whereClause: "has_error = false",
 						aggregation: "count",
-						groupBy: ["service_name"],
+						groupBy: ["service.name"],
 					}),
 				],
 				formulas: [],

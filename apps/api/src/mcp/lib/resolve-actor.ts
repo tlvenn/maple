@@ -1,7 +1,7 @@
 import { Effect } from "effect"
-import type { TenantContext } from "@/lib/tenant-context"
-import { ErrorsService } from "@/services/ErrorsService"
-import { McpQueryError } from "../tools/types"
+import type { TenantContext } from "@/services/auth/tenant-context"
+import { ErrorsService } from "@/services/errors/ErrorsService"
+import { McpQueryError } from "@/mcp/tools/types"
 
 /**
  * Resolve the calling actor for issue-mutating MCP tools. Prefers the
@@ -16,7 +16,7 @@ export const resolveActorId = Effect.fn("resolveActorId")(function* (tenant: Ten
 			(error) =>
 				new McpQueryError({
 					message: error.message,
-					pipe: "resolve_actor",
+					pipeName: "resolve_actor",
 					cause: error,
 				}),
 		),

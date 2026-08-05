@@ -1,6 +1,8 @@
+import { formatLatency } from "@maple/ui/lib/format"
 import { memo } from "react"
 import { Handle, Position } from "@xyflow/react"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
+import { latencyToneClass } from "@maple/ui/lib/latency-tone"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@maple/ui/components/ui/tooltip"
 import {
 	AwsLambdaIcon,
@@ -12,7 +14,7 @@ import {
 	ServerIcon,
 } from "@/components/icons"
 import type { ServicePlatform } from "@/api/warehouse/service-map"
-import { getDbDescriptor, withAlpha } from "./service-map-db"
+import { resolveDbNodePresentation, resolvePlanetScaleDbPresentation, withAlpha } from "./service-map-db"
 import { getServiceMapNodeColor, type ServiceNodeData } from "./service-map-utils"
 
 function getPlatformIcon(platform: ServicePlatform | undefined): {
@@ -58,11 +60,6 @@ function formatRate(value: number): string {
 	if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
 	if (value >= 1) return value.toFixed(1)
 	return value.toFixed(2)
-}
-
-function formatLatency(ms: number): string {
-	if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
-	return `${ms.toFixed(1)}ms`
 }
 
 function getHealthDotClass(errorRate: number): string {
@@ -132,8 +129,24 @@ const Handles = () => (
  * infrastructure dependencies stand out from application services on the map.
  */
 function DatabaseNode({ data }: { data: ServiceNodeData }) {
-	const { label, throughput, errorRate, avgLatencyMs, p95LatencyMs, dbSystem, selected } = data
-	const { category, Icon, label: systemLabel, color, branded } = getDbDescriptor(dbSystem)
+	const {
+		throughput,
+		errorRate,
+		avgLatencyMs,
+		p95LatencyMs,
+		dbSystem,
+		dbNamespace,
+		selected,
+		planetscale,
+	} = data
+	// Named databases show their identity as the title; the system name takes over
+	// the small badge slot (the generic node keeps the coarse category). Databases
+	// behind Cloudflare Hyperdrive collapse to a single "Hyperdrive"-branded node;
+	// databases matched against the org's PlanetScale inventory are branded as
+	// PlanetScale (and show its live health chips below the trace metrics).
+	const { title, badge, Icon, systemLabel, color, branded } = planetscale
+		? resolvePlanetScaleDbPresentation(dbSystem, dbNamespace, planetscale.kind)
+		: resolveDbNodePresentation(dbSystem, dbNamespace)
 
 	return (
 		<>
@@ -167,12 +180,12 @@ function DatabaseNode({ data }: { data: ServiceNodeData }) {
 								<p>{systemLabel}</p>
 							</TooltipContent>
 						</Tooltip>
-						<span className="truncate text-xs font-medium text-foreground">{label}</span>
+						<span className="truncate text-xs font-medium text-foreground">{title}</span>
 						<span
 							className="ml-auto shrink-0 text-[9px] font-semibold uppercase tracking-wide"
 							style={{ color }}
 						>
-							{category}
+							{badge}
 						</span>
 					</div>
 
@@ -184,9 +197,50 @@ function DatabaseNode({ data }: { data: ServiceNodeData }) {
 							value={`${(errorRate * 100).toFixed(1)}%`}
 							valueClassName={errorRateClass(errorRate)}
 						/>
-						<MetricCell label="avg" value={formatLatency(avgLatencyMs)} />
-						<MetricCell label="p95" value={formatLatency(p95LatencyMs ?? 0)} />
+						<MetricCell
+							label="avg"
+							value={formatLatency(avgLatencyMs)}
+							valueClassName={latencyToneClass(avgLatencyMs, "avg")}
+						/>
+						<MetricCell
+							label="p95"
+							value={formatLatency(p95LatencyMs ?? 0)}
+							valueClassName={latencyToneClass(p95LatencyMs ?? 0, "p95")}
+						/>
 					</div>
+
+					{/* PlanetScale live health (scraped branch metrics, window rollup) */}
+					{planetscale?.stats ? (
+						<div className="flex gap-4">
+							<MetricCell label="conns" value={formatRate(planetscale.stats.connectionsAvg)} />
+							<MetricCell
+								label="cpu"
+								value={`${planetscale.stats.cpuMaxPercent.toFixed(0)}%`}
+								valueClassName={
+									planetscale.stats.cpuMaxPercent > 80
+										? "text-severity-error"
+										: planetscale.stats.cpuMaxPercent > 60
+											? "text-severity-warn"
+											: undefined
+								}
+							/>
+							<MetricCell
+								label="lag"
+								value={
+									planetscale.stats.replicaLagMaxSeconds >= 1
+										? `${planetscale.stats.replicaLagMaxSeconds.toFixed(1)}s`
+										: `${Math.round(planetscale.stats.replicaLagMaxSeconds * 1000)}ms`
+								}
+								valueClassName={
+									planetscale.stats.replicaLagMaxSeconds > 10
+										? "text-severity-error"
+										: planetscale.stats.replicaLagMaxSeconds > 1
+											? "text-severity-warn"
+											: undefined
+								}
+							/>
+						</div>
+					) : null}
 				</div>
 			</div>
 		</>
@@ -202,7 +256,6 @@ function ServiceNode({ data }: { data: ServiceNodeData }) {
 		samplingWeight,
 		errorRate,
 		avgLatencyMs,
-		services,
 		selected,
 		infra,
 		platform,
@@ -212,7 +265,6 @@ function ServiceNode({ data }: { data: ServiceNodeData }) {
 	const runtimeInfo = formatRuntimeLabel(runtime)
 	const accentColor = getServiceMapNodeColor(
 		{ label, kind: "service", errorRate, platform },
-		services,
 		colorMode ?? "service",
 	)
 
@@ -283,7 +335,11 @@ function ServiceNode({ data }: { data: ServiceNodeData }) {
 							valueClassName={errorRateClass(errorRate)}
 						/>
 
-						<MetricCell label="avg" value={formatLatency(avgLatencyMs)} />
+						<MetricCell
+							label="avg"
+							value={formatLatency(avgLatencyMs)}
+							valueClassName={latencyToneClass(avgLatencyMs, "avg")}
+						/>
 
 						{/* Pods badge — empty placeholder when no infra so widths stay stable */}
 						<div className="ml-auto flex flex-col items-end gap-px">
@@ -321,10 +377,77 @@ function ServiceNode({ data }: { data: ServiceNodeData }) {
 	)
 }
 
+/**
+ * A collapsed namespace, folded into a single node. Tinted with the same hue as
+ * the namespace's dotted box so it reads as "that box, minimized". Clicking it
+ * expands the namespace again (wired in the view's node-click handler).
+ */
+function NamespaceAggregateNode({ data }: { data: ServiceNodeData }) {
+	const { label, throughput, errorRate, avgLatencyMs, selected, nsMemberCount, colorMode } = data
+	const color = getServiceMapNodeColor(data, colorMode ?? "service")
+
+	return (
+		<>
+			<Handles />
+			<div
+				className="flex w-[220px] cursor-pointer overflow-hidden rounded-r-lg border border-dashed bg-card transition-[border-color,box-shadow] duration-150"
+				style={{
+					backgroundImage: `linear-gradient(${withAlpha(color, 0.1)}, ${withAlpha(color, 0.1)})`,
+					borderColor: selected ? color : withAlpha(color, 0.55),
+					boxShadow: selected ? `0 0 0 3px ${withAlpha(color, 0.16)}` : undefined,
+				}}
+				title="Collapsed namespace — click to expand"
+			>
+				<div className="w-[3px] shrink-0" style={{ backgroundColor: color }} />
+
+				<div className="flex min-w-0 flex-1 flex-col gap-2 px-3 py-2.5">
+					<div className="flex items-center gap-1.5">
+						<div
+							className={cn("h-1.5 w-1.5 shrink-0 rounded-full", getHealthDotClass(errorRate))}
+						/>
+						<span className="truncate text-xs font-semibold uppercase tracking-wider text-foreground">
+							{label}
+						</span>
+						<span
+							className="ml-auto shrink-0 text-[9px] font-semibold uppercase tracking-wide"
+							style={{ color }}
+						>
+							{nsMemberCount ?? 0} services
+						</span>
+					</div>
+
+					<div className="flex gap-4">
+						<MetricCell label="req/s" value={formatRate(throughput)} />
+						<MetricCell
+							label="err%"
+							value={`${(errorRate * 100).toFixed(1)}%`}
+							valueClassName={errorRateClass(errorRate)}
+						/>
+						<MetricCell
+							label="avg"
+							value={formatLatency(avgLatencyMs)}
+							valueClassName={latencyToneClass(avgLatencyMs, "avg")}
+						/>
+					</div>
+				</div>
+			</div>
+		</>
+	)
+}
+
 interface ServiceMapNodeProps {
 	data: ServiceNodeData
 }
 
 export const ServiceMapNode = memo(function ServiceMapNode({ data }: ServiceMapNodeProps) {
-	return data.kind === "database" ? <DatabaseNode data={data} /> : <ServiceNode data={data} />
+	const card =
+		data.kind === "database" ? (
+			<DatabaseNode data={data} />
+		) : data.kind === "namespaceAggregate" ? (
+			<NamespaceAggregateNode data={data} />
+		) : (
+			<ServiceNode data={data} />
+		)
+	// Focus dim-mode: fade non-neighbors without moving them.
+	return <div className={cn("transition-opacity duration-200", data.dimmed && "opacity-25")}>{card}</div>
 })

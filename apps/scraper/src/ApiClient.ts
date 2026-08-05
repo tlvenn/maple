@@ -1,16 +1,25 @@
-import { Context, Effect, Layer, Redacted, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Redacted, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { InternalScrapeTargetList, type InternalScrapeTarget, type ScrapeResultReport } from "@maple/domain/http"
+import {
+	InternalScrapeTargetList,
+	type InternalScrapeTarget,
+	type ScrapeResultReport,
+} from "@maple/domain/http"
 import { ScraperEnv } from "./Env"
 
-export class ApiRequestError extends Schema.TaggedErrorClass<ApiRequestError>()("@maple/scraper/ApiRequestError", {
-	message: Schema.String,
-	status: Schema.NullOr(Schema.Number),
-}) {}
+export class ApiRequestError extends Schema.TaggedErrorClass<ApiRequestError>()(
+	"@maple/scraper/ApiRequestError",
+	{
+		message: Schema.String,
+		status: Schema.NullOr(Schema.Number),
+	},
+) {}
 
 export interface ScrapeProxyResponse {
 	readonly status: number
 	readonly body: string
+	/** Upstream `Retry-After` in seconds (delta-seconds form), or `null` when absent. */
+	readonly retryAfterSeconds: number | null
 }
 
 export interface ApiClientShape {
@@ -26,7 +35,9 @@ export interface ApiClientShape {
 		subTargetKey?: string | null,
 	) => Effect.Effect<ScrapeProxyResponse, ApiRequestError>
 	/** Report scrape outcomes to `/api/internal/scrape-results`. */
-	readonly reportResults: (results: ReadonlyArray<ScrapeResultReport>) => Effect.Effect<void, ApiRequestError>
+	readonly reportResults: (
+		results: ReadonlyArray<ScrapeResultReport>,
+	) => Effect.Effect<void, ApiRequestError>
 }
 
 const decodeTargets = Schema.decodeUnknownEffect(InternalScrapeTargetList)
@@ -40,6 +51,11 @@ export class ApiClient extends Context.Service<ApiClient, ApiClientShape>()("@ma
 			authorization: `Bearer ${Redacted.value(env.SD_INTERNAL_TOKEN)}`,
 		}
 
+		// Bound every API round-trip. `FetchHttpClient` sets no timeout, so a
+		// stalled Worker (e.g. an oversized scrape-results POST) would otherwise
+		// hang for minutes; cap it so a flush fails fast and re-buffers instead.
+		const REQUEST_TIMEOUT = Duration.seconds(30)
+
 		const transportError = (error: { readonly message: string }) =>
 			new ApiRequestError({ message: `Maple API unreachable: ${error.message}`, status: null })
 
@@ -47,7 +63,13 @@ export class ApiClient extends Context.Service<ApiClient, ApiClientShape>()("@ma
 			const request = HttpClientRequest.get(`${env.MAPLE_API_URL}/api/internal/scrape-targets`, {
 				headers: authHeaders,
 			})
-			const response = yield* client.execute(request).pipe(Effect.mapError(transportError))
+			const response = yield* client
+				.execute(request)
+				.pipe(
+					Effect.annotateSpans("peer.service", "maple-api"),
+					Effect.timeout(REQUEST_TIMEOUT),
+					Effect.mapError(transportError),
+				)
 			const text = yield* response.text.pipe(Effect.mapError(transportError))
 			if (response.status < 200 || response.status >= 300) {
 				return yield* Effect.fail(
@@ -59,7 +81,8 @@ export class ApiClient extends Context.Service<ApiClient, ApiClientShape>()("@ma
 			}
 			return yield* Effect.try({
 				try: () => JSON.parse(text) as unknown,
-				catch: () => new ApiRequestError({ message: "scrape-targets returned invalid JSON", status: null }),
+				catch: () =>
+					new ApiRequestError({ message: "scrape-targets returned invalid JSON", status: null }),
 			}).pipe(
 				Effect.flatMap((json) =>
 					decodeTargets(json).pipe(
@@ -84,9 +107,20 @@ export class ApiClient extends Context.Service<ApiClient, ApiClientShape>()("@ma
 				`${env.MAPLE_API_URL}/api/internal/prometheus-scrape?targetId=${encodeURIComponent(targetId)}${sub}`,
 				{ headers: authHeaders },
 			)
-			const response = yield* client.execute(request).pipe(Effect.mapError(transportError))
+			const response = yield* client
+				.execute(request)
+				.pipe(
+					Effect.annotateSpans("peer.service", "maple-api"),
+					Effect.timeout(REQUEST_TIMEOUT),
+					Effect.mapError(transportError),
+				)
 			const body = yield* response.text.pipe(Effect.mapError(transportError))
-			return { status: response.status, body } satisfies ScrapeProxyResponse
+			const retryAfterRaw = response.headers["retry-after"]
+			const retryAfterSeconds =
+				retryAfterRaw !== undefined && Number.isFinite(Number(retryAfterRaw))
+					? Number(retryAfterRaw)
+					: null
+			return { status: response.status, body, retryAfterSeconds } satisfies ScrapeProxyResponse
 		})
 
 		const reportResults = Effect.fn("ApiClient.reportResults")(function* (
@@ -96,7 +130,13 @@ export class ApiClient extends Context.Service<ApiClient, ApiClientShape>()("@ma
 			const request = HttpClientRequest.post(`${env.MAPLE_API_URL}/api/internal/scrape-results`, {
 				headers: authHeaders,
 			}).pipe(HttpClientRequest.bodyText(JSON.stringify(results), "application/json"))
-			const response = yield* client.execute(request).pipe(Effect.mapError(transportError))
+			const response = yield* client
+				.execute(request)
+				.pipe(
+					Effect.annotateSpans("peer.service", "maple-api"),
+					Effect.timeout(REQUEST_TIMEOUT),
+					Effect.mapError(transportError),
+				)
 			if (response.status < 200 || response.status >= 300) {
 				return yield* Effect.fail(
 					new ApiRequestError({

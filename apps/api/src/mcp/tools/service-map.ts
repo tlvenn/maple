@@ -1,12 +1,12 @@
 import { optionalStringParam, McpQueryError, type McpToolRegistrar } from "./types"
-import { resolveTenant } from "../lib/query-warehouse"
-import { resolveTimeRange } from "../lib/time"
-import { formatNumber, formatDurationFromMs, formatPercent, formatTable } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { resolveTimeRange } from "@/mcp/lib/time"
+import { formatNumber, formatDurationFromMs, formatPercent, formatTable } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Array as Arr, Effect, HashSet, Order, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { serviceMap } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
+import { makeWarehouseExecutorFromTenant } from "@/services/warehouse/WarehouseQueryService"
 
 export function registerServiceMapTool(server: McpToolRegistrar) {
 	server.tool(
@@ -34,7 +34,8 @@ export function registerServiceMapTool(server: McpToolRegistrar) {
 			}).pipe(
 				Effect.provide(makeWarehouseExecutorFromTenant(tenant)),
 				Effect.mapError(
-					(e) => new McpQueryError({ message: e.message, pipe: "service_dependencies", cause: e }),
+					(e) =>
+						new McpQueryError({ message: e.message, pipeName: "service_dependencies", cause: e }),
 				),
 			)
 
@@ -90,7 +91,6 @@ export function registerServiceMapTool(server: McpToolRegistrar) {
 
 			lines.push(formatTable(headers, rows))
 
-			const nextSteps: string[] = []
 			const errorEdges = Arr.sort(
 				Arr.filter(
 					Arr.map(edges, (e) => ({
@@ -102,14 +102,15 @@ export function registerServiceMapTool(server: McpToolRegistrar) {
 				Order.mapInput(Order.flip(Order.Number), (e: { errorRate: number }) => e.errorRate),
 			)
 
-			for (const e of Arr.take(errorEdges, 2)) {
-				nextSteps.push(
+			const errorEdgeSteps = Arr.map(
+				Arr.take(errorEdges, 2),
+				(e) =>
 					`\`diagnose_service service_name="${e.service}"\` — investigate high error rate dependency`,
-				)
-			}
-			if (nextSteps.length === 0) {
-				nextSteps.push("`list_services` — see all services with health metrics")
-			}
+			)
+			const nextSteps =
+				errorEdgeSteps.length > 0
+					? errorEdgeSteps
+					: ["`list_services` — see all services with health metrics"]
 			lines.push(formatNextSteps(nextSteps))
 
 			return {

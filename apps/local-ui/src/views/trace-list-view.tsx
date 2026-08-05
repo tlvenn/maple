@@ -3,34 +3,34 @@ import { NetworkNodesIcon } from "@maple/ui/components/icons"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Button } from "@maple/ui/components/ui/button"
 import { Spinner } from "@maple/ui/components/ui/spinner"
-import { Separator } from "@maple/ui/components/ui/separator"
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@maple/ui/components/ui/table"
-import { formatDuration } from "@maple/ui/format"
-import { cn } from "@maple/ui/utils"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
+import { formatDuration } from "@maple/ui/lib/format"
+import { cn } from "@maple/ui/lib/utils"
 import { useLocalTraces, type TraceFilters } from "../hooks/use-local-traces"
 import { useLocalTraceFacets } from "../hooks/use-local-trace-facets"
 import { useQueryParams } from "../lib/router"
 import { DEFAULT_RANGE } from "../lib/time"
-import { DurationRangeFilter } from "../components/duration-range-filter"
+import { DurationRangeFilter } from "@maple/ui/components/filters/duration-range-filter"
 import {
 	FilterSection,
 	SearchableFilterSection,
 	SingleCheckboxFilter,
-} from "../components/filter-section"
+} from "@maple/ui/components/filters/filter-section"
 import {
 	FilterSidebarBody,
 	FilterSidebarFrame,
 	FilterSidebarHeader,
-} from "../components/filter-sidebar"
+} from "@maple/ui/components/filters/filter-sidebar"
 import { PageShell } from "../components/page-shell"
-import { Toolbar, ToolbarSearch, ToolbarStat, TimeRangeSelect } from "../components/toolbar"
+import { parseAttributes } from "@maple/ui/lib/span-tree"
+import {
+	Toolbar,
+	ToolbarSearch,
+	ToolbarStat,
+	ToolbarStats,
+	TimeRangeSelect,
+	RefreshButton,
+} from "../components/toolbar"
 import { EmptyState, ErrorState, ListSkeleton } from "../components/view-states"
 
 interface TraceListViewProps {
@@ -83,7 +83,7 @@ export function TraceListView({ onSelectTrace }: TraceListViewProps) {
 	const facetSelect = (key: string) => (vals: string[]) => setParams({ [key]: vals.at(-1) ?? null })
 
 	const sidebar = (
-		<FilterSidebarFrame waiting={facets.isFetching}>
+		<FilterSidebarFrame className="w-56 shrink-0 px-4" waiting={facets.isFetching}>
 			<FilterSidebarHeader
 				canClear={hasActiveFilters}
 				onClear={() =>
@@ -101,20 +101,12 @@ export function TraceListView({ onSelectTrace }: TraceListViewProps) {
 				}
 			/>
 			<FilterSidebarBody>
-				<DurationRangeFilter
-					minValue={filters.minDurationMs}
-					maxValue={filters.maxDurationMs}
-					onMinChange={(v) => setParams({ minDur: v != null ? String(v) : null })}
-					onMaxChange={(v) => setParams({ maxDur: v != null ? String(v) : null })}
-					durationStats={facets.data?.durationStats}
-				/>
 				<SingleCheckboxFilter
 					title="Errors only"
 					checked={filters.errorsOnly === true}
 					onChange={(checked) => setParams({ errors: checked ? "1" : null })}
 					count={facets.data?.errorCount}
 				/>
-				<Separator className="my-2" />
 				<FilterSection
 					title="Environment"
 					options={facets.data?.deploymentEnvs ?? []}
@@ -139,6 +131,18 @@ export function TraceListView({ onSelectTrace }: TraceListViewProps) {
 					selected={filters.span ? [filters.span] : []}
 					onChange={facetSelect("span")}
 				/>
+				<DurationRangeFilter
+					minValue={filters.minDurationMs}
+					maxValue={filters.maxDurationMs}
+					onRangeChange={(min, max) =>
+						setParams({
+							minDur: min != null ? String(Math.round(min)) : null,
+							maxDur: max != null ? String(Math.round(max)) : null,
+						})
+					}
+					durationStats={facets.data?.durationStats}
+					debounceMs={300}
+				/>
 				<FilterSection
 					title="HTTP Method"
 					options={facets.data?.httpMethods ?? []}
@@ -156,21 +160,18 @@ export function TraceListView({ onSelectTrace }: TraceListViewProps) {
 	)
 
 	const toolbar = (
-		<Toolbar
-			search={
-				<ToolbarSearch
-					query={search ?? ""}
-					onSearch={(value) => setParams({ q: value ?? null })}
-					placeholder="Filter by span name…"
-				/>
-			}
-			stats={
-				<>
-					<ToolbarStat value={rows.length} label={hasNextPage ? "traces+" : "traces"} />
-					<TimeRangeSelect value={range} onChange={(next) => setParams({ range: next })} />
-				</>
-			}
-		/>
+		<Toolbar>
+			<ToolbarSearch
+				query={search ?? ""}
+				onSearch={(value) => setParams({ q: value ?? null })}
+				placeholder="Filter by span name…"
+			/>
+			<ToolbarStats>
+				<ToolbarStat value={rows.length} label={hasNextPage ? "traces+" : "traces"} />
+				<RefreshButton />
+				<TimeRangeSelect value={range} onChange={(next) => setParams({ range: next })} />
+			</ToolbarStats>
+		</Toolbar>
 	)
 
 	return (
@@ -216,11 +217,7 @@ export function TraceListView({ onSelectTrace }: TraceListViewProps) {
 											<HttpSpanLabel
 												spanName={row.rootSpanName}
 												spanKind={row.rootSpanKind}
-												spanAttributes={{
-													"http.method": row.rootHttpMethod,
-													"http.route": row.rootHttpRoute,
-													"http.status_code": row.rootHttpStatusCode,
-												}}
+												spanAttributes={parseAttributes(row.rootSpanAttributes)}
 												className="min-w-0"
 											/>
 										</div>
@@ -228,7 +225,11 @@ export function TraceListView({ onSelectTrace }: TraceListViewProps) {
 									<TableCell className="text-muted-foreground">
 										<div className="flex flex-wrap gap-1">
 											{row.services.slice(0, 3).map((svc) => (
-												<Badge key={svc} variant="secondary" className="font-mono text-[10px]">
+												<Badge
+													key={svc}
+													variant="secondary"
+													className="font-mono text-[10px]"
+												>
 													{svc}
 												</Badge>
 											))}

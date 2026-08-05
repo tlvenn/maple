@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import type { QuerySpec } from "@maple/query-engine"
 import { __testables } from "@/api/warehouse/query-builder-timeseries"
@@ -38,7 +38,7 @@ describe("query-builder timeseries strategy", () => {
 			return
 		}
 
-		expect(resolved.bucketSeconds).toBe(3600)
+		expect(resolved.bucketSeconds).toBe(900)
 	})
 
 	it("does not mutate explicit bucket seconds", () => {
@@ -108,8 +108,8 @@ describe("query-builder timeseries strategy", () => {
 			return
 		}
 
-		expect(primary.bucketSeconds).toBe(300)
-		expect(fallback.bucketSeconds).toBe(3600)
+		expect(primary.bucketSeconds).toBe(60)
+		expect(fallback.bucketSeconds).toBe(900)
 	})
 
 	it("widens explicit bucket on fallback windows to stay within point budget", () => {
@@ -138,7 +138,7 @@ describe("query-builder timeseries strategy", () => {
 		}
 
 		expect(primary.bucketSeconds).toBe(60)
-		expect(fallback.bucketSeconds).toBe(3600)
+		expect(fallback.bucketSeconds).toBe(900)
 	})
 
 	it.effect("continues fallback execution after an error and recomputes window buckets", () =>
@@ -188,11 +188,11 @@ describe("query-builder timeseries strategy", () => {
 					}),
 			)
 
-			expect(seenBucketSeconds).toEqual([300, 3600, 14400])
-			expect(result.fallbackUsed).toBe(true)
-			expect(result.attempts).toHaveLength(3)
-			expect(result.attempts[1].error).toContain("too expensive")
-			expect(result.points).toEqual([
+			assert.deepStrictEqual(seenBucketSeconds, [60, 900, 3600])
+			assert.isTrue(result.fallbackUsed)
+			assert.lengthOf(result.attempts, 3)
+			assert.include(result.attempts[1]?.error ?? "", "too expensive")
+			assert.deepStrictEqual(result.points, [
 				{
 					bucket: "2026-01-01T00:00:00.000Z",
 					series: { total: 5 },
@@ -201,10 +201,10 @@ describe("query-builder timeseries strategy", () => {
 		}),
 	)
 
-	it("uses the shared coarse auto bucket ladder", () => {
-		expect(__testables.computeAutoBucketSeconds("2026-01-01 00:00:00", "2026-01-01 00:30:00")).toBe(300)
-		expect(__testables.computeAutoBucketSeconds("2026-01-01 00:00:00", "2026-01-01 06:00:00")).toBe(900)
-		expect(__testables.computeAutoBucketSeconds("2026-01-01 00:00:00", "2026-01-08 00:00:00")).toBe(14400)
+	it("uses the shared auto bucket ladder", () => {
+		expect(__testables.computeAutoBucketSeconds("2026-01-01 00:00:00", "2026-01-01 00:30:00")).toBe(60)
+		expect(__testables.computeAutoBucketSeconds("2026-01-01 00:00:00", "2026-01-01 06:00:00")).toBe(300)
+		expect(__testables.computeAutoBucketSeconds("2026-01-01 00:00:00", "2026-01-08 00:00:00")).toBe(3600)
 	})
 
 	it("counts only query results with real series data", () => {
@@ -357,6 +357,46 @@ describe("query-builder timeseries strategy", () => {
 		)
 
 		expect(rows[0]["Errors: checkout (%Δ)"]).toBe(100)
+	})
+
+	it("prev=0 & cur=0 is 0% (genuinely unchanged); prev=0 & cur>0 leaves a gap, not a fake 0%", () => {
+		const rows: Array<Record<string, string | number>> = [
+			{
+				bucket: "2026-01-01T00:00:00.000Z",
+				"Errors: checkout": 0,
+				"Errors: checkout (prev)": 0,
+			},
+			{
+				bucket: "2026-01-01T01:00:00.000Z",
+				"Errors: checkout": 5,
+				"Errors: checkout (prev)": 0,
+			},
+		]
+
+		__testables.appendPercentChangeSeries(
+			rows,
+			new Map([["q-1::checkout", "Errors: checkout"]]),
+			new Map([["q-1::checkout", "Errors: checkout (prev)"]]),
+		)
+
+		expect(rows[0]["Errors: checkout (%Δ)"]).toBe(0)
+		expect(rows[1]).not.toHaveProperty("Errors: checkout (%Δ)")
+	})
+
+	// A ratio widget hides its numerator/denominator queries and plots only the formula. Merging
+	// the hidden operands in anyway put raw counts on the same axis as a 0–1 ratio — and, under
+	// the widget's own `percent` unit, drew them as "416849856400.0%".
+	it("collects hidden query and formula ids so they are dropped before merging", () => {
+		const hidden = __testables.collectHiddenResultIds({
+			queries: [{ id: "num", hidden: true }, { id: "den", hidden: true }, { id: "plain" }],
+			formulas: [{ id: "ratio" }, { id: "scratch", hidden: true }],
+		})
+
+		expect([...hidden].sort()).toEqual(["den", "num", "scratch"])
+	})
+
+	it("treats a widget with no formulas and nothing hidden as fully plotted", () => {
+		expect(__testables.collectHiddenResultIds({ queries: [{ id: "a" }, { id: "b" }] }).size).toBe(0)
 	})
 
 	it("does not rescale error_rate series — the engine's 0–1 ratio is canonical", () => {

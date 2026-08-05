@@ -1,22 +1,27 @@
 import { useSearch } from "@tanstack/react-router"
 import { useMemo } from "react"
 
-import type { AlertDestinationDocument, AlertRuleDocument, DashboardDocument } from "@maple/domain/http"
+import type { AlertDestinationDocument, AlertRuleDocument } from "@maple/domain/http"
+import type { Dashboard } from "@/components/dashboard-builder/types"
+
+import { Skeleton } from "@maple/ui/components/ui/skeleton"
+import { cn } from "@maple/ui/lib/utils"
 
 import { AlertCreateFormSurface } from "@/components/alerts/alert-create-form-surface"
+import { RULE_FORM_MAX_WIDTH } from "@/components/alerts/rule-form-layout"
+import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { useAutocompleteValuesContext } from "@/hooks/use-autocomplete-values"
 import { defaultRuleForm, ruleToFormState, type RuleFormState } from "@/lib/alerts/form-utils"
-import {
-	decodeAlertChartFromSearchParam,
-	type AlertChartContext,
-} from "@/lib/alerts/widget-chart-param"
+import { ALERT_TEMPLATES, applyTemplate } from "@/lib/alerts/templates"
+import { decodeAlertChartFromSearchParam, type AlertChartContext } from "@/lib/alerts/widget-chart-param"
 import {
 	createWidgetAlertPrefill,
 	resolveWidgetAlertPrefill,
 	type WidgetAlertPrefillNotice,
 } from "@/lib/alerts/widget-prefill"
-import { Atom, Result, useAtomValue } from "@/lib/effect-atom"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { useAlertDestinationsList, useAlertRulesList } from "@/hooks/use-alerts-list"
+import { Result } from "@/lib/effect-atom"
+import { useDashboardsRead } from "@/hooks/use-dashboard-store"
 
 type AlertCreateSearchValue = {
 	serviceName?: string
@@ -24,6 +29,7 @@ type AlertCreateSearchValue = {
 	dashboardId?: string
 	widgetId?: string
 	chart?: string
+	template?: string
 }
 
 type InitialRuleDraft = {
@@ -32,10 +38,14 @@ type InitialRuleDraft = {
 	prefillNotices: WidgetAlertPrefillNotice[]
 	editingRule: AlertRuleDocument | null
 	showTemplatesInitially: boolean
+	/**
+	 * The draft is a placeholder while the real rule (or its dashboard source) is
+	 * still loading. The form must not be shown yet — `form` is a blank default
+	 * that would read as "Create alert rule" until the fetch resolves and the
+	 * `key` change remounts it with the actual values.
+	 */
+	loading?: boolean
 }
-
-/** Stand-in subscription when the dashboards lookup fallback isn't needed. */
-const idleDashboardsAtom = Atom.make(Result.initial())
 
 export function AlertCreatePageContent() {
 	const search = useSearch({ from: "/alerts/create" }) as AlertCreateSearchValue
@@ -51,21 +61,20 @@ export function AlertCreatePageContent() {
 	const needsDashboards =
 		!search.ruleId && chartContext == null && Boolean(search.dashboardId || search.widgetId)
 
-	const destinationsQueryAtom = MapleApiAtomClient.query("alerts", "listDestinations", {
-		reactivityKeys: ["alertDestinations"],
-	})
-	const rulesQueryAtom = MapleApiAtomClient.query("alerts", "listRules", {
-		reactivityKeys: ["alertRules"],
-	})
-	const dashboardsQueryAtom = MapleApiAtomClient.query("dashboards", "list", {
-		reactivityKeys: ["dashboards"],
-	})
-	const destinationsResult = useAtomValue(destinationsQueryAtom)
-	const rulesResult = useAtomValue(rulesQueryAtom)
-	const dashboardsResult = useAtomValue(needsDashboards ? dashboardsQueryAtom : idleDashboardsAtom)
+	const { result: destinationsResult } = useAlertDestinationsList()
+	const { result: rulesResult } = useAlertRulesList()
+	const { dashboards, isLoading: dashboardsLoading, isError: dashboardsError } = useDashboardsRead()
+	const dashboardsResult = useMemo(() => {
+		if (!needsDashboards || dashboardsLoading) return Result.initial(dashboardsLoading)
+		if (dashboardsError) return Result.fail(new Error("Dashboard sync failed"))
+		return Result.success({ dashboards })
+	}, [needsDashboards, dashboardsLoading, dashboardsError, dashboards])
 
 	const autocompleteValues = useAutocompleteValuesContext()
 	const serviceNameOptions = autocompleteValues.traces.services ?? []
+	// Sourced from the traces `deploymentEnv` facet the provider already fetches —
+	// the scope picker costs no extra round-trip.
+	const environmentOptions = autocompleteValues.traces.environments ?? []
 
 	const destinations = Result.builder(destinationsResult)
 		.onSuccess((response) => [...response.destinations] as AlertDestinationDocument[])
@@ -82,6 +91,12 @@ export function AlertCreatePageContent() {
 		[search, chartContext, rulesResult, dashboardsResult],
 	)
 
+	// Showing the blank default form here would paint a "Create alert rule" page
+	// for a second and then remount into the populated editor.
+	if (initialDraft.loading) {
+		return <AlertRuleFormSkeleton editing={search.ruleId != null} />
+	}
+
 	return (
 		<AlertCreateFormSurface
 			key={initialDraft.key}
@@ -91,12 +106,49 @@ export function AlertCreatePageContent() {
 			showTemplatesInitially={initialDraft.showTemplatesInitially}
 			destinations={destinations}
 			serviceNameOptions={serviceNameOptions}
+			environmentOptions={environmentOptions}
 			autocompleteValues={autocompleteValues}
 		/>
 	)
 }
 
-function deriveInitialRuleDraft({
+/**
+ * Placeholder shown while an existing rule (or a dashboard widget's prefill
+ * source) loads. Mirrors the real surface's chrome — same breadcrumb, same
+ * title, same two-column grid — so resolving the fetch swaps content into a
+ * page that is already the right shape.
+ */
+function AlertRuleFormSkeleton({ editing }: { editing: boolean }) {
+	return (
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[{ label: "Alerts", href: "/alerts" }, { label: editing ? "Edit Rule" : "New Rule" }]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header title={editing ? "Edit alert rule" : "Create alert rule"} />
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>
+						<div className={cn("mx-auto w-full space-y-4", RULE_FORM_MAX_WIDTH)}>
+							<Skeleton className="h-64 w-full" />
+							<div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
+								<Skeleton className="h-96 w-full" />
+								<div className="space-y-4">
+									<Skeleton className="h-56 w-full" />
+									<Skeleton className="h-40 w-full" />
+									<Skeleton className="h-48 w-full" />
+								</div>
+							</div>
+						</div>
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
+	)
+}
+
+export function deriveInitialRuleDraft({
 	search,
 	chartContext,
 	rulesResult,
@@ -107,7 +159,7 @@ function deriveInitialRuleDraft({
 	rulesResult: Result.Result<{ rules: readonly AlertRuleDocument[] }, unknown>
 	dashboardsResult: Result.Result<
 		{
-			dashboards: readonly DashboardDocument[]
+			dashboards: readonly Dashboard[]
 		},
 		unknown
 	>
@@ -145,6 +197,7 @@ function deriveInitialRuleDraft({
 			prefillNotices: [],
 			editingRule: null,
 			showTemplatesInitially: false,
+			loading: true,
 		}
 	}
 
@@ -213,6 +266,23 @@ function deriveInitialRuleDraft({
 			prefillNotices: [],
 			editingRule: null,
 			showTemplatesInitially: false,
+			loading: true,
+		}
+	}
+
+	// Starter-template deep link from the overview empty state — pre-apply the
+	// preset and skip the first-touch overlay. An unknown id falls through to the
+	// blank draft below (overlay still opens).
+	if (search.template) {
+		const template = ALERT_TEMPLATES.find((t) => t.id === search.template)
+		if (template) {
+			return {
+				key: `new:template:${template.id}`,
+				form: applyTemplate(template, base),
+				prefillNotices: [],
+				editingRule: null,
+				showTemplatesInitially: false,
+			}
 		}
 	}
 

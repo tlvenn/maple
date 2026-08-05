@@ -26,6 +26,28 @@ import { assertCauseFail } from "./utils/assert.ts"
 
 class ATag extends Context.Service<ATag, "A">()("ATag") {}
 
+const assertExitDefect = <A, E>(exit: Exit.Exit<A, E>, defect: unknown) => {
+  assert.isTrue(Exit.hasDies(exit))
+  const result = Exit.findDefect(exit)
+  assert.isTrue(Result.isSuccess(result))
+  if (Result.isSuccess(result)) {
+    assert.strictEqual(result.success, defect)
+  }
+}
+
+const assertUnknownError = <A>(exit: Exit.Exit<A, Cause.UnknownError>, cause: unknown, message: string) => {
+  assert.isTrue(Exit.isFailure(exit))
+  if (Exit.isFailure(exit)) {
+    const result = Cause.findError(exit.cause)
+    assert.isTrue(Result.isSuccess(result))
+    if (Result.isSuccess(result)) {
+      assert.isTrue(Cause.isUnknownError(result.success))
+      assert.strictEqual((result.success as Error).cause, cause)
+      assert.strictEqual(result.success.message, message)
+    }
+  }
+}
+
 describe("Effect", () => {
   it("isEffect", () => {
     assert.isTrue(Effect.isEffect(Effect.succeed(0)))
@@ -42,7 +64,24 @@ describe("Effect", () => {
   })
 
   describe("tracing", () => {
-    it.effect("failCause captures stack frame", () =>
+    it("terminal root failure captures stack frame", () => {
+      const frame: References.StackFrame = {
+        name: "root frame",
+        stack: () => undefined,
+        parent: undefined
+      }
+      const failure = Exit.fail("boom")
+      const exit = Effect.runForkWith(Context.make(References.CurrentStackFrame, frame))(failure).pollUnsafe()
+
+      assert.isDefined(exit)
+      assert.isTrue(Exit.isFailure(exit!))
+      if (Exit.isFailure(exit!)) {
+        const trace = Context.getOrUndefined(Cause.annotations(exit.cause), Cause.StackTrace)
+        assert.strictEqual(trace, frame)
+      }
+    })
+
+    it.effect("caught sandboxed failure captures stack frame", () =>
       Effect.gen(function*() {
         const cause = yield* Effect.failCause(Cause.die(new Error("boom"))).pipe(
           Effect.withSpan("test span"),
@@ -53,6 +92,17 @@ describe("Effect", () => {
         const trace = Context.getUnsafe(annotations, Cause.StackTrace)
         assert.strictEqual(trace.name, "test span")
       }))
+
+    it("failure without a current frame has no stack annotation and reuses the original exit", () => {
+      const failure = Exit.fail("boom")
+      const exit = Effect.runFork(failure).pollUnsafe()
+
+      assert.strictEqual(exit, failure)
+      assert.isTrue(Exit.isFailure(exit!))
+      if (Exit.isFailure(exit!)) {
+        assert.isUndefined(Context.getOrUndefined(Cause.annotations(exit.cause), Cause.StackTrace))
+      }
+    })
   })
 
   it("callback can branch over sync/async", async () => {
@@ -153,6 +203,43 @@ describe("Effect", () => {
         Effect.tap((error) => Effect.sync(() => assert.ok(error instanceof Cause.NoSuchElementError))),
         Effect.runPromise
       ))
+
+    it.effect("from a none with a custom error", () =>
+      Effect.gen(function*() {
+        const error = new Error("Missing value")
+        const cause = yield* Effect.fromOption(Option.none(), () => error).pipe(Effect.flip)
+        assert.strictEqual(cause, error)
+      }))
+
+    it.effect("from a none with a custom error data-last", () =>
+      Effect.gen(function*() {
+        const error = new Error("Missing value")
+        const cause = yield* Option.none().pipe(
+          Effect.fromOption(() => error),
+          Effect.flip
+        )
+        assert.strictEqual(cause, error)
+      }))
+  })
+
+  describe("transposeOption", () => {
+    it.effect("transposes a none", () =>
+      Effect.gen(function*() {
+        const result = yield* Effect.transposeOption(Option.none())
+        assert.deepStrictEqual(result, Option.none())
+      }))
+
+    it.effect("transposes a some containing a success", () =>
+      Effect.gen(function*() {
+        const result = yield* Effect.transposeOption(Option.some(Effect.succeed("A")))
+        assert.deepStrictEqual(result, Option.some("A"))
+      }))
+
+    it.effect("transposes a some containing a failure", () =>
+      Effect.gen(function*() {
+        const error = yield* Effect.transposeOption(Option.some(Effect.fail("error"))).pipe(Effect.flip)
+        assert.strictEqual(error, "error")
+      }))
   })
 
   describe("fromResult", () => {
@@ -170,6 +257,199 @@ describe("Effect", () => {
         Effect.tap((error) => Effect.sync(() => assert.strictEqual(error, "error"))),
         Effect.runPromise
       ))
+  })
+
+  describe("try", () => {
+    it.effect("succeeds with the returned value in direct-thunk form", () =>
+      Effect.gen(function*() {
+        const result = yield* Effect.try(() => 1)
+        assert.strictEqual(result, 1)
+      }))
+
+    it.effect("maps thrown values to UnknownError in direct-thunk form", () =>
+      Effect.gen(function*() {
+        const thrown = new Error("try")
+        const exit = yield* Effect.try<number>(() => {
+          throw thrown
+        }).pipe(Effect.exit)
+        assertUnknownError(exit, thrown, "An error occurred in Effect.try")
+      }))
+
+    it.effect("succeeds with the returned value", () =>
+      Effect.gen(function*() {
+        let catchCalled = false
+        const result = yield* Effect.try({
+          try: () => 1,
+          catch: () => {
+            catchCalled = true
+            return "error" as const
+          }
+        })
+        assert.strictEqual(result, 1)
+        assert.isFalse(catchCalled)
+      }))
+
+    it.effect("maps thrown values into typed failures", () =>
+      Effect.gen(function*() {
+        const thrown = new Error("try")
+        const mapped = { cause: thrown }
+        const exit = yield* Effect.try({
+          try: () => {
+            throw thrown
+          },
+          catch: () => mapped
+        }).pipe(Effect.exit)
+        assertExitFailure(exit, Cause.fail(mapped))
+      }))
+
+    it.effect("turns a throwing catch mapper into a defect", () =>
+      Effect.gen(function*() {
+        const thrown = new Error("try")
+        const defect = new Error("catch")
+        const exit = yield* Effect.try({
+          try: () => {
+            throw thrown
+          },
+          catch: () => {
+            throw defect
+          }
+        }).pipe(Effect.exit)
+        assertExitDefect(exit, defect)
+      }))
+  })
+
+  describe("tryPromise", () => {
+    it.effect("succeeds with the resolved value in direct-thunk form", () =>
+      Effect.gen(function*() {
+        const result = yield* Effect.tryPromise(() => Promise.resolve(1))
+        assert.strictEqual(result, 1)
+      }))
+
+    it.effect("does not allocate AbortController for zero-argument thunks", () =>
+      Effect.gen(function*() {
+        const originalAbortController = globalThis.AbortController
+        let allocations = 0
+        class TestAbortController extends originalAbortController {
+          constructor() {
+            allocations += 1
+            super()
+          }
+        }
+
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            globalThis.AbortController = TestAbortController
+          }),
+          () =>
+            Effect.gen(function*() {
+              const direct = yield* Effect.tryPromise(() => Promise.resolve(1))
+              const options = yield* Effect.tryPromise({
+                try: () => Promise.resolve(2),
+                catch: () => "error" as const
+              })
+              assert.strictEqual(direct, 1)
+              assert.strictEqual(options, 2)
+              assert.strictEqual(allocations, 0)
+            }),
+          () =>
+            Effect.sync(() => {
+              globalThis.AbortController = originalAbortController
+            })
+        )
+      }))
+
+    it.effect("maps synchronous throws to UnknownError in direct-thunk form", () =>
+      Effect.gen(function*() {
+        const thrown = new Error("try")
+        const exit = yield* Effect.tryPromise<number>(() => {
+          throw thrown
+        }).pipe(Effect.exit)
+        assertUnknownError(exit, thrown, "An error occurred in Effect.tryPromise")
+      }))
+
+    it.effect("maps promise rejections to UnknownError in direct-thunk form", () =>
+      Effect.gen(function*() {
+        const rejected = new Error("reject")
+        const exit = yield* Effect.tryPromise<number>(() => Promise.reject(rejected)).pipe(Effect.exit)
+        assertUnknownError(exit, rejected, "An error occurred in Effect.tryPromise")
+      }))
+
+    it.effect("succeeds with the resolved value in options form", () =>
+      Effect.gen(function*() {
+        let catchCalled = false
+        const result = yield* Effect.tryPromise({
+          try: () => Promise.resolve(1),
+          catch: () => {
+            catchCalled = true
+            return "error" as const
+          }
+        })
+        assert.strictEqual(result, 1)
+        assert.isFalse(catchCalled)
+      }))
+
+    it.effect("maps synchronous throws with catch in options form", () =>
+      Effect.gen(function*() {
+        const thrown = new Error("try")
+        const mapped = { cause: thrown }
+        const exit = yield* Effect.tryPromise({
+          try: () => {
+            throw thrown
+          },
+          catch: () => mapped
+        }).pipe(Effect.exit)
+        assertExitFailure(exit, Cause.fail(mapped))
+      }))
+
+    it.effect("maps promise rejections with catch in options form", () =>
+      Effect.gen(function*() {
+        const rejected = new Error("reject")
+        const mapped = { cause: rejected }
+        const exit = yield* Effect.tryPromise({
+          try: () => Promise.reject(rejected),
+          catch: () => mapped
+        }).pipe(Effect.exit)
+        assertExitFailure(exit, Cause.fail(mapped))
+      }))
+
+    it.effect("turns a throwing catch mapper for a synchronous throw into a defect", () =>
+      Effect.gen(function*() {
+        const thrown = new Error("try")
+        const defect = new Error("catch")
+        const exit = yield* Effect.tryPromise({
+          try: () => {
+            throw thrown
+          },
+          catch: () => {
+            throw defect
+          }
+        }).pipe(Effect.exit)
+        assertExitDefect(exit, defect)
+      }))
+
+    it.effect("turns a throwing catch mapper for a promise rejection into a defect", () =>
+      Effect.gen(function*() {
+        const rejected = new Error("reject")
+        const defect = new Error("catch")
+        const exit = yield* Effect.tryPromise({
+          try: () => Promise.reject(rejected),
+          catch: () => {
+            throw defect
+          }
+        }).pipe(Effect.exit)
+        assertExitDefect(exit, defect)
+      }))
+
+    it.effect("aborts the provided AbortSignal on interruption", () =>
+      Effect.gen(function*() {
+        let signal: AbortSignal | undefined
+        const fiber = yield* Effect.tryPromise((signal_) => {
+          signal = signal_
+          return new Promise<never>(() => {})
+        }).pipe(Effect.forkChild({ startImmediately: true }))
+        yield* Fiber.interrupt(fiber)
+        assert.strictEqual(signal?.aborted, true)
+      }))
   })
 
   describe("gen", () => {
@@ -278,6 +558,62 @@ describe("Effect", () => {
         const result = yield* Fiber.await(handle)
         assert.deepStrictEqual(result, Exit.fail("error"))
         assert.deepStrictEqual(done, [1, 2, 3])
+      }))
+
+    it.effect("interrupts started workers when the mapper throws during initial pumping", () =>
+      Effect.gen(function*() {
+        const interruptStarted = yield* Deferred.make<void>()
+        const interruptFinished = yield* Deferred.make<void>()
+        const defect = new Error("mapper defect")
+        const fiber = yield* Effect.forEach([0, 1], (i) => {
+          if (i === 0) {
+            return Effect.never.pipe(
+              Effect.onInterrupt(() =>
+                Deferred.succeed(interruptStarted, void 0).pipe(
+                  Effect.andThen(Deferred.await(interruptFinished))
+                )
+              )
+            )
+          }
+          throw defect
+        }, { concurrency: 2 }).pipe(Effect.forkChild({ startImmediately: true }))
+
+        assert.isTrue(yield* Deferred.isDone(interruptStarted))
+        assert.isUndefined(fiber.pollUnsafe())
+        yield* Deferred.succeed(interruptFinished, void 0)
+        const exit = fiber.pollUnsafe()
+        assert.isDefined(exit)
+        assertExitDefect(exit!, defect)
+      }))
+
+    it.effect("interrupts started workers when observer-driven refill throws", () =>
+      Effect.gen(function*() {
+        const release = yield* Deferred.make<void>()
+        const interruptStarted = yield* Deferred.make<void>()
+        const interruptFinished = yield* Deferred.make<void>()
+        const defect = new Error("refill defect")
+        const fiber = yield* Effect.forEach([0, 1, 2], (i) => {
+          if (i === 0) return Deferred.await(release)
+          if (i === 1) {
+            return Effect.never.pipe(
+              Effect.onInterrupt(() =>
+                Deferred.succeed(interruptStarted, void 0).pipe(
+                  Effect.andThen(Deferred.await(interruptFinished))
+                )
+              )
+            )
+          }
+          throw defect
+        }, { concurrency: 2 }).pipe(Effect.forkChild({ startImmediately: true }))
+
+        assert.isUndefined(fiber.pollUnsafe())
+        yield* Deferred.succeed(release, void 0)
+        assert.isTrue(yield* Deferred.isDone(interruptStarted))
+        assert.isUndefined(fiber.pollUnsafe())
+        yield* Deferred.succeed(interruptFinished, void 0)
+        const exit = fiber.pollUnsafe()
+        assert.isDefined(exit)
+        assertExitDefect(exit!, defect)
       }))
 
     it("length = 0", () =>
@@ -434,6 +770,57 @@ describe("Effect", () => {
         )
         assert.deepStrictEqual(excluded, [0, 2, 4])
         assert.deepStrictEqual(satisfying, [1, 3, 5])
+      }))
+  })
+
+  describe("reduce", () => {
+    it.effect("runs sequentially from left to right and passes the index", () =>
+      Effect.gen(function*() {
+        const visited: Array<string> = []
+        const result = yield* Effect.reduce([1, 2, 3, 4, 5], () => 0, (acc, value, index) =>
+          Effect.sync(() => {
+            visited.push(`${index}:${value}`)
+            return acc + value
+          }))
+
+        assert.strictEqual(result, 15)
+        assert.deepStrictEqual(visited, ["0:1", "1:2", "2:3", "3:4", "4:5"])
+      }))
+
+    it.effect("stops at the first failure", () =>
+      Effect.gen(function*() {
+        const visited: Array<number> = []
+        const result = yield* pipe(
+          [1, 2, 3, 4, 5],
+          Effect.reduce(() => 0, (acc, value) =>
+            Effect.sync(() => visited.push(value)).pipe(
+              Effect.andThen(value === 3 ? Effect.fail("fail") : Effect.succeed(acc + value))
+            )),
+          Effect.exit
+        )
+
+        assert.deepStrictEqual(result, Exit.fail("fail"))
+        assert.deepStrictEqual(visited, [1, 2, 3])
+      }))
+
+    it.effect("returns zero for an empty iterable", () =>
+      Effect.gen(function*() {
+        const result = yield* Effect.reduce([], () => 42, (acc, value: number) => Effect.succeed(acc + value))
+        assert.strictEqual(result, 42)
+      }))
+
+    it.effect("evaluates zero lazily for each run", () =>
+      Effect.gen(function*() {
+        let evaluations = 0
+        const reduced = Effect.reduce([1], () => {
+          evaluations++
+          return [] as Array<number>
+        }, (acc, value) => Effect.succeed([...acc, value]))
+
+        assert.strictEqual(evaluations, 0)
+        assert.deepStrictEqual(yield* reduced, [1])
+        assert.deepStrictEqual(yield* reduced, [1])
+        assert.strictEqual(evaluations, 2)
       }))
   })
 
@@ -1182,6 +1569,12 @@ describe("Effect", () => {
   })
 
   describe("awaitAllChildren", () => {
+    it.effect("completes immediately when no children are forked", () =>
+      Effect.gen(function*() {
+        const result = yield* Effect.succeed(1).pipe(Effect.awaitAllChildren)
+        assert.strictEqual(result, 1)
+      }))
+
     it.effect("awaits children forked by the wrapped effect", () =>
       Effect.gen(function*() {
         const latch = yield* Deferred.make<void>()
@@ -1208,6 +1601,14 @@ describe("Effect", () => {
         )
         yield* Effect.yieldNow
         assert.deepStrictEqual(fiber.pollUnsafe(), Exit.succeed(1))
+        yield* Fiber.interrupt(preexisting)
+      }))
+
+    it.effect("does not await preexisting children", () =>
+      Effect.gen(function*() {
+        const preexisting = yield* Effect.never.pipe(Effect.forkChild({ startImmediately: true }))
+        const result = yield* Effect.succeed(1).pipe(Effect.awaitAllChildren)
+        assert.strictEqual(result, 1)
         yield* Fiber.interrupt(preexisting)
       }))
 

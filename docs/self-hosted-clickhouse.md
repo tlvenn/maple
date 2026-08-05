@@ -22,7 +22,26 @@ Self-managed Maple is a **per-org BYO** feature. Each org configures their own b
 - `backend = "tinybird"` — the existing path. Maple deploys its Tinybird project into the org's workspace via the sync workflow; queries route to that workspace.
 - `backend = "clickhouse"` — new. The org points Maple at a vanilla ClickHouse server they operate themselves. There is no sync workflow — schema lives in their CH instance and is applied via the CLI below.
 
-The Maple deployment itself still uses the env-level `TINYBIRD_HOST` / `TINYBIRD_TOKEN` for any org without a BYO row. None of the env vars need to change for ClickHouse-BYO to work.
+The Maple deployment itself still uses the env-level `TINYBIRD_HOST` / `TINYBIRD_TOKEN` for any org without a BYO row. API query routing does not require new env vars for ClickHouse-BYO; D1-backed direct ingest does require `MAPLE_INGEST_KEY_ENCRYPTION_KEY` so the ingest gateway can decrypt stored ClickHouse passwords.
+
+Env-level `CLICKHOUSE_URL` defaults to Tinybird's ClickHouse-compatible gateway for
+compatibility with existing deployments; raw SQL substitutes a per-org JWT and
+removes Tinybird-restricted query settings. For a vanilla/self-managed server, set
+`CLICKHOUSE_PROVIDER=clickhouse`; Maple then preserves `CLICKHOUSE_PASSWORD` for raw
+SQL. Tinybird raw SQL also requires explicit `TINYBIRD_SIGNING_KEY` and
+`TINYBIRD_WORKSPACE_ID` values; Maple never derives either from the API token.
+
+Env-level vanilla ClickHouse raw SQL is enabled only when `MAPLE_AUTH_MODE=self_hosted`,
+where the deployment is single-org. Hosted multi-org deployments fail closed unless
+they use Tinybird's scoped JWT path or per-org BYO credentials.
+
+For user-authored SQL, configure the runtime ClickHouse account as SELECT-only on the
+Maple database. Apply schema migrations with a separate administrative account, and
+enforce server-side limits such as maximum execution time, memory, rows, and bytes
+read. Maple's client-side caps are a final response boundary, not a substitute for a
+least-privilege role and server-side resource controls. See
+[ClickHouse's guidance for agent-authored queries](https://clickhouse.com/blog/how-to-set-up-clickhouse-for-agentic-analytics)
+for the corresponding database-side setup.
 
 ### Routing precedence
 
@@ -91,11 +110,37 @@ On a clean install, migration 0001 creates **20 tables** (datasources) and **22 
 - **MV-populated tables**: `service_usage`, `service_map_spans`, `service_map_children`, `service_map_edges_hourly`, `service_overview_spans`, `error_spans`, `error_events`, `trace_list_mv`, `trace_detail_spans`, `attribute_keys_hourly`, `attribute_values_hourly`, `traces_aggregates_hourly`, `logs_aggregates_hourly`
 - **Materialized views**: 22 MVs that fan out from the direct-ingest tables to populate the MV-populated tables
 
-Every table is partitioned by date and carries a 90-day TTL (365 days on metrics) — adjust by writing a follow-up migration if your retention requirements differ.
+Every table is partitioned by date and carries a TTL, tiered by how raw the data is:
+
+| Retention    | Tables                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| **30 days**  | `traces`, `trace_detail_spans`, `logs`, `service_map_spans`, `service_map_children`, `service_overview_spans`, `trace_list_mv` |
+| **90 days**  | `error_spans`, `error_events`, `error_events_by_time`, `metrics_*`, `attribute_*_hourly`, `metric_catalog`                     |
+| **365 days** | hourly rollups (`*_hourly`), `service_usage`, `alert_checks`                                                                   |
+
+Adjust by writing a follow-up migration if your retention requirements differ.
+
+> **Changing a TTL requires an `ALTER`, not just a datasource edit.** Migration 0001 re-exports the generated snapshot, and every statement in it is `CREATE TABLE IF NOT EXISTS` — so on a cluster whose tables already exist, re-running it is a no-op and the old TTL survives. Editing `datasources.ts` alone therefore changes **new installs only**. Ship a paired `ALTER TABLE … MODIFY TTL` delta (see `0011_align_raw_telemetry_retention.ts`) or existing clusters silently keep the previous retention. This exact gap let a production cluster accumulate 3× its intended trace volume until the disk filled.
+>
+> When lowering a TTL, set `ttl_only_drop_parts = 1` **first**. These tables partition on the same expression their TTL keys off, so expired parts are always wholly expired — the setting turns eviction into a whole-partition drop instead of a multi-TiB part rewrite.
 
 ## Ingest options
 
-The maintained path is **Option A: Maple's prebuilt OTel Collector image** (`mapleexporter` baked in). Three escape hatches stay supported for advanced setups.
+The maintained standalone path is **Option A: Maple's prebuilt OTel Collector image** (`mapleexporter` baked in). Hosted/self-hosted Maple deployments can also use the Rust ingest gateway's direct ClickHouse path once an org is marked ready. Three escape hatches stay supported for advanced setups.
+
+### Maple ingest gateway direct ClickHouse path
+
+For orgs whose `org_clickhouse_settings` row has `sync_status = 'connected'` and `schema_version` equal to the bundled `clickHouseSchemaVersion` (the latest **ingest-required** ClickHouse migration version — emitted into the gateway as `SCHEMA_VERSION` by `scripts/generate-clickhouse-insert-mappings.ts`), the Rust ingest gateway routes accepted native-ingest frames directly to that org's ClickHouse HTTP endpoint. Non-ready orgs continue using the managed Tinybird path. Performance-only migrations set `requiredForIngest: false`, so an index rollout cannot un-ready an otherwise compatible org. Readiness also does **not** use the Tinybird-coupled `clickHouseProjectRevision`, so Tinybird-only changes cannot alter BYO-ClickHouse routing.
+
+D1-backed ingest deployments must set `MAPLE_INGEST_KEY_ENCRYPTION_KEY` before rolling out this mode; the gateway exits at startup without it because ClickHouse passwords are encrypted at rest with the same AES-256-GCM key format as private ingest keys.
+
+Operational caveats:
+
+- **Readiness keys on the latest ingest-required migration, which only the API marks.** The `schema_version` stored in D1 is written to `clickHouseSchemaVersion` **only** by the API's `applySchema` workflow (or by `schemaDiff` self-heal, below). A credential re-save _preserves_ the prior value, and the standalone `clickhouse-cli` writes `_maple_schema_migrations` **on your CH server but never touches D1**. So an org whose ClickHouse schema was applied entirely via the CLI stays `schema_version`-stale and the gateway keeps routing to Tinybird, even though the cluster is fully migrated. Symptom: the dashboard (which reads CH whenever a settings row exists) shows collector-written data, but data sent through the public ingestor is invisible because it landed in Tinybird.
+- **Self-heal:** calling `schemaDiff` (e.g. opening `Settings → BYO Backend → ClickHouse`, or `POST /orgClickHouseSettings/schemaDiff`) re-stamps `schema_version` to `clickHouseSchemaVersion` whenever the live schema is fully in sync (every diff entry `up_to_date`). This is the supported way to mark a CLI-applied org ready without forcing an Apply that has nothing to migrate. The read path also annotates a `clickhouse.schemaDrift` span attribute (`OrgClickHouseSettingsService.resolveRuntimeConfig`) — alert on it to catch stale orgs.
+- ClickHouse-routed frames never fall back to Tinybird. After the configured export retry budget is exhausted, the batch is dropped, the WAL cursor advances, and `ingest_clickhouse_export_dropped_total` records the datasource and final drop reason. Alert on any non-zero increase in that counter.
+- Password-authenticated ClickHouse endpoints must use `https://`; the gateway drops passworded `http://` targets before attaching `X-ClickHouse-Key`.
+- Direct ClickHouse routing writes WAL v3 frames. Do not roll back to a pre-direct-ClickHouse ingest binary while v3 frames may remain in the queue; first drain the WAL, or accept that clearing the queue directory is a data-loss recovery step.
 
 ### Option A — Maple OTel Collector (recommended)
 
@@ -136,13 +181,13 @@ Apps then point `OTEL_EXPORTER_OTLP_ENDPOINT` at `http://maple-otel.maple.svc.cl
 1. `Settings → BYO Backend → ClickHouse → Download collector config` (or `GET /api/org-clickhouse-settings/collector-config`).
 2. Drop the YAML next to a copy of the image and run:
 
-   ```bash
-   docker run \
-     -e MAPLE_CLICKHOUSE_PASSWORD=$CH_PASSWORD \
-     -v ./collector.yaml:/etc/otel/config.yaml \
-     -p 4317:4317 -p 4318:4318 \
-     ghcr.io/makisuo/maple/otel-collector-maple:0.1.5
-   ```
+    ```bash
+    docker run \
+      -e MAPLE_CLICKHOUSE_PASSWORD=$CH_PASSWORD \
+      -v ./collector.yaml:/etc/otel/config.yaml \
+      -p 4317:4317 -p 4318:4318 \
+      ghcr.io/makisuo/maple/otel-collector-maple:0.1.5
+    ```
 
 The rendered YAML carries your `org_id`, ClickHouse URL/user/database, and the standard memory_limiter → k8sattributes → batch → maple pipeline. The password is referenced via `${env:MAPLE_CLICKHOUSE_PASSWORD}` so the file is safe to share.
 
@@ -170,13 +215,13 @@ If you have a small, well-defined ingest path (e.g. you control the SDK that emi
 
 ### Comparing the options
 
-| | Option A (Maple OTel Collector) | Option B (shim) | Option C (Tinybird-Local) | Option D (direct INSERTs) |
-|---|---|---|---|---|
-| Setup steps | 2 (schema + collector) | Many (write shim) | 2 | Application-specific |
-| Pre-built image | ✅ | — | ✅ (Tinybird's) | — |
-| Multi-tenant fan-out | ✅ via `org_id_from_resource_attribute` | manual | manual | application |
-| k8s pod metadata enrichment | ✅ baked into the image | manual | manual | manual |
-| Standard OTel collector pipeline shape | ✅ | partial | partial | n/a |
+|                                        | Option A (Maple OTel Collector)         | Option B (shim)   | Option C (Tinybird-Local) | Option D (direct INSERTs) |
+| -------------------------------------- | --------------------------------------- | ----------------- | ------------------------- | ------------------------- |
+| Setup steps                            | 2 (schema + collector)                  | Many (write shim) | 2                         | Application-specific      |
+| Pre-built image                        | ✅                                      | —                 | ✅ (Tinybird's)           | —                         |
+| Multi-tenant fan-out                   | ✅ via `org_id_from_resource_attribute` | manual            | manual                    | application               |
+| k8s pod metadata enrichment            | ✅ baked into the image                 | manual            | manual                    | manual                    |
+| Standard OTel collector pipeline shape | ✅                                      | partial           | partial                   | n/a                       |
 
 ## Schema source of truth
 
@@ -201,17 +246,17 @@ To add a new column, table, or materialized view:
 2. Run `bun run clickhouse:schema` to regenerate the snapshot.
 3. Create a new file `packages/domain/src/clickhouse/migrations/0002_<descriptive_name>.ts`:
 
-   ```typescript
-   export const migration_0002_add_foo_column = {
-     version: 2,
-     description: "Add Foo column to traces",
-     statements: [
-       "ALTER TABLE traces ADD COLUMN IF NOT EXISTS Foo String DEFAULT ''",
-       // For columns with non-trivial DEFAULT expressions that need backfilling:
-       "ALTER TABLE traces MATERIALIZE COLUMN Foo",
-     ],
-   } as const
-   ```
+    ```typescript
+    export const migration_0002_add_foo_column = {
+    	version: 2,
+    	description: "Add Foo column to traces",
+    	statements: [
+    		"ALTER TABLE traces ADD COLUMN IF NOT EXISTS Foo String DEFAULT ''",
+    		// For columns with non-trivial DEFAULT expressions that need backfilling:
+    		"ALTER TABLE traces MATERIALIZE COLUMN Foo",
+    	],
+    } as const
+    ```
 
 4. Append it to the `migrations` array in `packages/domain/src/clickhouse/migrations/index.ts`.
 

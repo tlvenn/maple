@@ -1,7 +1,7 @@
 import { McpQueryError, requiredStringParam, type McpToolRegistrar } from "./types"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { withDashboardMutation } from "../lib/dashboard-mutations"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { withDashboardMutation } from "@/mcp/lib/dashboard-mutations"
 
 const TOOL = "reorder_dashboard_widgets"
 
@@ -77,7 +77,7 @@ export function registerReorderDashboardWidgetsTool(server: McpToolRegistrar) {
 					(error) =>
 						new McpQueryError({
 							message: `Invalid layouts_json: ${String(error)}`,
-							pipe: TOOL,
+							pipeName: TOOL,
 							cause: error,
 						}),
 				),
@@ -120,7 +120,7 @@ export function registerReorderDashboardWidgetsTool(server: McpToolRegistrar) {
 						return yield* Effect.fail(
 							new McpQueryError({
 								message: `Unknown widget ids in layouts_json: ${unknownIds.join(", ")}. Use get_dashboard to see existing widget ids.`,
-								pipe: TOOL,
+								pipeName: TOOL,
 							}),
 						)
 					}

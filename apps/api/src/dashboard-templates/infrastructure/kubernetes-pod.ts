@@ -1,5 +1,6 @@
 import {
 	CHART_DISPLAY_AREA,
+	CHART_DISPLAY_BAR,
 	CHART_DISPLAY_LINE,
 	buildPortableDashboard,
 	combineWhere,
@@ -7,12 +8,14 @@ import {
 	paramKey,
 	paramValue,
 	templateId,
-} from "../helpers"
-import type { TemplateDefinition, WidgetDef } from "../types"
+} from "@/dashboard-templates/helpers"
+import type { TemplateDefinition, WidgetDef } from "@/dashboard-templates/types"
 
 function widgets(namespace?: string): WidgetDef[] {
-	const where = combineWhere(namespace ? `k8s.namespace.name = "${namespace}"` : "")
-	const groupBy = ["k8s.pod.name"]
+	// Pod/namespace identity lives on ResourceAttributes — the metrics
+	// query-builder reaches it via the `resource.` prefix.
+	const where = combineWhere(namespace ? `resource.k8s.namespace.name = "${namespace}"` : "")
+	const groupBy = ["resource.k8s.pod.name"]
 	return [
 		{
 			id: "pod-cpu",
@@ -26,7 +29,7 @@ function widgets(namespace?: string): WidgetDef[] {
 				groupBy,
 			}),
 			display: { title: "Pod CPU Usage (cores)", ...CHART_DISPLAY_LINE, unit: "number" },
-			layout: { x: 0, y: 0, w: 6, h: 4 },
+			layout: { x: 0, y: 0, w: 6, h: 6 },
 		},
 		{
 			id: "pod-memory",
@@ -40,7 +43,7 @@ function widgets(namespace?: string): WidgetDef[] {
 				groupBy,
 			}),
 			display: { title: "Pod Memory Usage", ...CHART_DISPLAY_LINE, unit: "bytes" },
-			layout: { x: 6, y: 0, w: 6, h: 4 },
+			layout: { x: 6, y: 0, w: 6, h: 6 },
 		},
 		{
 			id: "container-restarts",
@@ -53,8 +56,8 @@ function widgets(namespace?: string): WidgetDef[] {
 				whereClause: where,
 				groupBy,
 			}),
-			display: { title: "Container Restarts", ...CHART_DISPLAY_AREA, unit: "number" },
-			layout: { x: 0, y: 4, w: 6, h: 4 },
+			display: { title: "Container Restarts", ...CHART_DISPLAY_BAR, unit: "number" },
+			layout: { x: 0, y: 6, w: 6, h: 6 },
 		},
 		{
 			id: "network-io",
@@ -70,7 +73,7 @@ function widgets(namespace?: string): WidgetDef[] {
 				groupBy: ["attr.direction"],
 			}),
 			display: { title: "Pod Network I/O", ...CHART_DISPLAY_AREA, unit: "bytes" },
-			layout: { x: 6, y: 4, w: 6, h: 4 },
+			layout: { x: 6, y: 6, w: 6, h: 6 },
 		},
 	]
 }
@@ -81,7 +84,14 @@ export const kubernetesPodTemplate: TemplateDefinition = {
 	description: "Per-pod CPU, memory, container restarts, and network I/O.",
 	category: "infrastructure",
 	tags: ["kubernetes", "k8s", "pods"],
-	requirements: ["OpenTelemetry kubeletstatsreceiver", "OpenTelemetry k8sclusterreceiver"],
+	requirement: {
+		kind: "metrics",
+		label: "OpenTelemetry kubeletstatsreceiver and k8sclusterreceiver",
+		collector: "the OpenTelemetry kubeletstats and k8scluster receivers",
+		setupLabel: "the kubeletstats receiver",
+		hint: "Run both against your cluster and every widget fills in on its own.",
+	},
+	requiredMetricPrefixes: ["k8s.pod."],
 	parameters: [
 		{
 			key: paramKey("namespace"),

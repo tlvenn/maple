@@ -1,9 +1,11 @@
 import {
+	ANTICIPATED_ERROR_IDENTIFIERS,
 	AlertsService,
 	AnomalyDetectionService,
 	BucketCacheService,
 	CacheBackendLive,
-	DatabaseD1Live,
+	CloudflareAnalyticsService,
+	CloudflareOAuthService,
 	DigestService,
 	EdgeCacheService,
 	EmailService,
@@ -11,20 +13,20 @@ import {
 	ErrorsService,
 	EscalationService,
 	HazelOAuthService,
+	layerPg,
 	NotificationDispatcher,
-	OnboardingEmailService,
-	OnboardingService,
 	OrgClickHouseSettingsService,
+	OrgIngestKeysService,
+	OrgMembersService,
+	PlanetScaleOAuthService,
+	PlanetScaleService,
 	QueryEngineService,
 	ServiceMapRollupService,
+	TinybirdOrgTokenService,
 	WarehouseQueryService,
 } from "@maple/api/alerting"
 import * as MapleCloudflareSDK from "@maple-dev/effect-sdk/cloudflare"
-import {
-	runScheduledEffect,
-	WorkerConfigProviderLayer,
-	WorkerEnvironment,
-} from "@maple/effect-cloudflare"
+import { runScheduledEffect, WorkerConfigProviderLayer, WorkerEnvironment } from "@maple/effect-cloudflare"
 import { Cause, Effect, Layer, Match } from "effect"
 
 // Module-scope construction; `flush(env)` resolves env on first call. The
@@ -34,20 +36,23 @@ const telemetry = MapleCloudflareSDK.make({
 	serviceName: "alerting",
 	serviceNamespace: "backend",
 	repositoryUrl: "https://github.com/Makisuo/maple",
+	anticipatedErrorIdentifiers: [...ANTICIPATED_ERROR_IDENTIFIERS],
 })
 
 const buildLayer = (_env: Record<string, unknown>) => {
 	const ConfigLive = WorkerConfigProviderLayer
 	const EnvLive = Env.layer.pipe(Layer.provide(ConfigLive))
 
-	const DatabaseLive = DatabaseD1Live.pipe(Layer.provide(WorkerEnvironment.layer))
+	const DatabaseLive = layerPg.pipe(Layer.provide(WorkerEnvironment.layer))
 
 	const BaseLive = Layer.mergeAll(EnvLive, DatabaseLive)
 
 	const OrgClickHouseSettingsLive = OrgClickHouseSettingsService.layer.pipe(Layer.provide(BaseLive))
 
+	const TinybirdOrgTokenLive = TinybirdOrgTokenService.layer.pipe(Layer.provide(EnvLive))
+
 	const WarehouseQueryServiceLive = WarehouseQueryService.layer.pipe(
-		Layer.provide(Layer.mergeAll(EnvLive, OrgClickHouseSettingsLive)),
+		Layer.provide(Layer.mergeAll(EnvLive, OrgClickHouseSettingsLive, TinybirdOrgTokenLive)),
 	)
 
 	// EdgeCacheService's storage backend is injected via the CacheBackend port.
@@ -64,6 +69,14 @@ const buildLayer = (_env: Record<string, unknown>) => {
 
 	const HazelOAuthServiceLive = HazelOAuthService.layer.pipe(Layer.provide(BaseLive))
 
+	// EmailService resolves the Cloudflare Email Service `EMAIL` binding from
+	// WorkerEnvironment (delivery binding) in addition to EnvLive (EMAIL_FROM).
+	const EmailServiceLive = EmailService.layer.pipe(
+		Layer.provide(Layer.mergeAll(EnvLive, WorkerEnvironment.layer)),
+	)
+
+	const OrgMembersServiceLive = OrgMembersService.layer.pipe(Layer.provide(EnvLive))
+
 	// WorkerEnvironment is merged in so the incident-open issue-hub hook can see
 	// the cross-script AI_TRIAGE_WORKFLOW binding (absent → triage marked failed).
 	// AlertRuntime is a Context.Reference with defaults, so it needs no wiring here.
@@ -74,13 +87,15 @@ const buildLayer = (_env: Record<string, unknown>) => {
 				QueryEngineServiceLive,
 				WarehouseQueryServiceLive,
 				HazelOAuthServiceLive,
+				EmailServiceLive,
+				OrgMembersServiceLive,
 				WorkerEnvironment.layer,
 			),
 		),
 	)
 
 	const NotificationDispatcherLive = NotificationDispatcher.layer.pipe(
-		Layer.provide(Layer.mergeAll(BaseLive, HazelOAuthServiceLive)),
+		Layer.provide(Layer.mergeAll(BaseLive, HazelOAuthServiceLive, EmailServiceLive)),
 	)
 
 	const EscalationServiceLive = EscalationService.layer.pipe(
@@ -94,6 +109,7 @@ const buildLayer = (_env: Record<string, unknown>) => {
 			Layer.mergeAll(
 				BaseLive,
 				WarehouseQueryServiceLive,
+				EdgeCacheServiceLive,
 				NotificationDispatcherLive,
 				WorkerEnvironment.layer,
 			),
@@ -102,26 +118,18 @@ const buildLayer = (_env: Record<string, unknown>) => {
 
 	const AnomalyDetectionServiceLive = AnomalyDetectionService.layer.pipe(
 		Layer.provide(
-			Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, EdgeCacheServiceLive, WorkerEnvironment.layer),
+			Layer.mergeAll(
+				BaseLive,
+				WarehouseQueryServiceLive,
+				EdgeCacheServiceLive,
+				WorkerEnvironment.layer,
+			),
 		),
 	)
 
-	const EmailServiceLive = EmailService.layer.pipe(Layer.provide(EnvLive))
-
 	const DigestServiceLive = DigestService.layer.pipe(
-		Layer.provide(Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, EmailServiceLive)),
-	)
-
-	const OnboardingServiceLive = OnboardingService.layer.pipe(Layer.provide(BaseLive))
-
-	const OnboardingEmailServiceLive = OnboardingEmailService.layer.pipe(
 		Layer.provide(
-			Layer.mergeAll(
-				BaseLive,
-				EmailServiceLive,
-				OnboardingServiceLive,
-				WarehouseQueryServiceLive,
-			),
+			Layer.mergeAll(BaseLive, WarehouseQueryServiceLive, EdgeCacheServiceLive, EmailServiceLive),
 		),
 	)
 
@@ -129,16 +137,53 @@ const buildLayer = (_env: Record<string, unknown>) => {
 		Layer.provide(Layer.mergeAll(BaseLive, WarehouseQueryServiceLive)),
 	)
 
+	const CloudflareOAuthServiceLive = CloudflareOAuthService.layer.pipe(Layer.provide(BaseLive))
+
+	const OrgIngestKeysServiceLive = OrgIngestKeysService.layer.pipe(Layer.provide(BaseLive))
+
+	const CloudflareAnalyticsServiceLive = CloudflareAnalyticsService.layer.pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				BaseLive,
+				WarehouseQueryServiceLive,
+				CloudflareOAuthServiceLive,
+				OrgIngestKeysServiceLive,
+				OrgClickHouseSettingsLive,
+			),
+		),
+	)
+
+	const PlanetScaleOAuthServiceLive = PlanetScaleOAuthService.layer.pipe(Layer.provide(BaseLive))
+
+	const PlanetScaleServiceLive = PlanetScaleService.layer.pipe(
+		Layer.provide(Layer.mergeAll(BaseLive, PlanetScaleOAuthServiceLive)),
+	)
+
 	return Layer.mergeAll(
 		AlertsServiceLive,
 		AnomalyDetectionServiceLive,
+		CloudflareAnalyticsServiceLive,
+		PlanetScaleServiceLive,
 		DigestServiceLive,
-		OnboardingEmailServiceLive,
 		ErrorsServiceLive,
 		EscalationServiceLive,
 		ServiceMapRollupServiceLive,
 	).pipe(Layer.provideMerge(telemetry.layer), Layer.provideMerge(ConfigLive))
 }
+
+/**
+ * Standard tick failure isolation. A broken tick must not fail the whole scheduled
+ * invocation (several ticks share one cron dispatch), so genuine failures are logged and
+ * swallowed — but interrupt-only causes (isolate teardown) are re-raised so they reach
+ * `runScheduledEffect`'s `onInterrupt: "graceful"` handling instead of logging a phantom
+ * tick failure. Mirrors the per-org guards inside the tick services.
+ */
+const catchTickFailure = (label: string) =>
+	Effect.catchCause((cause: Cause.Cause<unknown>) =>
+		Cause.hasInterruptsOnly(cause)
+			? Effect.interrupt
+			: Effect.logError(label).pipe(Effect.annotateLogs({ error: Cause.pretty(cause) })),
+	)
 
 const alertTick = Effect.gen(function* () {
 	const alerts = yield* AlertsService
@@ -151,14 +196,7 @@ const alertTick = Effect.gen(function* () {
 			deliveryFailureCount: result.deliveryFailureCount,
 		}),
 	)
-}).pipe(
-	Effect.withSpan("alerting.scheduler_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Alerting worker tick failed").pipe(
-			Effect.annotateLogs({ error: Cause.pretty(cause) }),
-		),
-	),
-)
+}).pipe(Effect.withSpan("alerting.scheduler_tick"), catchTickFailure("Alerting worker tick failed"))
 
 const errorTick = Effect.gen(function* () {
 	const errors = yield* ErrorsService
@@ -175,14 +213,7 @@ const errorTick = Effect.gen(function* () {
 			retentionRan: result.retentionRan,
 		}),
 	)
-}).pipe(
-	Effect.withSpan("alerting.error_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Errors worker tick failed").pipe(
-			Effect.annotateLogs({ error: Cause.pretty(cause) }),
-		),
-	),
-)
+}).pipe(Effect.withSpan("alerting.error_tick"), catchTickFailure("Errors worker tick failed"))
 
 const escalationTick = Effect.gen(function* () {
 	const escalations = yield* EscalationService
@@ -198,14 +229,7 @@ const escalationTick = Effect.gen(function* () {
 			}),
 		)
 	}
-}).pipe(
-	Effect.withSpan("alerting.escalation_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Escalation tick failed").pipe(
-			Effect.annotateLogs({ error: Cause.pretty(cause) }),
-		),
-	),
-)
+}).pipe(Effect.withSpan("alerting.escalation_tick"), catchTickFailure("Escalation tick failed"))
 
 const digestTick = Effect.gen(function* () {
 	const digest = yield* DigestService
@@ -217,33 +241,12 @@ const digestTick = Effect.gen(function* () {
 			skipped: result.skipped,
 		}),
 	)
-}).pipe(
-	Effect.withSpan("alerting.digest_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Digest tick failed").pipe(Effect.annotateLogs({ error: Cause.pretty(cause) })),
-	),
-)
+}).pipe(Effect.withSpan("alerting.digest_tick"), catchTickFailure("Digest tick failed"))
 
-const onboardingTick = Effect.gen(function* () {
-	const onboardingEmails = yield* OnboardingEmailService
-	const result = yield* onboardingEmails.runOnboardingTick()
-	yield* Effect.logInfo("Onboarding tick complete").pipe(
-		Effect.annotateLogs({
-			ensuredCount: result.ensuredCount,
-			sentCount: result.sentCount,
-			errorCount: result.errorCount,
-			firstDataDetected: result.firstDataDetected,
-			skipped: result.skipped,
-		}),
-	)
-}).pipe(
-	Effect.withSpan("alerting.onboarding_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Onboarding tick failed").pipe(
-			Effect.annotateLogs({ error: Cause.pretty(cause) }),
-		),
-	),
-)
+// The onboarding drip moved to maple-portal (`camp_onboarding`), which owns the
+// sequence, its send log and its suppression list. `org_onboarding_state` stays
+// here — the in-app checklist still uses the rest of that table — and so do its
+// four `*_email_sent_at` columns, which are what the portal's backfill reads.
 
 const serviceMapRollupTick = Effect.gen(function* () {
 	const rollup = yield* ServiceMapRollupService
@@ -253,16 +256,15 @@ const serviceMapRollupTick = Effect.gen(function* () {
 			orgsProcessed: result.orgsProcessed,
 			hoursRolledUp: result.hoursRolledUp,
 			edgesWritten: result.edgesWritten,
+			resolutionsWritten: result.resolutionsWritten,
+			resolutionHoursChecked: result.resolutionHoursChecked,
+			emptyResolutionHours: result.emptyResolutionHours,
 			orgFailures: result.orgFailures,
 		}),
 	)
 }).pipe(
 	Effect.withSpan("alerting.service_map_rollup_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Service map rollup tick failed").pipe(
-			Effect.annotateLogs({ error: Cause.pretty(cause) }),
-		),
-	),
+	catchTickFailure("Service map rollup tick failed"),
 )
 
 const anomalyTick = Effect.gen(function* () {
@@ -280,14 +282,40 @@ const anomalyTick = Effect.gen(function* () {
 			orgFailures: result.orgFailures,
 		}),
 	)
+}).pipe(Effect.withSpan("alerting.anomaly_tick"), catchTickFailure("Anomaly detection tick failed"))
+
+const cloudflareAnalyticsTick = Effect.gen(function* () {
+	const analytics = yield* CloudflareAnalyticsService
+	const result = yield* analytics.pollAllOrgs()
+	yield* Effect.logInfo("Cloudflare analytics tick complete").pipe(
+		Effect.annotateLogs({
+			orgs: result.orgs,
+			rowsIngested: result.rowsIngested,
+			skipped: result.skipped,
+			failures: result.failures,
+			perOrg: result.perOrg,
+		}),
+	)
 }).pipe(
-	Effect.withSpan("alerting.anomaly_tick"),
-	Effect.catchCause((cause) =>
-		Effect.logError("Anomaly detection tick failed").pipe(
-			Effect.annotateLogs({ error: Cause.pretty(cause) }),
-		),
-	),
+	Effect.withSpan("alerting.cloudflare_analytics_tick"),
+	catchTickFailure("Cloudflare analytics tick failed"),
 )
+
+const planetScaleTick = Effect.gen(function* () {
+	const planetscale = yield* PlanetScaleService
+	const result = yield* planetscale.pollAllOrgs()
+	if (result.orgs > 0) {
+		yield* Effect.logInfo("PlanetScale poll tick complete").pipe(
+			Effect.annotateLogs({
+				orgs: result.orgs,
+				refreshed: result.refreshed,
+				skipped: result.skipped,
+				failures: result.failures,
+				deployEvents: result.deployEvents,
+			}),
+		)
+	}
+}).pipe(Effect.withSpan("alerting.planetscale_tick"), catchTickFailure("PlanetScale poll tick failed"))
 
 interface ScheduledEventLike {
 	readonly cron: string
@@ -303,11 +331,30 @@ export default {
 		env: Record<string, unknown>,
 		ctx: ExecutionContextLike,
 	): Promise<void> {
+		// Non-prod stages (stg, PR previews) share live org data — stg's Hyperdrive
+		// points at the prod database — so their crons would iterate real orgs with
+		// stage-local Tinybird/Clerk credentials: every tick fails per-org and floods
+		// the error dashboards (and historically sent duplicate emails, see #237).
+		// Same gating philosophy as the prd-only EMAIL binding, with an explicit
+		// override for deliberately exercising crons on a non-prod stage.
+		const environment = typeof env.MAPLE_ENVIRONMENT === "string" ? env.MAPLE_ENVIRONMENT : ""
+		const allowNonProd =
+			env.MAPLE_ALERTING_ALLOW_NONPROD === "1" || env.MAPLE_ALERTING_ALLOW_NONPROD === "true"
+		if (environment !== "production" && !allowNonProd) {
+			console.log(
+				`Skipping alerting cron on non-production stage (MAPLE_ENVIRONMENT=${environment || "unset"}, cron=${event.cron}); set MAPLE_ALERTING_ALLOW_NONPROD=1 to run crons here`,
+			)
+			return
+		}
 		const program = Match.value(event.cron).pipe(
-			Match.when("*/5 * * * *", () => anomalyTick),
+			Match.when("*/5 * * * *", () =>
+				Effect.all([anomalyTick, cloudflareAnalyticsTick, planetScaleTick], {
+					concurrency: 3,
+					discard: true,
+				}),
+			),
 			Match.when("*/15 * * * *", () => digestTick),
 			Match.when("0 * * * *", () => serviceMapRollupTick),
-			Match.when("0 9 * * *", () => onboardingTick),
 			Match.orElse(() =>
 				Effect.all([alertTick, errorTick, escalationTick], {
 					concurrency: 2,
@@ -316,7 +363,10 @@ export default {
 			),
 		)
 		try {
-			await runScheduledEffect(buildLayer(env), program, ctx)
+			// Cron ticks cancel gracefully on isolate teardown — the schedule reruns
+			// anyway, and re-raised interrupts (see the per-org catchCause guards in the
+			// tick services) must not surface as failed invocations.
+			await runScheduledEffect(buildLayer(env), program, ctx, { onInterrupt: "graceful" })
 		} finally {
 			ctx.waitUntil(telemetry.flush(env))
 		}

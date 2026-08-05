@@ -1,12 +1,25 @@
 import { describe, expect, it } from "vitest"
 import insertMappings from "../schema/local-inserts.json"
-import { anyValueString, bytesHex, encodeLogs, encodeMetrics, encodeTraces, formatTimestampNano, statusCode } from "./encode"
+import {
+	anyValueString,
+	bytesHex,
+	encodeLogs,
+	encodeMetrics,
+	encodeTraces,
+	formatTimestampNano,
+	OtlpFieldError,
+	spanIdHex,
+	statusCode,
+	traceIdHex,
+} from "./encode"
 import { decodeMetricsRequest, decodeTraceRequest, encodeMetricsRequest, encodeTraceRequest } from "./proto"
 
 // Field-name set per datasource, parsed from the generated inputSchema string.
 // "start_time DateTime64(9), trace_id String, …" → { start_time, trace_id, … }
 const schemaFields = (datasource: string): Set<string> => {
-	const ds = (insertMappings as { datasources: Record<string, { inputSchema: string }> }).datasources[datasource]!
+	const ds = (insertMappings as { datasources: Record<string, { inputSchema: string }> }).datasources[
+		datasource
+	]!
 	const fields = new Set<string>()
 	// Split top-level commas only (types like Map(K, V) / Array(…) contain commas).
 	let depth = 0
@@ -31,6 +44,11 @@ const b64 = (h: string): string => Buffer.from(h, "hex").toString("base64")
 const javaAgentTracePayloadB64 =
 	"CvULCqUICiUKG2RlcGxveW1lbnQuZW52aXJvbm1lbnQubmFtZRIGCgR0ZXN0ChYKCWhvc3QuYXJjaBIJCgdhYXJjaDY0CisKCWhvc3QubmFtZRIeChx6aGFvamlydWlkZU1hY0Jvb2stQWlyLmxvY2FsCiMKDm9zLmRlc2NyaXB0aW9uEhEKD01hYyBPUyBYIDI2LjQuMQoTCgdvcy50eXBlEggKBmRhcndpbgoWCgpvcy52ZXJzaW9uEggKBjI2LjQuMQqgAQoUcHJvY2Vzcy5jb21tYW5kX2FyZ3MShwEqhAEKVQpTL1VzZXJzL3poYW9qaXJ1aS9MaWJyYXJ5L0phdmEvSmF2YVZpcnR1YWxNYWNoaW5lcy9vcGVuamRrLTIzL0NvbnRlbnRzL0hvbWUvYmluL2phdmEKKwopL3RtcC9tYXBsZS1qYXZhLWFnZW50LTdLMHcvT3RlbFJlcHJvLmphdmEKcAoXcHJvY2Vzcy5leGVjdXRhYmxlLnBhdGgSVQpTL1VzZXJzL3poYW9qaXJ1aS9MaWJyYXJ5L0phdmEvSmF2YVZpcnR1YWxNYWNoaW5lcy9vcGVuamRrLTIzL0NvbnRlbnRzL0hvbWUvYmluL2phdmEKEwoLcHJvY2Vzcy5waWQSBBjtpQIKVwobcHJvY2Vzcy5ydW50aW1lLmRlc2NyaXB0aW9uEjgKNk9yYWNsZSBDb3Jwb3JhdGlvbiBPcGVuSkRLIDY0LUJpdCBTZXJ2ZXIgVk0gMjMrMzctMjM2OQo1ChRwcm9jZXNzLnJ1bnRpbWUubmFtZRIdChtPcGVuSkRLIFJ1bnRpbWUgRW52aXJvbm1lbnQKJwoXcHJvY2Vzcy5ydW50aW1lLnZlcnNpb24SDAoKMjMrMzctMjM2OQo9ChNzZXJ2aWNlLmluc3RhbmNlLmlkEiYKJGQxZTI5NjA0LTI5ODYtNDlmZC1iNWJiLWU0ZjFhN2Q0ZjkyYwohCgxzZXJ2aWNlLm5hbWUSEQoPd2lzY2hvaWNlci11c2VyCj0KFXRlbGVtZXRyeS5kaXN0cm8ubmFtZRIkCiJvcGVudGVsZW1ldHJ5LWphdmEtaW5zdHJ1bWVudGF0aW9uCiQKGHRlbGVtZXRyeS5kaXN0cm8udmVyc2lvbhIICgYyLjI4LjEKIAoWdGVsZW1ldHJ5LnNkay5sYW5ndWFnZRIGCgRqYXZhCiUKEnRlbGVtZXRyeS5zZGsubmFtZRIPCg1vcGVudGVsZW1ldHJ5CiEKFXRlbGVtZXRyeS5zZGsudmVyc2lvbhIICgYxLjYyLjAKTwoXdmNzLnJlcG9zaXRvcnkudXJsLmZ1bGwSNAoyaHR0cHM6Ly9naXRodWIuY29tL1dpc2Nob2ljZXItWGlhbi93aXNjaG9pY2VyLXVzZXISoQMKMQohaW8ub3BlbnRlbGVtZXRyeS5qYXZhLWh0dHAtY2xpZW50EgwyLjI4LjEtYWxwaGESwgIKEGmLshO9k6DTrmM7fx2w70cSCD/XzWWx87T5KgNHRVQwAzkgsMwtvzK3GEEJ4tgtvzK3GEoVCgt0aHJlYWQubmFtZRIGCgRtYWluSi0KCHVybC5mdWxsEiEKH2h0dHA6Ly8xMjcuMC4wLjE6MTgwODEvcGluZz9pPTJKEwoLc2VydmVyLnBvcnQSBBihjQFKEwoKZXJyb3IudHlwZRIFCgM0MDRKHQoOc2VydmVyLmFkZHJlc3MSCwoJMTI3LjAuMC4xSiEKGG5ldHdvcmsucHJvdG9jb2wudmVyc2lvbhIFCgMxLjFKIAoZaHR0cC5yZXNwb25zZS5zdGF0dXNfY29kZRIDGJQDShwKE2h0dHAucmVxdWVzdC5tZXRob2QSBQoDR0VUSg8KCXRocmVhZC5pZBICGAF6AhgChQEDAQAAGidodHRwczovL29wZW50ZWxlbWV0cnkuaW8vc2NoZW1hcy8xLjM3LjAaJ2h0dHBzOi8vb3BlbnRlbGVtZXRyeS5pby9zY2hlbWFzLzEuMjQuMA=="
 
+// Minimal ExportTraceServiceRequest encoded with the upstream OTLP schema.
+// Span.flags is field 16, so its fixed32 key is the two-byte sequence 0x85 0x01.
+const pythonSpanFlagsPayloadHex =
+	"0a480a00124412420a1000000000000000000000000000000000120800000000000000002a0a776974682d666c6167733001390100000000000000410200000000000000850101000000"
+
 const attr = (key: string, str: string) => ({ key, value: { stringValue: str } })
 
 const sampleTraceReq = () => ({
@@ -53,8 +71,21 @@ const sampleTraceReq = () => ({
 							startTimeUnixNano: "1700000000000000000",
 							endTimeUnixNano: "1700000001500000000",
 							attributes: [attr("http.method", "GET")],
-							events: [{ timeUnixNano: "1700000000500000000", name: "ev", attributes: [attr("a", "b")] }],
-							links: [{ traceId: b64(hex), spanId: b64("b7ad6b7169203331"), traceState: "", attributes: [attr("l", "1")] }],
+							events: [
+								{
+									timeUnixNano: "1700000000500000000",
+									name: "ev",
+									attributes: [attr("a", "b")],
+								},
+							],
+							links: [
+								{
+									traceId: b64(hex),
+									spanId: b64("b7ad6b7169203331"),
+									traceState: "",
+									attributes: [attr("l", "1")],
+								},
+							],
 							status: { code: 1, message: "" },
 						},
 					],
@@ -70,7 +101,15 @@ const sampleMetricsReq = () => {
 		attributes: [attr("k", "v")],
 		startTimeUnixNano: "1700000000000000000",
 		timeUnixNano: "1700000001000000000",
-		exemplars: [{ traceId: b64(hex), spanId: b64("b7ad6b7169203331"), timeUnixNano: "1700000000500000000", asDouble: 1.5, filteredAttributes: [attr("e", "1")] }],
+		exemplars: [
+			{
+				traceId: b64(hex),
+				spanId: b64("b7ad6b7169203331"),
+				timeUnixNano: "1700000000500000000",
+				asDouble: 1.5,
+				filteredAttributes: [attr("e", "1")],
+			},
+		],
 		flags: 0,
 	}
 	return {
@@ -84,12 +123,47 @@ const sampleMetricsReq = () => {
 						schemaUrl: "",
 						metrics: [
 							{ ...common, gauge: { dataPoints: [{ ...point, asDouble: 3.14 }] } },
-							{ ...common, sum: { dataPoints: [{ ...point, asInt: "42" }], aggregationTemporality: 2, isMonotonic: true } },
-							{ ...common, histogram: { dataPoints: [{ ...point, count: "10", sum: 5.5, bucketCounts: ["1", "2", "3"], explicitBounds: [1, 2], min: 0.1, max: 9.9 }], aggregationTemporality: 2 } },
+							{
+								...common,
+								sum: {
+									dataPoints: [{ ...point, asInt: "42" }],
+									aggregationTemporality: 2,
+									isMonotonic: true,
+								},
+							},
+							{
+								...common,
+								histogram: {
+									dataPoints: [
+										{
+											...point,
+											count: "10",
+											sum: 5.5,
+											bucketCounts: ["1", "2", "3"],
+											explicitBounds: [1, 2],
+											min: 0.1,
+											max: 9.9,
+										},
+									],
+									aggregationTemporality: 2,
+								},
+							},
 							{
 								...common,
 								exponentialHistogram: {
-									dataPoints: [{ ...point, count: "7", sum: 2.2, scale: 1, zeroCount: "0", positive: { offset: 0, bucketCounts: ["1", "2"] }, negative: { offset: 0, bucketCounts: [] }, min: 0, max: 1 }],
+									dataPoints: [
+										{
+											...point,
+											count: "7",
+											sum: 2.2,
+											scale: 1,
+											zeroCount: "0",
+											positive: { offset: 0, bucketCounts: ["1", "2"] },
+											negative: { offset: 0, bucketCounts: [] },
+											min: 0,
+											max: 1,
+										},
+									],
 									aggregationTemporality: 1,
 								},
 							},
@@ -111,7 +185,16 @@ const sampleLogsReq = () => ({
 					scope: { name: "logger" },
 					schemaUrl: "",
 					logRecords: [
-						{ timeUnixNano: "1700000000000000000", severityNumber: 9, severityText: "", body: { stringValue: "hello" }, attributes: [attr("k", "v")], traceId: b64(hex), spanId: b64("b7ad6b7169203331"), flags: 1 },
+						{
+							timeUnixNano: "1700000000000000000",
+							severityNumber: 9,
+							severityText: "",
+							body: { stringValue: "hello" },
+							attributes: [attr("k", "v")],
+							traceId: b64(hex),
+							spanId: b64("b7ad6b7169203331"),
+							flags: 1,
+						},
 					],
 				},
 			],
@@ -136,7 +219,12 @@ describe("encoder output matches the chDB inputSchema", () => {
 	it("each metric type's row keys == its inputSchema", () => {
 		const batches = encodeMetrics(sampleMetricsReq())
 		const byDs = new Map(batches.map((b) => [b.datasource, b]))
-		for (const ds of ["metrics_gauge", "metrics_sum", "metrics_histogram", "metrics_exponential_histogram"]) {
+		for (const ds of [
+			"metrics_gauge",
+			"metrics_sum",
+			"metrics_histogram",
+			"metrics_exponential_histogram",
+		]) {
 			expect(byDs.has(ds), `missing datasource ${ds}`).toBe(true)
 			expect(keysOf(byDs.get(ds)!), `keys for ${ds}`).toEqual(schemaFields(ds))
 		}
@@ -163,7 +251,77 @@ describe("value-level spot checks", () => {
 		expect(statusCode(2)).toBe("Error")
 		expect(anyValueString({ boolValue: true })).toBe("true")
 		expect(anyValueString({ intValue: "7" })).toBe("7")
-		expect(anyValueString({ arrayValue: { values: [{ stringValue: "a" }, { intValue: 1 }] } })).toBe('["a","1"]')
+		expect(anyValueString({ arrayValue: { values: [{ stringValue: "a" }, { intValue: 1 }] } })).toBe(
+			'["a","1"]',
+		)
+	})
+})
+
+describe("OTLP/JSON hex ids", () => {
+	const spanHex = "b7ad6b7169203331"
+
+	// A hex trace id is 32 chars and its base64 form is 24 (span: 16 vs 12), so
+	// the two encodings are told apart by length alone.
+	it("accepts the hex ids the OTLP/JSON spec mandates, and base64 from protobuf", () => {
+		expect(traceIdHex(hex, "t")).toBe(hex)
+		expect(traceIdHex(b64(hex), "t")).toBe(hex)
+		expect(spanIdHex(spanHex, "s")).toBe(spanHex)
+		expect(spanIdHex(b64(spanHex), "s")).toBe(spanHex)
+	})
+
+	it("normalizes uppercase hex and treats all-zero / absent ids as unset", () => {
+		expect(traceIdHex(hex.toUpperCase(), "t")).toBe(hex)
+		expect(spanIdHex("0000000000000000", "s")).toBe("")
+		expect(spanIdHex(b64("0000000000000000"), "s")).toBe("")
+		expect(spanIdHex("", "s")).toBe("")
+		expect(spanIdHex(undefined, "s")).toBe("")
+	})
+
+	// The regression this guards: before hex was recognized, a 32-char hex trace
+	// id was base64-decoded into 24 bytes and stored as 48 hex chars. Traces
+	// still self-joined, so it looked fine until compared against the emitter.
+	it("stores a hex trace id end-to-end at 32 chars, not 48", () => {
+		const req = sampleTraceReq()
+		const span = req.resourceSpans[0]!.scopeSpans[0]!.spans[0]!
+		span.traceId = hex
+		span.spanId = spanHex
+		span.parentSpanId = "0000000000000000"
+		span.links[0]!.traceId = hex
+		span.links[0]!.spanId = spanHex
+
+		const row = JSON.parse(encodeTraces(req)[0]!.ndjson)
+		expect(row.trace_id).toBe(hex)
+		expect(row.span_id).toBe(spanHex)
+		expect(row.parent_span_id).toBe("")
+		expect(row.links_trace_id).toEqual([hex])
+		expect(row.links_span_id).toEqual([spanHex])
+	})
+
+	it("rejects ids that decode to the wrong length, naming the field", () => {
+		// 24 bytes of base64 — what a hex trace id used to silently become.
+		const tooLong = Buffer.alloc(24, 1).toString("base64")
+		expect(() => traceIdHex(tooLong, "span.traceId")).toThrow(OtlpFieldError)
+		expect(() => traceIdHex(tooLong, "span.traceId")).toThrow(
+			/span\.traceId must be 16 bytes: expected 32 hex chars .* or 24 base64 chars/,
+		)
+		expect(() => spanIdHex(hex, "span.spanId")).toThrow(/span\.spanId must be 8 bytes/)
+		expect(() => traceIdHex("not-hex-and-not-base64!", "span.traceId")).toThrow(OtlpFieldError)
+	})
+
+	it("propagates the rejection out of encodeTraces / encodeLogs", () => {
+		const req = sampleTraceReq()
+		req.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.traceId = "0af7651916cd43dd" // 8 bytes
+		expect(() => encodeTraces(req)).toThrow(OtlpFieldError)
+
+		const logs = {
+			resourceLogs: [
+				{
+					resource: { attributes: [attr("service.name", "api")] },
+					scopeLogs: [{ logRecords: [{ traceId: hex, spanId: "deadbeef" }] }],
+				},
+			],
+		}
+		expect(() => encodeLogs(logs)).toThrow(/logRecord\.spanId must be 8 bytes/)
 	})
 })
 
@@ -183,11 +341,24 @@ describe("protobuf round-trip (proves vendored .proto field numbers)", () => {
 		const bytes = encodeMetricsRequest(sampleMetricsReq())
 		const decoded = decodeMetricsRequest(bytes)
 		const datasources = new Set(encodeMetrics(decoded).map((b) => b.datasource))
-		expect(datasources).toEqual(new Set(["metrics_gauge", "metrics_sum", "metrics_histogram", "metrics_exponential_histogram"]))
+		expect(datasources).toEqual(
+			new Set(["metrics_gauge", "metrics_sum", "metrics_histogram", "metrics_exponential_histogram"]),
+		)
 	})
 })
 
 describe("external OTLP protobuf compatibility", () => {
+	it("decodes a non-zero fixed32 span flags field emitted by the Python SDK", () => {
+		const decoded = decodeTraceRequest(Buffer.from(pythonSpanFlagsPayloadHex, "hex")) as {
+			resourceSpans: Array<{ scopeSpans: Array<{ spans: Array<{ name: string; flags: number }> }> }>
+		}
+		const span = decoded.resourceSpans[0]?.scopeSpans[0]?.spans[0]
+		expect(span).toMatchObject({ name: "with-flags", flags: 1 })
+
+		const [batch] = encodeTraces(decoded)
+		expect(batch).toMatchObject({ datasource: "traces", rowCount: 1 })
+	})
+
 	it("decodes a Java agent OTLP/HTTP traces payload captured from the wire", () => {
 		const decoded = decodeTraceRequest(Buffer.from(javaAgentTracePayloadB64, "base64"))
 		const [batch] = encodeTraces(decoded)

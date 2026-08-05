@@ -1,20 +1,20 @@
 import { McpQueryError, requiredStringParam, validationError, type McpToolRegistrar } from "./types"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { decodeWidgetJson, withDashboardMutation } from "../lib/dashboard-mutations"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { decodeWidgetJson, withDashboardMutation } from "@/mcp/lib/dashboard-mutations"
 import {
 	collectBlockingBuilderWarnings,
 	formatValidationSummary,
 	inspectWidgetsAfterMutation,
-} from "../lib/inspect-widget"
-import { resolveTenant } from "../lib/query-warehouse"
+} from "@/mcp/lib/inspect-widget"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
 
 const TOOL = "update_dashboard_widget"
 
 export function registerUpdateDashboardWidgetTool(server: McpToolRegistrar) {
 	server.tool(
 		TOOL,
-		"Replace a single widget on an existing dashboard. Pass the full widget JSON (same shape as one entry in `widgets[]` from get_dashboard) for ONLY the widget you want to change. Other widgets and dashboard metadata are left untouched. The stored widget id is always forced to the widget_id parameter, so any id inside widget_json is ignored.\n\nThe response includes an automatic validation summary (verdict, flags). If `verdict` is `suspicious` or `broken`, fix the widget and call this tool again — the chart will not render meaningful data as-is.\n\nTrace and log queries omit the metric-only fields (`metricName`/`metricType`/`isMonotonic`/`signalSource`) — only `dataSource: \"metrics\"` queries carry them. `whereClause` is a custom grammar (`=`, `>`, `<`, `>=`, `<=`, `contains`, `exists` joined by ` AND `) — there is NO SQL `IS NULL`/`IS NOT NULL`; use `<key> exists` to require an attribute. See the `maple://instructions` resource for the full widget JSON shape (aggregations per source, groupBy prefixes, units, stat reduceToValue, hideSeries).",
+		'Replace a single widget on an existing dashboard. Pass the full widget JSON (same shape as one entry in `widgets[]` from get_dashboard) for ONLY the widget you want to change. Other widgets and dashboard metadata are left untouched. The stored widget id is always forced to the widget_id parameter, so any id inside widget_json is ignored.\n\nThe response includes an automatic validation summary (verdict, flags). If `verdict` is `suspicious` or `broken`, fix the widget and call this tool again — the chart will not render meaningful data as-is.\n\nTrace and log queries omit the metric-only fields (`metricName`/`metricType`/`isMonotonic`/`signalSource`) — only `dataSource: "metrics"` queries carry them. `whereClause` is a custom grammar (`=`, `>`, `<`, `>=`, `<=`, `contains`, `exists` joined by ` AND `) — there is NO SQL `IS NULL`/`IS NOT NULL`; use `<key> exists` to require an attribute. See the `maple://instructions` resource for the full widget JSON shape (aggregations per source, groupBy prefixes, units, stat reduceToValue, hideSeries).',
 		Schema.Struct({
 			dashboard_id: requiredStringParam(
 				"ID of the dashboard containing the widget (use list_dashboards to find IDs)",
@@ -23,7 +23,7 @@ export function registerUpdateDashboardWidgetTool(server: McpToolRegistrar) {
 				"ID of the widget to replace (use get_dashboard to see existing widget ids)",
 			),
 			widget_json: requiredStringParam(
-				"Full JSON for the replacement widget: { id, visualization, dataSource, display, layout }. Any `id` field inside this JSON is ignored in favor of widget_id.",
+				'Full JSON for the replacement widget: { id, visualization, dataSource, display, layout, timeRange? }. Any `id` field inside this JSON is ignored in favor of widget_id. `timeRange` pins the widget to its own window (`{"type":"relative","value":"30m"}` or `{"type":"absolute","startTime":"...","endTime":"..."}`); omitting it means "follow the dashboard\'s range", so leaving it out of an update REMOVES an existing override.',
 			),
 		}),
 		Effect.fn("McpTool.updateDashboardWidget")(function* ({ dashboard_id, widget_id, widget_json }) {
@@ -45,7 +45,7 @@ export function registerUpdateDashboardWidgetTool(server: McpToolRegistrar) {
 						return yield* Effect.fail(
 							new McpQueryError({
 								message: `Widget not found: ${widget_id}. Use get_dashboard to see existing widget ids.`,
-								pipe: TOOL,
+								pipeName: TOOL,
 							}),
 						)
 					}

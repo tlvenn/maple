@@ -12,6 +12,7 @@ import { EventType, IncrementalSource, MouseInteractions } from "@rrweb/types"
 import type { SessionTraceSummary } from "./replay-editor-timeline"
 import type { EventRow } from "./session-events-panel"
 
+import { formatWarehouseDateTimeMs } from "@maple/query-engine"
 // rrweb-snapshot NodeType (not re-exported from @rrweb/types).
 const NodeType = { Document: 0, DocumentType: 1, Element: 2, Text: 3 } as const
 
@@ -19,8 +20,7 @@ const NodeType = { Document: 0, DocumentType: 1, Element: 2, Text: 3 } as const
 const BASE_EPOCH_MS = Date.now() - 5 * 60 * 1000
 const ts = (offsetMs: number) => BASE_EPOCH_MS + offsetMs
 /** Epoch → ClickHouse DateTime64 string (UTC, space-separated) for warehouse-shaped rows. */
-const ch = (offsetMs: number) =>
-	new Date(BASE_EPOCH_MS + offsetMs).toISOString().replace("T", " ").replace("Z", "")
+const ch = (offsetMs: number) => formatWarehouseDateTimeMs(BASE_EPOCH_MS + offsetMs)
 
 const VIEWPORT = { width: 1280, height: 720 }
 const INITIAL_URL = "https://app.acme.dev/dashboard"
@@ -48,12 +48,13 @@ h1{font-size:34px;font-weight:700;letter-spacing:-.02em;margin-bottom:8px}
 .btn{padding:13px 22px;border:none;border-radius:12px;background:#6366f1;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 `
 
-const el = (
-	id: number,
-	tagName: string,
-	attributes: Record<string, string>,
-	childNodes: unknown[] = [],
-) => ({ type: NodeType.Element, tagName, attributes, childNodes, id })
+const el = (id: number, tagName: string, attributes: Record<string, string>, childNodes: unknown[] = []) => ({
+	type: NodeType.Element,
+	tagName,
+	attributes,
+	childNodes,
+	id,
+})
 
 const text = (id: number, textContent: string) => ({ type: NodeType.Text, textContent, id })
 
@@ -78,7 +79,9 @@ const documentNode = {
 					]),
 					el(13, "div", { class: "main" }, [
 						el(14, "h1", {}, [text(15, "Welcome back, Jordan 👋")]),
-						el(16, "p", { class: "sub" }, [text(17, "Here's what happened while you were away.")]),
+						el(16, "p", { class: "sub" }, [
+							text(17, "Here's what happened while you were away."),
+						]),
 						el(18, "div", { class: "stats" }, [
 							stat(20, "1,284", "Active users"),
 							stat(25, "98.2%", "Uptime"),
@@ -156,6 +159,8 @@ export const PREVIEW_SESSION = {
 	userId: "jordan@acme.dev",
 	urlInitial: INITIAL_URL,
 	durationMs: 30_000,
+	activeTimeMs: 21_500,
+	idleTimeMs: 8_500,
 	browserName: "Chrome 138",
 	osName: "macOS 15",
 	deviceType: "desktop",
@@ -259,4 +264,16 @@ export const PREVIEW_TRANSCRIPT: ReadonlyArray<EventRow> = [
 			"TypeError: Cannot read properties of undefined (reading 'rows')\n  at renderTable (table.tsx:88)\n  at Dashboard (dashboard.tsx:142)",
 		traceId: "c3d4e5f60718293a4b5c6d7e8f90a1b2",
 	}),
+	// A longer run of network calls so the preview exercises a scrollable list
+	// (a short list hides whether the panel scrolls vs. inflates the layout).
+	...Array.from({ length: 32 }, (_, i) =>
+		ev({
+			timestamp: ch(5000 + i * 500),
+			type: "network",
+			netMethod: i % 4 === 0 ? "GET" : "POST",
+			netUrl: `/api/resource/${i}`,
+			netStatus: i % 9 === 0 ? 500 : 200,
+			netDurationMs: 40 + ((i * 137) % 1400),
+		}),
+	),
 ]

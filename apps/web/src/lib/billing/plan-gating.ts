@@ -1,17 +1,24 @@
-import { useCustomer } from "autumn-js/react"
+import { isActivePlanSubscription } from "@maple/domain/billing"
+import type { BillingBalance, BillingCustomer, BillingSubscription, CatalogPlan } from "@maple/domain/http"
 
-type Customer = NonNullable<ReturnType<typeof useCustomer>["data"]>
+type Customer = BillingCustomer
 
-type Subscription = Customer["subscriptions"][number]
+type Subscription = BillingSubscription
 
-type Balance = NonNullable<Customer["balances"]>[string]
+type Balance = BillingBalance
+
+// A plan from the live `listPlans` catalog — the source of truth for which plans
+// are currently offered and for per-feature overage rates. `getOrCreateCustomer`
+// does NOT expand `subscription.plan`, so neither legacy detection nor overage
+// rates can rely on it; both read the catalog instead.
+export type { CatalogPlan }
 
 // Metered ingestion features whose usage we surface alerts for. Mirrors the
 // Autumn feature ids defined in apps/api/autumn.config.ts.
 const METERED_INGEST_FEATURES = ["logs", "traces", "metrics"] as const
 
 // Surface a warning once usage crosses 80% of the included grant; "over" once it
-// reaches 100%. Mirrors the meter thresholds in usage-meters.tsx.
+// reaches 100%. Mirrors the meter thresholds in feature-usage-cards.tsx.
 const APPROACHING_RATIO = 0.8
 
 export type QuotaLevel = "ok" | "approaching" | "over"
@@ -29,6 +36,23 @@ function isLegacyFreePlan(sub: Subscription): boolean {
 	return sub.plan?.name?.toLowerCase() === "free"
 }
 
+// A subscription is "legacy" when its plan is no longer offered to new customers:
+// it's the old free tier, or its planId isn't in the current `listPlans` catalog,
+// or it maps to a catalog plan flagged archived. We only fall back to the
+// catalog-membership check once the catalog has loaded — an empty/missing catalog
+// means "unknown", not "legacy", so the badge never flickers on during load.
+export function isLegacyPlan(
+	sub: Subscription,
+	plans: ReadonlyArray<CatalogPlan> | null | undefined,
+): boolean {
+	if (isLegacyFreePlan(sub)) return true
+	if (sub.plan?.archived === true) return true
+	if (!plans || plans.length === 0) return false
+	const catalogPlan = plans.find((plan) => plan.id === sub.planId)
+	if (!catalogPlan) return true
+	return catalogPlan.archived === true
+}
+
 // Autumn's `useCustomer` surfaces upstream API failures (e.g. a `200` whose
 // body is an `autumn_api_error` from a failed response validation) as `data`
 // rather than `error`. Those payloads have no `subscriptions`/`balances`, so a
@@ -41,18 +65,56 @@ export function isUsableCustomer(customer: Customer | null | undefined): custome
 
 export function getActivePlan(customer: Customer | null | undefined): Subscription | null {
 	if (!isUsableCustomer(customer)) return null
-
-	return (
-		customer.subscriptions.find((sub) => {
-			if (sub.addOn || sub.autoEnable) return false
-			if (isLegacyFreePlan(sub)) return false
-			return sub.status === "active"
-		}) ?? null
-	)
+	return customer.subscriptions.find((sub) => isActivePlanSubscription(sub)) ?? null
 }
 
 export function hasSelectedPlan(customer: Customer | null | undefined): boolean {
 	return getActivePlan(customer) !== null
+}
+
+export interface TrialStatus {
+	isTrialing: boolean
+	daysRemaining: number | null
+	trialEndsAt: Date | null
+	planName: string | null
+	planId: string | null
+	planStatus: string | null
+}
+
+// Trial standing for the org's active plan, derived purely from the customer.
+// `isTrialing` when the active sub carries a future `trialEndsAt`. Drives the
+// billing subscription strip and the pricing cards' trial badges.
+export function getTrialStatus(customer: Customer | null | undefined): TrialStatus {
+	const sub = getActivePlan(customer)
+	if (!sub) {
+		return {
+			isTrialing: false,
+			daysRemaining: null,
+			trialEndsAt: null,
+			planName: null,
+			planId: null,
+			planStatus: null,
+		}
+	}
+
+	const isTrialing = sub.trialEndsAt != null && sub.trialEndsAt > Date.now()
+	let daysRemaining: number | null = null
+	let trialEndsAt: Date | null = null
+
+	if (isTrialing && sub.trialEndsAt) {
+		trialEndsAt = new Date(sub.trialEndsAt)
+		const msRemaining = trialEndsAt.getTime() - Date.now()
+		daysRemaining = msRemaining > 0 ? Math.ceil(msRemaining / (1000 * 60 * 60 * 24)) : 0
+	}
+
+	return {
+		isTrialing,
+		daysRemaining,
+		trialEndsAt,
+		planName: sub.plan?.name ?? sub.planId,
+		planId: sub.planId,
+		planStatus: sub.status,
+	}
 }
 
 export function hasBringYourOwnCloudAddOn(customer: Customer | null | undefined): boolean {
@@ -92,8 +154,7 @@ export function getFeatureQuotas(customer: Customer | null | undefined): Feature
 		const granted = balance.granted ?? 0
 		const usage = balance.usage ?? 0
 		const ratio = granted > 0 ? usage / granted : 0
-		const level: QuotaLevel =
-			ratio >= 1 ? "over" : ratio >= APPROACHING_RATIO ? "approaching" : "ok"
+		const level: QuotaLevel = ratio >= 1 ? "over" : ratio >= APPROACHING_RATIO ? "approaching" : "ok"
 		quotas.push({ featureId, usage, granted, ratio, level })
 	}
 	return quotas
@@ -108,4 +169,26 @@ export function getQuotaStatus(customer: Customer | null | undefined): QuotaLeve
 	if (quotas.some((quota) => quota.level === "over")) return "over"
 	if (quotas.some((quota) => quota.level === "approaching")) return "approaching"
 	return "ok"
+}
+
+// The first non-add-on subscription with overdue payments, or null. Not gated on
+// `status === "active"` — a past-due sub may carry any status, and we always want
+// to surface it.
+export function getPastDueSubscription(customer: Customer | null | undefined): Subscription | null {
+	if (!isUsableCustomer(customer)) return null
+	return customer.subscriptions.find((sub) => !sub.addOn && sub.pastDue === true) ?? null
+}
+
+// Whether the org's active plan is a legacy/grandfathered one, plus its display
+// name (for the billing badge). Mirrors the plan shown in the subscription strip.
+export function getLegacyPlanInfo(
+	customer: Customer | null | undefined,
+	plans: ReadonlyArray<CatalogPlan> | null | undefined,
+): {
+	isLegacy: boolean
+	planName: string | null
+} {
+	const sub = getActivePlan(customer)
+	if (!sub) return { isLegacy: false, planName: null }
+	return { isLegacy: isLegacyPlan(sub, plans), planName: sub.plan?.name ?? sub.planId }
 }

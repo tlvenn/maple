@@ -59,7 +59,6 @@ function InfraPageContent() {
 			data: {
 				startTime,
 				endTime,
-				search: search.trim() || undefined,
 			},
 		}),
 	)
@@ -72,65 +71,72 @@ function InfraPageContent() {
 	)
 
 	return (
-		<DashboardLayout breadcrumbs={[{ label: "Infrastructure" }]}>
-			<div className="space-y-6">
-				<PageHero
-					title="Infrastructure"
-					description="Hosts, containers, and Kubernetes nodes reporting to Maple."
-					actions={heroActions}
-				/>
-
-				{Result.builder(hostsResult)
-					.onInitial(() => (
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs items={[{ label: "Infrastructure" }]} />
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Scroll>
 						<div className="space-y-6">
-							<HostSummaryCardsLoading />
-							<HostTableLoading />
-						</div>
-					))
-					.onError((err) => <QueryErrorState error={err} />)
-					.onSuccess((response, result) => {
-						const hosts = response.data as ReadonlyArray<HostRow>
-
-						if (hosts.length === 0 && !search.trim()) {
-							return (
-								<Empty className="py-16">
-									<EmptyHeader>
-										<EmptyMedia variant="icon">
-											<ServerIcon size={16} />
-										</EmptyMedia>
-										<EmptyTitle>No hosts reporting yet</EmptyTitle>
-										<EmptyDescription>
-											Install the Maple infrastructure agent on a host, container, or
-											Kubernetes cluster to start collecting CPU, memory, disk, and
-											network metrics.
-										</EmptyDescription>
-									</EmptyHeader>
-									<Button onClick={() => setInstallOpen(true)}>
-										<PlusIcon size={14} />
-										Add host
-									</Button>
-								</Empty>
-							)
-						}
-
-						return (
-							<FleetView
-								hosts={hosts}
-								waiting={Boolean(result.waiting)}
-								startTime={startTime}
-								endTime={endTime}
-								search={search}
-								onSearchChange={setSearch}
-								statusFilter={statusFilter}
-								onStatusFilterChange={setStatusFilter}
+							<PageHero
+								title="Infrastructure"
+								description="Hosts, containers, and Kubernetes nodes reporting to Maple."
+								actions={heroActions}
 							/>
-						)
-					})
-					.render()}
-			</div>
 
-			<InstallHostModal open={installOpen} onOpenChange={setInstallOpen} />
-		</DashboardLayout>
+							{Result.builder(hostsResult)
+								.onInitial(() => (
+									<div className="space-y-6">
+										<HostSummaryCardsLoading />
+										<HostTableLoading />
+									</div>
+								))
+								.onError((err) => <QueryErrorState error={err} />)
+								.onSuccess((response, result) => {
+									const hosts = response.data
+
+									if (hosts.length === 0 && !search.trim()) {
+										return (
+											<Empty className="py-16">
+												<EmptyHeader>
+													<EmptyMedia variant="icon">
+														<ServerIcon size={16} />
+													</EmptyMedia>
+													<EmptyTitle>No hosts reporting yet</EmptyTitle>
+													<EmptyDescription>
+														Install the Maple infrastructure agent on a host,
+														container, or Kubernetes cluster to start collecting
+														CPU, memory, disk, and network metrics.
+													</EmptyDescription>
+												</EmptyHeader>
+												<Button onClick={() => setInstallOpen(true)}>
+													<PlusIcon size={14} />
+													Add host
+												</Button>
+											</Empty>
+										)
+									}
+
+									return (
+										<FleetView
+											hosts={hosts}
+											waiting={Boolean(result.waiting)}
+											startTime={startTime}
+											endTime={endTime}
+											search={search}
+											onSearchChange={setSearch}
+											statusFilter={statusFilter}
+											onStatusFilterChange={setStatusFilter}
+										/>
+									)
+								})
+								.render()}
+						</div>
+
+						<InstallHostModal open={installOpen} onOpenChange={setInstallOpen} />
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
 	)
 }
 
@@ -166,77 +172,100 @@ function FleetView({
 		return c
 	}, [annotated])
 
+	const q = search.trim().toLowerCase()
 	const filtered = useMemo(() => {
-		if (statusFilter === "all") return hosts
-		return annotated.filter((a) => a.status === statusFilter).map((a) => a.host)
-	}, [hosts, annotated, statusFilter])
+		const byStatus =
+			statusFilter === "all"
+				? hosts
+				: annotated.filter((a) => a.status === statusFilter).map((a) => a.host)
+		return q ? byStatus.filter((h) => h.hostName.toLowerCase().includes(q)) : byStatus
+	}, [hosts, annotated, statusFilter, q])
 
 	const showFleetGrid = hosts.length >= FLEET_GRID_THRESHOLD
 
 	return (
-		<div className={cn("space-y-6 transition-opacity", waiting && "opacity-60")}>
-			<HostSummaryCards hosts={hosts} startTime={startTime} endTime={endTime} />
-
-			{showFleetGrid && <FleetGrid hosts={hosts} />}
-
-			<div className="flex flex-wrap items-center justify-between gap-3">
-				<InputGroup className="w-64">
-					<InputGroupAddon>
-						<MagnifierIcon />
-					</InputGroupAddon>
-					<InputGroupInput
-						size="sm"
-						placeholder="Search hosts…"
-						value={search}
-						onChange={(e) => onSearchChange(e.target.value)}
-					/>
-					{search && (
-						<InputGroupAddon align="inline-end">
-							<InputGroupButton aria-label="Clear search" onClick={() => onSearchChange("")}>
-								<XmarkIcon />
-							</InputGroupButton>
-						</InputGroupAddon>
-					)}
-				</InputGroup>
-				<div
-					role="tablist"
-					aria-label="Filter hosts by status"
-					className="flex items-center gap-0.5 rounded-md border bg-background p-0.5"
-				>
-					{STATUS_FILTERS.map((opt) => {
-						const count =
-							opt.value === "all" ? hosts.length : (counts[opt.value as HostStatus] ?? 0)
-						const active = statusFilter === opt.value
-						return (
-							<button
-								key={opt.value}
-								type="button"
-								role="tab"
-								aria-selected={active}
-								onClick={() => onStatusFilterChange(opt.value)}
-								className={cn(
-									"inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-[11px] font-medium transition-colors",
-									active
-										? "bg-foreground text-background"
-										: "text-muted-foreground hover:text-foreground",
-								)}
-							>
-								{opt.label}
-								<span
-									className={cn(
-										"tabular-nums",
-										active ? "text-background/70" : "text-foreground/40",
-									)}
-								>
-									{count}
-								</span>
-							</button>
-						)
-					})}
-				</div>
+		<div className={cn("transition-opacity", waiting && "opacity-60")}>
+			<div className="space-y-4">
+				<HostSummaryCards hosts={hosts} startTime={startTime} endTime={endTime} />
+				{showFleetGrid && <FleetGrid hosts={hosts} />}
 			</div>
 
-			<HostTable hosts={filtered} waiting={waiting} />
+			<div className="mt-8 space-y-3">
+				<div className="flex flex-wrap items-center justify-between gap-3">
+					<InputGroup className="w-64">
+						<InputGroupAddon>
+							<MagnifierIcon />
+						</InputGroupAddon>
+						<InputGroupInput
+							size="sm"
+							placeholder="Search hosts…"
+							value={search}
+							onChange={(e) => onSearchChange(e.target.value)}
+						/>
+						{search && (
+							<InputGroupAddon align="inline-end">
+								<InputGroupButton
+									aria-label="Clear search"
+									onClick={() => onSearchChange("")}
+								>
+									<XmarkIcon />
+								</InputGroupButton>
+							</InputGroupAddon>
+						)}
+					</InputGroup>
+					<div
+						role="tablist"
+						aria-label="Filter hosts by status"
+						className="flex items-center gap-0.5 rounded-md border bg-background p-0.5"
+					>
+						{STATUS_FILTERS.map((opt) => {
+							const count = opt.value === "all" ? hosts.length : (counts[opt.value] ?? 0)
+							const active = statusFilter === opt.value
+							return (
+								<button
+									key={opt.value}
+									type="button"
+									role="tab"
+									aria-selected={active}
+									onClick={() => onStatusFilterChange(opt.value)}
+									className={cn(
+										"inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-[11px] font-medium transition-colors",
+										active
+											? "bg-foreground text-background"
+											: "text-muted-foreground hover:text-foreground",
+									)}
+								>
+									{opt.label}
+									<span
+										className={cn(
+											"tabular-nums",
+											active ? "text-background/70" : "text-foreground/40",
+										)}
+									>
+										{count}
+									</span>
+								</button>
+							)
+						})}
+					</div>
+				</div>
+
+				{q && filtered.length === 0 ? (
+					<Empty className="py-12">
+						<EmptyHeader>
+							<EmptyMedia variant="icon">
+								<MagnifierIcon size={16} />
+							</EmptyMedia>
+							<EmptyTitle>No hosts match “{search}”</EmptyTitle>
+							<EmptyDescription>
+								Try a different name, or clear the search to see all hosts.
+							</EmptyDescription>
+						</EmptyHeader>
+					</Empty>
+				) : (
+					<HostTable hosts={filtered} waiting={waiting} />
+				)}
+			</div>
 		</div>
 	)
 }

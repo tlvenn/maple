@@ -8,16 +8,8 @@ import {
 	ChartTooltipContent,
 } from "@maple/ui/components/ui/chart"
 import { VerticalGradient } from "@maple/ui/components/charts/_shared/svg-patterns"
-import { getSemanticSeriesColor } from "@maple/ui/lib/semantic-series-colors"
+import { resolveSeriesColors } from "@maple/ui/lib/semantic-series-colors"
 import { formatValueByUnit, formatBucketLabel, inferBucketSeconds, inferRangeMs } from "@maple/ui/lib/format"
-
-const CHART_COLORS = [
-	"var(--chart-1)",
-	"var(--chart-2)",
-	"var(--chart-3)",
-	"var(--chart-4)",
-	"var(--chart-5)",
-]
 
 /** Sanitize a series key into a valid CSS variable segment */
 function cssKey(name: string): string {
@@ -70,12 +62,12 @@ export function QueryChart({ props }: BaseComponentProps<QueryChartProps>) {
 
 	const chartConfig = useMemo(() => {
 		const config: ChartConfig = {}
-		for (let i = 0; i < originalKeys.length; i++) {
-			const orig = originalKeys[i]
+		const colors = resolveSeriesColors(originalKeys)
+		for (const orig of originalKeys) {
 			const safe = keyMap.get(orig)!
 			config[safe] = {
 				label: orig,
-				color: getSemanticSeriesColor(orig) ?? CHART_COLORS[i % CHART_COLORS.length],
+				color: colors.get(orig),
 			}
 		}
 		return config

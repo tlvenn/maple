@@ -1,5 +1,10 @@
 import { Clock, Effect, Schema } from "effect"
-import { QueryEngineExecuteRequest, type AttributeFilter } from "@maple/query-engine"
+import {
+	QueryEngineExecuteRequest,
+	TracesFacetDimension,
+	type AttributeFilter,
+	formatWarehouseDateTime,
+} from "@maple/query-engine"
 import { TraceId, SpanId } from "@maple/domain"
 import {
 	DeploymentEnvironment,
@@ -10,6 +15,7 @@ import {
 	SpanName,
 } from "@maple/domain/http"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { computeTraceTimeWindow } from "@/lib/trace-time-window"
 import {
 	WarehouseDateTimeString,
 	WarehouseTransformError,
@@ -21,7 +27,7 @@ import {
 	runWarehouseQuery,
 } from "@/api/warehouse/effect-utils"
 import { getHttpInfo, type HttpInfo } from "@maple/ui/lib/http"
-import type { Span, SpanNode } from "@maple/ui/types"
+import type { Span, SpanNode } from "@maple/ui/lib/types"
 import {
 	buildSpanTree,
 	dedupeBySpanId,
@@ -46,17 +52,30 @@ const ListTracesInputSchema = Schema.Struct({
 		Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1000)),
 	),
 	offset: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-	service: Schema.optional(ServiceName),
 	startTime: Schema.optional(WarehouseDateTimeString),
 	endTime: Schema.optional(WarehouseDateTimeString),
+	// Every inclusion facet is multi-select in the sidebar, so each is an array
+	// here and compiles to `IN (...)`. Ticking three services used to reach
+	// ClickHouse as `= <first>`, silently dropping the other two.
+	services: Schema.optional(Schema.Array(ServiceName)),
+	spanNames: Schema.optional(Schema.Array(SpanName)),
+	httpMethods: Schema.optional(Schema.Array(Schema.String)),
+	httpStatusCodes: Schema.optional(Schema.Array(Schema.String)),
+	deploymentEnvs: Schema.optional(Schema.Array(DeploymentEnvironment)),
+	namespaces: Schema.optional(Schema.Array(ServiceNamespace)),
+	// Singular aliases, folded into the arrays by `oneOrMany`. Saved dashboard
+	// widgets store their `dataSource.params` verbatim, so a dashboard created
+	// before this change still sends `service: "api-gw"` — dropping these keys
+	// would silently stop it filtering.
+	service: Schema.optional(ServiceName),
 	spanName: Schema.optional(SpanName),
-	hasError: Schema.optional(Schema.Boolean),
-	minDurationMs: Schema.optional(Schema.Number),
-	maxDurationMs: Schema.optional(Schema.Number),
 	httpMethod: Schema.optional(Schema.String),
 	httpStatusCode: Schema.optional(Schema.String),
 	deploymentEnv: Schema.optional(DeploymentEnvironment),
 	namespace: Schema.optional(ServiceNamespace),
+	hasError: Schema.optional(Schema.Boolean),
+	minDurationMs: Schema.optional(Schema.Number),
+	maxDurationMs: Schema.optional(Schema.Number),
 	attributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	resourceAttributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	rootOnly: Schema.optional(Schema.Boolean),
@@ -92,7 +111,7 @@ const LIST_PROJECTED_COLUMNS = [
 	"spanAttributes.net.peer.name",
 ] as const
 
-export interface TraceRootSpanSummary {
+interface TraceRootSpanSummary {
 	name: string
 	kind: string
 	statusCode: string
@@ -120,15 +139,38 @@ export interface TracesResponse {
 	}
 }
 
+/** Fold the singular alias and the array spelling of a facet into one list. */
+function oneOrMany<T extends string>(
+	list: readonly T[] | undefined,
+	scalar: T | undefined,
+): readonly T[] | undefined {
+	if (list?.length) return list
+	if (scalar) return [scalar]
+	return undefined
+}
+
+/**
+ * HTTP method / status live in `SpanAttributes`, not as filter fields, so a
+ * multi-select becomes one `in` attribute filter rather than N `equals` (which
+ * would AND together and match nothing). A single value stays `equals` so the
+ * bloom/text index prefilters in `buildAttrFilterCondition` still apply.
+ */
+function httpAttributeFilter(key: string, values: readonly string[] | undefined): AttributeFilter | null {
+	if (!values?.length) return null
+	if (values.length === 1) return { key, value: values[0], mode: "equals" }
+	return { key, values: [...values], mode: "in" }
+}
+
 function buildAttributeFilters(input: ListTracesDecoded): AttributeFilter[] {
 	const filters: AttributeFilter[] = []
 
-	if (input.httpMethod) {
-		filters.push({ key: "http.method", value: input.httpMethod, mode: "equals" })
-	}
-	if (input.httpStatusCode) {
-		filters.push({ key: "http.status_code", value: input.httpStatusCode, mode: "equals" })
-	}
+	const method = httpAttributeFilter("http.method", oneOrMany(input.httpMethods, input.httpMethod))
+	if (method) filters.push(method)
+	const status = httpAttributeFilter(
+		"http.status_code",
+		oneOrMany(input.httpStatusCodes, input.httpStatusCode),
+	)
+	if (status) filters.push(status)
 	if (input.attributeFilters) {
 		for (const af of input.attributeFilters) {
 			filters.push({
@@ -231,7 +273,7 @@ const listTracesEffect = Effect.fn("QueryEngine.listTraces")(function* ({ data }
 
 	const rootOnly = input.rootOnly ?? true
 
-	if (input.service) yield* Effect.annotateCurrentSpan("service", input.service)
+	if (input.services?.length) yield* Effect.annotateCurrentSpan("services", input.services.join(","))
 	yield* Effect.annotateCurrentSpan("rootOnly", rootOnly)
 	yield* Effect.annotateCurrentSpan("limit", limit)
 
@@ -248,12 +290,12 @@ const listTracesEffect = Effect.fn("QueryEngine.listTraces")(function* ({ data }
 			// SpanAttributes / ResourceAttributes maps — large win on wide traces.
 			columns: LIST_PROJECTED_COLUMNS,
 			filters: {
-				serviceName: input.service,
-				spanName: input.spanName,
+				serviceNames: oneOrMany(input.services, input.service),
+				spanNames: oneOrMany(input.spanNames, input.spanName),
 				rootSpansOnly: rootOnly,
 				errorsOnly: input.hasError,
-				environments: input.deploymentEnv ? [input.deploymentEnv] : undefined,
-				namespaces: input.namespace ? [input.namespace] : undefined,
+				environments: oneOrMany(input.deploymentEnvs, input.deploymentEnv),
+				namespaces: oneOrMany(input.namespaces, input.namespace),
 				minDurationMs: input.minDurationMs,
 				maxDurationMs: input.maxDurationMs,
 				matchModes: Object.keys(matchModes).length > 0 ? matchModes : undefined,
@@ -292,7 +334,7 @@ const listTracesEffect = Effect.fn("QueryEngine.listTraces")(function* ({ data }
 // Canonical Span/SpanNode shapes live in @maple/ui so the shared trace
 // components can consume them; re-export here so existing
 // `@/api/warehouse/traces` importers keep working unchanged.
-export type { Span, SpanNode } from "@maple/ui/types"
+export type { Span, SpanNode } from "@maple/ui/lib/types"
 
 export interface SpanHierarchyResponse {
 	traceId: TraceId
@@ -314,20 +356,6 @@ const GetSpanHierarchyInputSchema = Schema.Struct({
 
 export type GetSpanHierarchyInput = Schema.Schema.Type<typeof GetSpanHierarchyInputSchema>
 
-const SPAN_HIERARCHY_RANGE_HOURS = 1
-const tinybirdDateTime = (d: Date): string => d.toISOString().replace("T", " ").slice(0, 19)
-
-function computeSpanHierarchyRange(timestamp: string | undefined): { startTime: string; endTime: string } | undefined {
-	if (!timestamp) return undefined
-	const t = new Date(timestamp.includes("T") ? timestamp : `${timestamp.replace(" ", "T")}Z`)
-	if (Number.isNaN(t.getTime())) return undefined
-	const halfWidthMs = SPAN_HIERARCHY_RANGE_HOURS * 60 * 60 * 1000
-	return {
-		startTime: tinybirdDateTime(new Date(t.getTime() - halfWidthMs)),
-		endTime: tinybirdDateTime(new Date(t.getTime() + halfWidthMs)),
-	}
-}
-
 export function getSpanHierarchy({ data }: { data: GetSpanHierarchyInput }) {
 	return getSpanHierarchyEffect({ data })
 }
@@ -342,7 +370,7 @@ const getSpanHierarchyEffect = Effect.fn("QueryEngine.getSpanHierarchy")(functio
 	yield* Effect.annotateCurrentSpan("traceId", input.traceId)
 	if (input.spanId) yield* Effect.annotateCurrentSpan("spanId", input.spanId)
 
-	const range = computeSpanHierarchyRange(input.timestamp)
+	const range = computeTraceTimeWindow(input.timestamp)
 
 	const result = yield* runWarehouseQuery("spanHierarchy", () =>
 		Effect.gen(function* () {
@@ -404,7 +432,7 @@ const getSpanDetailEffect = Effect.fn("QueryEngine.getSpanDetail")(function* ({
 	yield* Effect.annotateCurrentSpan("traceId", input.traceId)
 	yield* Effect.annotateCurrentSpan("spanId", input.spanId)
 
-	const range = computeSpanHierarchyRange(input.timestamp)
+	const range = computeTraceTimeWindow(input.timestamp)
 
 	const result = yield* runWarehouseQuery("spanDetail", () =>
 		Effect.gen(function* () {
@@ -425,12 +453,12 @@ const getSpanDetailEffect = Effect.fn("QueryEngine.getSpanDetail")(function* ({
 	} satisfies SpanDetailResult
 })
 
-export interface FacetItem {
+interface FacetItem {
 	name: string
 	count: number
 }
 
-export interface TracesFacets {
+interface TracesFacets {
 	services: FacetItem[]
 	spanNames: FacetItem[]
 	httpMethods: FacetItem[]
@@ -450,27 +478,28 @@ export interface TracesFacetsResponse {
 	data: TracesFacets
 }
 
-export interface TracesDurationStatsResponse {
-	data: Array<{
-		minDurationMs: number
-		maxDurationMs: number
-		p50DurationMs: number
-		p95DurationMs: number
-	}>
-}
-
 const GetTracesFacetsInputSchema = Schema.Struct({
 	startTime: Schema.optional(WarehouseDateTimeString),
 	endTime: Schema.optional(WarehouseDateTimeString),
+	services: Schema.optional(Schema.Array(ServiceName)),
+	spanNames: Schema.optional(Schema.Array(SpanName)),
+	httpMethods: Schema.optional(Schema.Array(Schema.String)),
+	httpStatusCodes: Schema.optional(Schema.Array(Schema.String)),
+	deploymentEnvs: Schema.optional(Schema.Array(DeploymentEnvironment)),
+	namespaces: Schema.optional(Schema.Array(ServiceNamespace)),
+	// Singular aliases, folded into the arrays by `oneOrMany`. Saved dashboard
+	// widgets store their `dataSource.params` verbatim, so a dashboard created
+	// before this change still sends `service: "api-gw"` — dropping these keys
+	// would silently stop it filtering.
 	service: Schema.optional(ServiceName),
 	spanName: Schema.optional(SpanName),
-	hasError: Schema.optional(Schema.Boolean),
-	minDurationMs: Schema.optional(Schema.Number),
-	maxDurationMs: Schema.optional(Schema.Number),
 	httpMethod: Schema.optional(Schema.String),
 	httpStatusCode: Schema.optional(Schema.String),
 	deploymentEnv: Schema.optional(DeploymentEnvironment),
 	namespace: Schema.optional(ServiceNamespace),
+	hasError: Schema.optional(Schema.Boolean),
+	minDurationMs: Schema.optional(Schema.Number),
+	maxDurationMs: Schema.optional(Schema.Number),
 	attributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	resourceAttributeFilters: Schema.optional(Schema.Array(AttributeFilterInput)),
 	serviceMatchMode: ContainsMatchMode,
@@ -492,13 +521,13 @@ function buildTracesFiltersFromInput(input: GetTracesFacetsDecoded) {
 	if (input.namespaceMatchMode === "contains") matchModes.serviceNamespace = "contains"
 
 	return {
-		serviceName: input.service,
-		spanName: input.spanName,
+		serviceNames: oneOrMany(input.services, input.service),
+		spanNames: oneOrMany(input.spanNames, input.spanName),
 		errorsOnly: input.hasError,
 		minDurationMs: input.minDurationMs,
 		maxDurationMs: input.maxDurationMs,
-		environments: input.deploymentEnv ? [input.deploymentEnv] : undefined,
-		namespaces: input.namespace ? [input.namespace] : undefined,
+		environments: oneOrMany(input.deploymentEnvs, input.deploymentEnv),
+		namespaces: oneOrMany(input.namespaces, input.namespace),
 		matchModes: Object.keys(matchModes).length > 0 ? matchModes : undefined,
 		attributeFilters: attributeFilters.length > 0 ? attributeFilters : undefined,
 		resourceAttributeFilters: resourceAttributeFilters.length > 0 ? resourceAttributeFilters : undefined,
@@ -516,7 +545,7 @@ const getTracesFacetsEffect = Effect.fn("QueryEngine.getTracesFacets")(function*
 }) {
 	const input = yield* decodeInput(GetTracesFacetsInputSchema, data ?? {}, "getTracesFacets")
 
-	if (input.service) yield* Effect.annotateCurrentSpan("service", input.service)
+	if (input.services?.length) yield* Effect.annotateCurrentSpan("services", input.services.join(","))
 
 	const filters = buildTracesFiltersFromInput(input)
 	const fallback = defaultTimeRange(yield* Clock.currentTimeMillis)
@@ -566,6 +595,47 @@ const getTracesFacetsEffect = Effect.fn("QueryEngine.getTracesFacets")(function*
 	}
 })
 
+// Single facet list for dashboard variables: compiles only the requested UNION
+// branch server-side and skips the duration-stats companion query, instead of
+// the full multi-facet scan `getTracesFacets` runs for the traces sidebar.
+const GetTracesFacetValuesInputSchema = Schema.Struct({
+	startTime: Schema.optional(WarehouseDateTimeString),
+	endTime: Schema.optional(WarehouseDateTimeString),
+	facet: TracesFacetDimension,
+})
+
+export type GetTracesFacetValuesInput = (typeof GetTracesFacetValuesInputSchema)["Encoded"]
+
+export function getTracesFacetValues({ data }: { data: GetTracesFacetValuesInput }) {
+	return getTracesFacetValuesEffect({ data })
+}
+
+const getTracesFacetValuesEffect = Effect.fn("QueryEngine.getTracesFacetValues")(function* ({
+	data,
+}: {
+	data: GetTracesFacetValuesInput
+}) {
+	const input = yield* decodeInput(GetTracesFacetValuesInputSchema, data ?? {}, "getTracesFacetValues")
+
+	yield* Effect.annotateCurrentSpan("facet", input.facet)
+
+	const fallback = defaultTimeRange(yield* Clock.currentTimeMillis)
+	const response = yield* executeQueryEngine(
+		"queryEngine.getTracesFacetValues",
+		new QueryEngineExecuteRequest({
+			startTime: input.startTime ?? fallback.startTime,
+			endTime: input.endTime ?? fallback.endTime,
+			query: { kind: "facets" as const, source: "traces" as const, facet: input.facet },
+		}),
+	)
+
+	return {
+		data: extractFacets(response)
+			.filter((row) => row.facetType === input.facet)
+			.map((row): FacetItem => ({ name: row.name, count: Number(row.count) })),
+	}
+})
+
 export function getTracesDurationStats({ data }: { data: GetTracesFacetsInput }) {
 	return getTracesDurationStatsEffect({ data })
 }
@@ -600,17 +670,15 @@ const GetSpanAttributeKeysInputSchema = Schema.Struct({
 
 export type GetSpanAttributeKeysInput = Schema.Schema.Type<typeof GetSpanAttributeKeysInputSchema>
 
-export interface SpanAttributeKeysResponse {
-	data: Array<{ attributeKey: string; usageCount: number }>
-}
-
 export function getSpanAttributeKeys({ data }: { data: GetSpanAttributeKeysInput }) {
 	return getSpanAttributeKeysEffect({ data })
 }
 
 const defaultTimeRange = (nowMillis: number) => {
-	const fmt = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 19)
-	return { startTime: fmt(nowMillis - 24 * 60 * 60 * 1000), endTime: fmt(nowMillis) }
+	return {
+		startTime: formatWarehouseDateTime(nowMillis - 24 * 60 * 60 * 1000),
+		endTime: formatWarehouseDateTime(nowMillis),
+	}
 }
 
 const getSpanAttributeKeysEffect = Effect.fn("QueryEngine.getSpanAttributeKeys")(function* ({
@@ -644,10 +712,6 @@ const GetSpanAttributeValuesInputSchema = Schema.Struct({
 })
 
 export type GetSpanAttributeValuesInput = Schema.Schema.Type<typeof GetSpanAttributeValuesInputSchema>
-
-export interface SpanAttributeValuesResponse {
-	data: Array<{ attributeValue: string; usageCount: number }>
-}
 
 export function getSpanAttributeValues({ data }: { data: GetSpanAttributeValuesInput }) {
 	return getSpanAttributeValuesEffect({ data })
@@ -696,10 +760,6 @@ const GetResourceAttributeKeysInputSchema = Schema.Struct({
 
 export type GetResourceAttributeKeysInput = Schema.Schema.Type<typeof GetResourceAttributeKeysInputSchema>
 
-export interface ResourceAttributeKeysResponse {
-	data: Array<{ attributeKey: string; usageCount: number }>
-}
-
 export function getResourceAttributeKeys({ data }: { data: GetResourceAttributeKeysInput }) {
 	return getResourceAttributeKeysEffect({ data })
 }
@@ -739,10 +799,6 @@ const GetResourceAttributeValuesInputSchema = Schema.Struct({
 })
 
 export type GetResourceAttributeValuesInput = Schema.Schema.Type<typeof GetResourceAttributeValuesInputSchema>
-
-export interface ResourceAttributeValuesResponse {
-	data: Array<{ attributeValue: string; usageCount: number }>
-}
 
 export function getResourceAttributeValues({ data }: { data: GetResourceAttributeValuesInput }) {
 	return getResourceAttributeValuesEffect({ data })

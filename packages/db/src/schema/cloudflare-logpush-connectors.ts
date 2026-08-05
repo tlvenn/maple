@@ -1,6 +1,11 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { boolean, index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core"
 
-export const cloudflareLogpushConnectors = sqliteTable(
+// NOTE: the manual connector CRUD (CloudflareLogpushService + UI) was removed in favor of the
+// account OAuth integration, but this table intentionally stays: the Rust ingest gateway's
+// `/v1/logpush/cloudflare/...` receiver resolves connector secrets from it (existing jobs keep
+// flowing), OrganizationService purges it on org deletion, and the upcoming OAuth-driven Logpush
+// auto-provisioning will create rows here programmatically instead of via manual setup.
+export const cloudflareLogpushConnectors = pgTable(
 	"cloudflare_logpush_connectors",
 	{
 		id: text("id").notNull().primaryKey(),
@@ -13,12 +18,12 @@ export const cloudflareLogpushConnectors = sqliteTable(
 		secretIv: text("secret_iv").notNull(),
 		secretTag: text("secret_tag").notNull(),
 		secretHash: text("secret_hash").notNull(),
-		enabled: integer("enabled", { mode: "number" }).notNull().default(1),
-		lastReceivedAt: integer("last_received_at", { mode: "number" }),
+		enabled: boolean("enabled").notNull().default(true),
+		lastReceivedAt: timestamp("last_received_at", { withTimezone: true, mode: "date" }),
 		lastError: text("last_error"),
-		secretRotatedAt: integer("secret_rotated_at", { mode: "number" }).notNull(),
-		createdAt: integer("created_at", { mode: "number" }).notNull(),
-		updatedAt: integer("updated_at", { mode: "number" }).notNull(),
+		secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true, mode: "date" }).notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
 		createdBy: text("created_by").notNull(),
 		updatedBy: text("updated_by").notNull(),
 	},

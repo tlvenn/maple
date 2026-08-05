@@ -1,14 +1,15 @@
 import { McpQueryError, optionalStringParam, requiredStringParam, type McpToolRegistrar } from "./types"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
+import { DashboardPersistenceService } from "@/services/dashboards/DashboardPersistenceService"
 import {
 	DashboardTemplateParameterKey,
 	PortableDashboardDocument,
+	defaultWidgetHeight,
 } from "@maple/domain/http"
 import { DASHBOARD_TEMPLATES, getTemplate } from "@/dashboard-templates"
-import { formatValidationSummary, inspectWidgetsAfterMutation } from "../lib/inspect-widget"
+import { formatValidationSummary, inspectWidgetsAfterMutation } from "@/mcp/lib/inspect-widget"
 import {
 	CHART_DISPLAY_AREA,
 	chartDisplayForMetric,
@@ -17,6 +18,8 @@ import {
 	makeQueryDraft,
 } from "@/dashboard-templates/helpers"
 import type { TemplateParameterValues, WidgetDef } from "@/dashboard-templates"
+import { validateDashboardTimeRange } from "@/mcp/lib/resolve-dashboard-time-range"
+import { MAX_LIST_RANGE_SECONDS, MAX_QUERY_RANGE_SECONDS, formatRangeSeconds } from "@maple/query-engine"
 
 const decodePortableDashboard = Schema.decodeUnknownEffect(PortableDashboardDocument)
 const PortableDashboardFromJson = Schema.fromJsonString(PortableDashboardDocument)
@@ -27,7 +30,8 @@ const decodeParamKey = Schema.decodeUnknownSync(DashboardTemplateParameterKey)
 // ---------------------------------------------------------------------------
 
 function inferUnit(metric: string): string {
-	if (["avg_duration", "p50_duration", "p95_duration", "p99_duration"].includes(metric)) return "duration_ms"
+	if (["avg_duration", "p50_duration", "p95_duration", "p99_duration"].includes(metric))
+		return "duration_ms"
 	if (metric === "error_rate") return "percent"
 	return "number"
 }
@@ -211,33 +215,33 @@ function simpleSpecToWidget(
 
 function computeAutoLayout(specs: SimpleWidgetSpec[]): Array<{ x: number; y: number; w: number; h: number }> {
 	const layouts: Array<{ x: number; y: number; w: number; h: number }> = []
+	// Stats are the only kind that shares a row, so its height is what advances
+	// `y` whenever an in-progress stat row is closed out.
+	const statHeight = defaultWidgetHeight("stat").h
 	let y = 0
 	let x = 0
 
 	for (const spec of specs) {
 		const viz = spec.visualization ?? "chart"
+		const { h } = defaultWidgetHeight(viz)
+
 		if (viz === "stat") {
 			if (x + 4 > 12) {
-				y += 2
+				y += statHeight
 				x = 0
 			}
-			layouts.push({ x, y, w: 4, h: 2 })
+			layouts.push({ x, y, w: 4, h })
 			x += 4
-		} else if (viz === "table" || viz === "list") {
-			if (x > 0) {
-				y += 2
-				x = 0
-			}
-			layouts.push({ x: 0, y, w: 12, h: 5 })
-			y += 5
-		} else {
-			if (x > 0) {
-				y += 2
-				x = 0
-			}
-			layouts.push({ x: 0, y, w: 12, h: 4 })
-			y += 4
+			continue
 		}
+
+		// Everything else is full-bleed, so close any open stat row first.
+		if (x > 0) {
+			y += statHeight
+			x = 0
+		}
+		layouts.push({ x: 0, y, w: 12, h })
+		y += h
 	}
 
 	return layouts
@@ -275,12 +279,7 @@ function parseSimpleWidgets(json: string): WidgetDef[] | string {
 	return widgets
 }
 
-const TIME_RANGE_MAP: Record<string, string> = {
-	"1h": "1h",
-	"6h": "6h",
-	"24h": "24h",
-	"7d": "7d",
-}
+const DEFAULT_TIME_RANGE = "1h"
 
 // ---------------------------------------------------------------------------
 // Tool registration
@@ -303,14 +302,16 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 			"Custom JSON: provide dashboard_json with full widget definitions (use get_dashboard to see schema). " +
 			"For raw widget JSON, trace/log queries omit the metric-only fields (`metricName`/`metricType`/`isMonotonic`); `whereClause` is a custom grammar (use `exists` not SQL `IS NULL`). See `maple://instructions` for the full widget JSON shape.\n\n" +
 			"After persistence, automatically validates every inspectable widget (custom_query_builder_timeseries/breakdown) and includes a per-widget verdict (looks_healthy/suspicious/broken) + sanity flags in the response. " +
-			"Pass `validate: \"false\"` to skip validation when creating dashboards with many widgets.",
+			'Pass `validate: "false"` to skip validation when creating dashboards with many widgets.',
 		Schema.Struct({
 			name: requiredStringParam("Dashboard name"),
 			template: optionalStringParam(
 				"Template ID (kebab-case, e.g. `service-health`). Default: service-health (if no widgets/dashboard_json).",
 			),
 			service_name: optionalStringParam("Scope template widgets to a specific service"),
-			time_range: optionalStringParam("Time range: 1h, 6h, 24h, or 7d (default: 1h)"),
+			time_range: optionalStringParam(
+				`Dashboard time range as relative shorthand — e.g. 15m, 6h, 24h, 7d, 2w, 3mo, or "today". Up to ${formatRangeSeconds(MAX_QUERY_RANGE_SECONDS)} (default: ${DEFAULT_TIME_RANGE}). Note that list widgets (recent traces/logs) only support ${formatRangeSeconds(MAX_LIST_RANGE_SECONDS)} and will ask the viewer to narrow their range on wider dashboards.`,
+			),
 			description: optionalStringParam("Dashboard description"),
 			metric_name: optionalStringParam(
 				"Metric name for metric-overview template (use list_metrics to discover). Example: http.server.duration",
@@ -330,6 +331,16 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 		}),
 		Effect.fn("McpTool.createDashboard")(function* (params) {
 			let portable: PortableDashboardDocument
+
+			if (params.time_range) {
+				const timeRangeError = validateDashboardTimeRange(params.time_range)
+				if (timeRangeError) {
+					return {
+						isError: true as const,
+						content: [{ type: "text" as const, text: timeRangeError }],
+					}
+				}
+			}
 
 			const rawTemplate = params.template
 			const templateName =
@@ -361,7 +372,7 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 						(cause) =>
 							new McpQueryError({
 								message: "Invalid dashboard JSON",
-								pipe: "create_dashboard",
+								pipeName: "create_dashboard",
 								cause,
 							}),
 					),
@@ -375,7 +386,7 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 					}
 				}
 
-				const timeRangeValue = TIME_RANGE_MAP[params.time_range ?? "1h"] ?? "1h"
+				const timeRangeValue = params.time_range ?? DEFAULT_TIME_RANGE
 
 				portable = yield* decodePortableDashboard({
 					name: params.name,
@@ -387,7 +398,7 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 						(error) =>
 							new McpQueryError({
 								message: `Widget generation error: ${String(error)}`,
-								pipe: "create_dashboard",
+								pipeName: "create_dashboard",
 								cause: error,
 							}),
 					),
@@ -440,14 +451,18 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 							name: params.name || built.name,
 							...(description && { description }),
 							...(built.tags && { tags: built.tags }),
-							timeRange: built.timeRange,
+							// An explicit time_range wins over the template's default —
+							// this branch used to drop the parameter entirely.
+							timeRange: params.time_range
+								? { type: "relative" as const, value: params.time_range }
+								: built.timeRange,
 							widgets: built.widgets,
 						})
 					},
 					catch: (error) =>
 						new McpQueryError({
 							message: `Template generation error: ${String(error)}`,
-							pipe: "create_dashboard",
+							pipeName: "create_dashboard",
 							cause: error,
 						}),
 				})
@@ -475,7 +490,7 @@ export function registerCreateDashboardTool(server: McpToolRegistrar) {
 					(error) =>
 						new McpQueryError({
 							message: error.message,
-							pipe: "create_dashboard",
+							pipeName: "create_dashboard",
 							cause: error,
 						}),
 				),

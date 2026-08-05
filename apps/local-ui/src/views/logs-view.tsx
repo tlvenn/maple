@@ -1,25 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { LogAttributeChip } from "@maple/ui/components/logs/log-attribute-chip"
 import { CodeIcon } from "@maple/ui/components/icons"
 import { Spinner } from "@maple/ui/components/ui/spinner"
-import { Separator } from "@maple/ui/components/ui/separator"
 import { pickImportantAttributes } from "@maple/ui/lib/log-attributes"
 import { getSeverityColor } from "@maple/ui/lib/severity"
 import { useLocalLogs, useLocalLogSeverities } from "../hooks/use-local-logs"
-import { useLocalServices } from "../hooks/use-local-services"
+import { useLocalLogServices } from "../hooks/use-local-log-services"
+import { useLogTimeWindow } from "../hooks/use-log-time-window"
 import { useQueryParams } from "../lib/router"
 import { DEFAULT_RANGE } from "../lib/time"
 import { normalizeLog, type LocalLog } from "../lib/log-shape"
 import { LogDetailSheet } from "../components/log-detail-sheet"
-import { FilterSection, SearchableFilterSection } from "../components/filter-section"
+import { FilterSection, SearchableFilterSection } from "@maple/ui/components/filters/filter-section"
 import {
 	FilterSidebarBody,
 	FilterSidebarFrame,
 	FilterSidebarHeader,
-} from "../components/filter-sidebar"
+} from "@maple/ui/components/filters/filter-sidebar"
 import { PageShell } from "../components/page-shell"
-import { Toolbar, ToolbarSearch, ToolbarStat, TimeRangeSelect } from "../components/toolbar"
+import {
+	Toolbar,
+	ToolbarSearch,
+	ToolbarStat,
+	ToolbarStats,
+	TimeRangeSelect,
+	RefreshButton,
+} from "../components/toolbar"
 import { EmptyState, ErrorState, ListSkeleton } from "../components/view-states"
 
 const ROW_HEIGHT = 36
@@ -31,16 +38,21 @@ export function LogsView() {
 	const service = query.get("service") || undefined
 	const severity = query.get("severity") || undefined
 	const search = query.get("q") || undefined
-
-	const services = useLocalServices(range)
-	const severities = useLocalLogSeverities(range)
-	const { data, isPending, isError, error, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } =
-		useLocalLogs({ service, severity, search, range })
-
-	const rows = useMemo<ReadonlyArray<LocalLog>>(
-		() => (data?.pages.flat() ?? []).map(normalizeLog),
-		[data],
+	const timeWindow = useLogTimeWindow(range)
+	const updateParamsWithFreshTimeWindow = useCallback(
+		(updates: Record<string, string | null | undefined>) => {
+			timeWindow.advance()
+			setParams(updates)
+		},
+		[setParams, timeWindow.advance],
 	)
+
+	const services = useLocalLogServices(timeWindow.bounds)
+	const severities = useLocalLogSeverities(timeWindow.bounds)
+	const { data, isPending, isError, error, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } =
+		useLocalLogs({ service, severity, search }, timeWindow.bounds)
+
+	const rows = useMemo<ReadonlyArray<LocalLog>>(() => (data?.pages.flat() ?? []).map(normalizeLog), [data])
 	const scrollRef = useRef<HTMLDivElement>(null)
 
 	const [selectedLog, setSelectedLog] = useState<LocalLog | null>(null)
@@ -70,51 +82,47 @@ export function LogsView() {
 	const hasActiveFilters = !!service || !!severity
 
 	const sidebar = (
-		<FilterSidebarFrame waiting={services.isFetching || severities.isFetching}>
+		<FilterSidebarFrame
+			className="w-56 shrink-0 px-4"
+			waiting={services.isFetching || severities.isFetching}
+		>
 			<FilterSidebarHeader
 				canClear={hasActiveFilters}
-				onClear={() => setParams({ service: null, severity: null })}
+				onClear={() => updateParamsWithFreshTimeWindow({ service: null, severity: null })}
 			/>
 			<FilterSidebarBody>
-				{(severities.data?.length ?? 0) > 0 && (
-					<FilterSection
-						title="Severity"
-						options={(severities.data ?? []).map((o) => ({ name: o.name, count: o.count }))}
-						selected={severity ? [severity] : []}
-						onChange={(vals) => setParams({ severity: vals.at(-1) ?? null })}
-					/>
-				)}
-				{(services.data?.length ?? 0) > 0 && (
-					<>
-						<Separator className="my-2" />
-						<SearchableFilterSection
-							title="Service"
-							options={(services.data ?? []).map((o) => ({ name: o.name, count: o.count }))}
-							selected={service ? [service] : []}
-							onChange={(vals) => setParams({ service: vals.at(-1) ?? null })}
-						/>
-					</>
-				)}
+				<FilterSection
+					title="Severity"
+					options={(severities.data ?? []).map((o) => ({ name: o.name, count: o.count }))}
+					selected={severity ? [severity] : []}
+					onChange={(vals) => updateParamsWithFreshTimeWindow({ severity: vals.at(-1) ?? null })}
+				/>
+				<SearchableFilterSection
+					title="Service"
+					options={(services.data ?? []).map((o) => ({ name: o.name, count: o.count }))}
+					selected={service ? [service] : []}
+					onChange={(vals) => updateParamsWithFreshTimeWindow({ service: vals.at(-1) ?? null })}
+				/>
 			</FilterSidebarBody>
 		</FilterSidebarFrame>
 	)
 
 	const toolbar = (
-		<Toolbar
-			search={
-				<ToolbarSearch
-					query={search ?? ""}
-					onSearch={(value) => setParams({ q: value ?? null })}
-					placeholder="Search log bodies…"
+		<Toolbar>
+			<ToolbarSearch
+				query={search ?? ""}
+				onSearch={(value) => updateParamsWithFreshTimeWindow({ q: value ?? null })}
+				placeholder="Search log bodies…"
+			/>
+			<ToolbarStats>
+				<ToolbarStat value={rows.length} label={hasNextPage ? "logs+" : "logs"} />
+				<RefreshButton onBeforeRefresh={timeWindow.advance} />
+				<TimeRangeSelect
+					value={range}
+					onChange={(next) => updateParamsWithFreshTimeWindow({ range: next })}
 				/>
-			}
-			stats={
-				<>
-					<ToolbarStat value={rows.length} label={hasNextPage ? "logs+" : "logs"} />
-					<TimeRangeSelect value={range} onChange={(next) => setParams({ range: next })} />
-				</>
-			}
-		/>
+			</ToolbarStats>
+		</Toolbar>
 	)
 
 	return (
@@ -221,7 +229,12 @@ function LogRow({
 			{chips.length > 0 && (
 				<div className="hidden min-w-0 max-w-[45%] shrink items-center gap-1 overflow-hidden md:flex">
 					{chips.map((chip) => (
-						<LogAttributeChip key={chip.key} attrKey={chip.key} value={chip.value} tone={chip.tone} />
+						<LogAttributeChip
+							key={chip.key}
+							attrKey={chip.key}
+							value={chip.value}
+							tone={chip.tone}
+						/>
 					))}
 				</div>
 			)}

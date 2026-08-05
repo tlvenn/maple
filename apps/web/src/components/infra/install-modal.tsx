@@ -1,6 +1,5 @@
 import { Result, useAtomValue } from "@/lib/effect-atom"
 import { useMemo, useState } from "react"
-import { toast } from "sonner"
 
 import { Button } from "@maple/ui/components/ui/button"
 import {
@@ -9,6 +8,7 @@ import {
 	DialogDescription,
 	DialogFooter,
 	DialogHeader,
+	DialogPanel,
 	DialogTitle,
 } from "@maple/ui/components/ui/dialog"
 import {
@@ -19,9 +19,10 @@ import {
 } from "@maple/ui/components/ui/input-group"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 
-import { CheckIcon, CopyIcon } from "@/components/icons"
+import { EyeIcon } from "@/components/icons"
+import { CopyButton } from "@maple/ui/components/ui/copy-button"
 import { ingestUrl } from "@/lib/services/common/ingest-url"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
 
 const HOSTED_INGEST_URL = "https://ingest.maple.dev"
 const DOCS_URL = "https://maple.dev/docs/guides/kubernetes-infrastructure"
@@ -29,6 +30,14 @@ const DOCS_URL = "https://maple.dev/docs/guides/kubernetes-infrastructure"
 interface InstallModalProps {
 	open: boolean
 	onOpenChange: (open: boolean) => void
+}
+
+// Mask the secret so it isn't sitting in plaintext (screenshots, shoulder
+// surfing). Keep the `maple_sk_` prefix for recognizability and use a
+// fixed-width dot run so the real key length isn't leaked.
+function maskToken(token: string) {
+	const prefix = "maple_sk_"
+	return token.startsWith(prefix) ? `${prefix}${"•".repeat(24)}` : "•".repeat(24)
 }
 
 function helmCommand(token: string) {
@@ -49,34 +58,36 @@ function helmCommand(token: string) {
 }
 
 export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
-	const [copied, setCopied] = useState(false)
+	const [revealed, setRevealed] = useState(false)
 
-	const keysResult = useAtomValue(MapleApiAtomClient.query("ingestKeys", "get", {}))
+	const keysResult = useAtomValue(MapleApiV2AtomClient.query("ingestKeys", "retrieve", {}))
 
 	const token = useMemo(
 		() =>
 			Result.builder(keysResult)
-				.onSuccess((v) => v.privateKey)
+				.onSuccess((v) => v.private_key)
 				.orElse(() => ""),
 		[keysResult],
 	)
 
+	// `snippet` is the real command (used for copy); `displaySnippet` masks the
+	// key unless the user explicitly reveals it.
 	const snippet = useMemo(() => (token ? helmCommand(token) : ""), [token])
-
-	async function handleCopy() {
-		if (!snippet) return
-		try {
-			await navigator.clipboard.writeText(snippet)
-			setCopied(true)
-			toast.success("Install command copied")
-			setTimeout(() => setCopied(false), 2000)
-		} catch {
-			toast.error("Failed to copy")
-		}
-	}
+	const displaySnippet = useMemo(
+		() => (revealed || !token ? snippet : helmCommand(maskToken(token))),
+		[revealed, snippet, token],
+	)
 
 	return (
-		<Dialog open={open} onOpenChange={onOpenChange}>
+		<Dialog
+			open={open}
+			onOpenChange={(next) => {
+				// Re-mask the key whenever the modal closes, so it's never exposed
+				// by default on the next open.
+				if (!next) setRevealed(false)
+				onOpenChange(next)
+			}}
+		>
 			<DialogContent className="max-w-2xl overflow-hidden">
 				<DialogHeader>
 					<DialogTitle>Install the Kubernetes collector</DialogTitle>
@@ -87,36 +98,34 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="space-y-4 py-2 min-w-0">
+				<DialogPanel className="space-y-4 min-w-0">
 					{Result.isInitial(keysResult) ? (
 						<Skeleton className="h-36 w-full" />
 					) : (
 						<InputGroup>
 							<InputGroupTextarea
 								readOnly
-								value={snippet}
+								wrap="off"
+								value={displaySnippet}
 								rows={ingestUrl !== HOSTED_INGEST_URL ? 6 : 5}
-								className="font-mono text-xs tracking-wide select-all whitespace-pre leading-relaxed"
+								className="font-mono text-xs tracking-wide select-all leading-relaxed"
 							/>
 							<InputGroupAddon align="block-end">
 								<InputGroupButton
-									onClick={handleCopy}
-									aria-label="Copy command"
-									title={copied ? "Copied!" : "Copy"}
-									className="ml-auto"
+									onClick={() => setRevealed((v) => !v)}
+									aria-label={revealed ? "Hide key" : "Reveal key"}
+									title={revealed ? "Hide key" : "Reveal key"}
 								>
-									{copied ? (
-										<>
-											<CheckIcon size={14} className="text-severity-info" />
-											Copied
-										</>
-									) : (
-										<>
-											<CopyIcon size={14} />
-											Copy
-										</>
-									)}
+									<EyeIcon size={14} />
+									{revealed ? "Hide key" : "Reveal key"}
 								</InputGroupButton>
+								<CopyButton
+									value={snippet}
+									label="Install command"
+									idleLabel="Copy"
+									render={<InputGroupButton />}
+									className="ml-auto"
+								/>
 							</InputGroupAddon>
 						</InputGroup>
 					)}
@@ -127,7 +136,7 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 						Settings → Ingestion if it leaks. For production, prefer an existing Secret over an
 						inline value — see the docs.
 					</p>
-				</div>
+				</DialogPanel>
 
 				<DialogFooter>
 					<Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -136,7 +145,12 @@ export function InstallHostModal({ open, onOpenChange }: InstallModalProps) {
 					<Button
 						variant="outline"
 						render={
-							<a href={DOCS_URL} target="_blank" rel="noopener noreferrer" aria-label="View docs" />
+							<a
+								href={DOCS_URL}
+								target="_blank"
+								rel="noopener noreferrer"
+								aria-label="View docs"
+							/>
 						}
 					>
 						View docs

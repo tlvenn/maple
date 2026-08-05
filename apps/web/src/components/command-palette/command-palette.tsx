@@ -17,34 +17,37 @@ import {
 } from "@maple/ui/components/ui/command"
 import { Kbd } from "@maple/ui/components/ui/kbd"
 import {
+	ChatBubbleSparkleIcon,
 	GearIcon,
 	GridSquareCirclePlusIcon,
 	KeyboardIcon,
 	MoonIcon,
 	SunIcon,
 } from "@/components/icons"
-import {
-	investigateNavItems,
-	mainNavItems,
-	topologyNavItems,
-	visibleSignalsNavItems,
-} from "@/components/dashboard/nav-items"
+import { openGlobalChat } from "@/components/chat/global-chat-sheet"
+import { paletteNavItems } from "@/components/dashboard/nav-items"
 import { useDashboardPreferences } from "@/hooks/use-dashboard-preferences"
-import { useDashboardStore } from "@/hooks/use-dashboard-store"
+import { useDashboardsRead } from "@/hooks/use-dashboard-store"
 import { useInfraEnabled } from "@/hooks/use-infra-enabled"
+import { useAtomValue } from "@/lib/effect-atom"
+import { Result } from "@/lib/effect-atom"
+import { getTracesFacetValuesResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
+import { ServiceDot } from "@maple/ui/components/service-dot"
 
 const MAX_RESULTS = 12
 
 interface PaletteEntry {
 	id: string
 	title: string
-	group: "Navigation" | "Dashboards" | "Actions"
+	group: "Navigation" | "Services" | "Dashboards" | "Actions"
 	keywords?: string
 	icon?: typeof GearIcon
 	/** Static route to navigate to (rendered as a router Link). */
 	href?: string
 	/** Dashboard id for /dashboards/$dashboardId entries. */
 	dashboardId?: string
+	/** Service name for /services/$serviceName entries (renders a ServiceDot). */
+	serviceName?: string
 	/** Imperative action (theme toggle, open shortcuts dialog, …). */
 	run?: () => void
 	/** Keyboard shortcut hint shown on the right edge of the row. */
@@ -60,7 +63,7 @@ const FUSE_OPTIONS: IFuseOptions<PaletteEntry> = {
 	threshold: 0.35,
 }
 
-const GROUP_ORDER: ReadonlyArray<PaletteEntry["group"]> = ["Navigation", "Dashboards", "Actions"]
+const GROUP_ORDER: ReadonlyArray<PaletteEntry["group"]> = ["Navigation", "Services", "Dashboards", "Actions"]
 
 function groupEntries(entries: PaletteEntry[]): [PaletteEntry["group"], PaletteEntry[]][] {
 	const groups = new Map<PaletteEntry["group"], PaletteEntry[]>()
@@ -109,9 +112,13 @@ function PaletteContent({
 
 	// These hooks live here (inside the open-gated popup) so the dashboards
 	// query only fires once the palette is first opened.
-	const { dashboards } = useDashboardStore()
+	const { dashboards } = useDashboardsRead()
 	const { favorites } = useDashboardPreferences()
 	const infraEnabled = useInfraEnabled()
+	const servicesFacetResult = useAtomValue(getTracesFacetValuesResultAtom({ data: { facet: "service" } }))
+	const serviceNames = Result.builder(servicesFacetResult)
+		.onSuccess((r) => r.data.map((item) => item.name))
+		.orElse(() => [])
 
 	// The forced-open Autocomplete stopPropagation()s Escape (and swallows ⌘K)
 	// before the Dialog or the document-level hotkey manager sees it, so handle
@@ -131,29 +138,18 @@ function PaletteContent({
 	}, [close, toggle])
 
 	const entries = useMemo<PaletteEntry[]>(() => {
-		const navItems = [
-			...mainNavItems,
-			...topologyNavItems,
-			...visibleSignalsNavItems({ infraEnabled }),
-			...investigateNavItems,
-		]
+		// Sections *and* their children — Traces, Logs, Metrics, Replays, Hosts,
+		// the K8s lists and the integration pages are all reachable by name here,
+		// which is what lets the sidebar fold them into two sections.
 		const navigation: PaletteEntry[] = [
-			...navItems.map((item) => ({
-				id: `nav:${item.href}`,
+			...paletteNavItems({ infraEnabled }).map((item) => ({
+				id: item.id,
 				title: item.title,
 				group: "Navigation" as const,
 				keywords: `go to ${item.title}`,
 				icon: item.icon,
 				href: item.href,
 			})),
-			{
-				id: "nav:/dashboards",
-				title: "Dashboards",
-				group: "Navigation",
-				keywords: "go to all dashboards",
-				icon: GridSquareCirclePlusIcon,
-				href: "/dashboards",
-			},
 			{
 				id: "nav:/settings",
 				title: "Settings",
@@ -164,19 +160,38 @@ function PaletteContent({
 			},
 		]
 
+		const serviceEntries: PaletteEntry[] = serviceNames.map((name) => ({
+			id: `service:${name}`,
+			title: name,
+			group: "Services" as const,
+			keywords: `service ${name}`,
+			serviceName: name,
+		}))
+
 		const favoriteDashboards = dashboards.filter((d) => favorites.has(d.id))
 		const otherDashboards = dashboards.filter((d) => !favorites.has(d.id))
-		const dashboardEntries: PaletteEntry[] = [...favoriteDashboards, ...otherDashboards].map((dashboard) => ({
-			id: `dashboard:${dashboard.id}`,
-			title: dashboard.name,
-			group: "Dashboards",
-			keywords: "dashboard",
-			icon: GridSquareCirclePlusIcon,
-			dashboardId: dashboard.id,
-		}))
+		const dashboardEntries: PaletteEntry[] = [...favoriteDashboards, ...otherDashboards].map(
+			(dashboard) => ({
+				id: `dashboard:${dashboard.id}`,
+				title: dashboard.name,
+				group: "Dashboards",
+				keywords: "dashboard",
+				icon: GridSquareCirclePlusIcon,
+				dashboardId: dashboard.id,
+			}),
+		)
 
 		const isDark = theme === "dark"
 		const actions: PaletteEntry[] = [
+			{
+				id: "action:ask-maple-ai",
+				title: "Ask Maple AI",
+				group: "Actions",
+				keywords: "chat ai assistant maple ask question",
+				icon: ChatBubbleSparkleIcon,
+				run: openGlobalChat,
+				shortcut: "C",
+			},
 			{
 				id: "action:toggle-theme",
 				title: isDark ? "Switch to light mode" : "Switch to dark mode",
@@ -197,10 +212,17 @@ function PaletteContent({
 			},
 		]
 
-		return [...navigation, ...dashboardEntries, ...actions]
-	}, [dashboards, favorites, infraEnabled, theme, setTheme, onShowShortcuts])
+		return [...navigation, ...serviceEntries, ...dashboardEntries, ...actions]
+	}, [dashboards, favorites, infraEnabled, serviceNames, theme, setTheme, onShowShortcuts])
 
 	const fuse = useMemo(() => new Fuse(entries, FUSE_OPTIONS), [entries])
+
+	// Browse mode shows only a taste of the services list — the full set stays
+	// searchable, but dozens of service rows shouldn't bury Dashboards/Actions.
+	const browseEntries = useMemo(() => {
+		let serviceCount = 0
+		return entries.filter((entry) => entry.group !== "Services" || serviceCount++ < 5)
+	}, [entries])
 
 	// `null` => browse mode (empty query); otherwise the ranked Fuse hits.
 	const results = useMemo<PaletteEntry[] | null>(() => {
@@ -212,11 +234,29 @@ function PaletteContent({
 	const renderEntry = (entry: PaletteEntry) => {
 		const content = (
 			<>
-				{entry.icon ? <entry.icon size={16} className="shrink-0 text-muted-foreground" /> : null}
+				{entry.serviceName !== undefined ? (
+					<ServiceDot serviceName={entry.serviceName} />
+				) : entry.icon ? (
+					<entry.icon size={16} className="shrink-0 text-muted-foreground" />
+				) : null}
 				<span className="truncate text-sm">{entry.title}</span>
 				{entry.shortcut ? <CommandShortcut>{entry.shortcut}</CommandShortcut> : null}
 			</>
 		)
+		if (entry.serviceName !== undefined) {
+			const serviceName = entry.serviceName
+			return (
+				<CommandItem
+					key={entry.id}
+					value={entry.id}
+					className="flex items-center gap-2"
+					render={<Link to="/services/$serviceName" params={{ serviceName }} />}
+					onClick={close}
+				>
+					{content}
+				</CommandItem>
+			)
+		}
 		if (entry.dashboardId !== undefined) {
 			const dashboardId = entry.dashboardId
 			return (
@@ -260,11 +300,16 @@ function PaletteContent({
 		)
 	}
 
-	const grouped = groupEntries(results ?? entries)
+	const grouped = groupEntries(results ?? browseEntries)
 
 	return (
 		<CommandDialogPopup>
-			<Command inline={false} filter={null} value={query} onValueChange={(value: string) => setQuery(value)}>
+			<Command
+				inline={false}
+				filter={null}
+				value={query}
+				onValueChange={(value: string) => setQuery(value)}
+			>
 				<CommandInput placeholder="Search pages, dashboards, actions…" />
 				<CommandList>
 					{results !== null && results.length === 0 ? (

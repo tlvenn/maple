@@ -35,7 +35,71 @@ function useChart() {
 	return context
 }
 
+const EMPTY_SUPPRESSORS: ReadonlySet<string> = new Set()
+
+/**
+ * Lets in-chart overlays (e.g. commit deploy markers) temporarily hide the
+ * default data tooltip so a marker card and the data tooltip never show at once.
+ * An overlay's suppression requires a `ChartTooltipSuppressionProvider` above the
+ * chart (e.g. the one MetricsGrid mounts around a synced grid) so a marker card on
+ * any chart also quiets the synced tooltips on its siblings; without one, the
+ * suppression calls are no-ops. Suppressors are tracked by id (each overlay owns
+ * one) so concurrent charts don't clobber each other's flag.
+ *
+ * While suppressed the tooltip stays MOUNTED (rendered transparent) instead of
+ * unmounting — so when it un-suppresses it resumes its position transition from
+ * where it was (next to the marker) rather than snapping in from the origin.
+ */
+// Split into two contexts so a suppression toggle only rerenders the
+// components that read the boolean (the tooltip contents), not every overlay
+// holding the stable setter — in a synced grid one marker hover would
+// otherwise fan a render out to all sibling charts' overlays.
+const ChartTooltipSuppressedContext = React.createContext<boolean>(false)
+const ChartTooltipSetSuppressedContext = React.createContext<
+	((id: string, suppressed: boolean) => void) | null
+>(null)
+
+export function ChartTooltipSuppressionProvider({ children }: { children: React.ReactNode }) {
+	const [suppressors, setSuppressors] = React.useState<ReadonlySet<string>>(EMPTY_SUPPRESSORS)
+	const setSuppressed = React.useCallback((id: string, suppressed: boolean) => {
+		setSuppressors((prev) => {
+			if (suppressed === prev.has(id)) return prev
+			const next = new Set(prev)
+			if (suppressed) next.add(id)
+			else next.delete(id)
+			return next
+		})
+	}, [])
+	return (
+		<ChartTooltipSetSuppressedContext.Provider value={setSuppressed}>
+			<ChartTooltipSuppressedContext.Provider value={suppressors.size > 0}>
+				{children}
+			</ChartTooltipSuppressedContext.Provider>
+		</ChartTooltipSetSuppressedContext.Provider>
+	)
+}
+
+/**
+ * The setter an in-chart overlay uses to hide/restore the chart's data tooltip.
+ * Reads only the STABLE setter context (not the boolean, which changes whenever
+ * suppression toggles) so the returned function keeps a stable identity and the
+ * overlay doesn't rerender on toggles — overlays put it in effect deps, and an
+ * unstable one would loop (cleanup re-fires → toggles state → re-renders → …).
+ */
+export function useSuppressChartTooltip(): (suppressed: boolean) => void {
+	const setSuppressed = React.use(ChartTooltipSetSuppressedContext)
+	const id = React.useId()
+	return React.useCallback((suppressed: boolean) => setSuppressed?.(id, suppressed), [setSuppressed, id])
+}
+
+function useChartTooltipSuppressed(): boolean {
+	return React.use(ChartTooltipSuppressedContext)
+}
+
 export type ChartLegendItem = { key: string; label: React.ReactNode; color?: string }
+
+/** Stable empty reference so the legend-slot publish effect doesn't churn. */
+const EMPTY_LEGEND_ITEMS: ChartLegendItem[] = []
 
 /**
  * Optional slot for hoisting a chart's legend out of the plot area and into an
@@ -52,10 +116,18 @@ function ChartContainer({
 	className,
 	children,
 	config,
+	hoistLegend = true,
 	...props
 }: React.ComponentProps<"div"> & {
 	config: ChartConfig
 	children: React.ComponentProps<typeof RechartsPrimitive.ResponsiveContainer>["children"]
+	/**
+	 * When `true` (default) and a {@link ChartLegendSlotContext} ancestor is
+	 * present, the chart's series are published into that slot (e.g. a widget
+	 * header strip). Charts that render their own in-plot legend should pass
+	 * `false` so the header doesn't duplicate it.
+	 */
+	hoistLegend?: boolean
 }) {
 	const uniqueId = React.useId()
 	const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
@@ -73,20 +145,30 @@ function ChartContainer({
 				})),
 		[config],
 	)
+	const publishedItems = hoistLegend ? legendItems : EMPTY_LEGEND_ITEMS
 	React.useEffect(() => {
 		if (!legendSlot) return
-		legendSlot.setItems(legendItems)
+		legendSlot.setItems(publishedItems)
 		return () => legendSlot.setItems([])
-	}, [legendSlot, legendItems])
+	}, [legendSlot, publishedItems])
+
+	// Stable identity so ChartContext consumers (tooltip/legend contents) don't
+	// rerender just because the container did.
+	const chartContextValue = React.useMemo(() => ({ config, containerRef, chartId }), [config, chartId])
 
 	return (
-		<ChartContext.Provider value={{ config, containerRef, chartId }}>
+		<ChartContext.Provider value={chartContextValue}>
 			<div
 				ref={containerRef}
 				data-slot="chart"
 				data-chart={chartId}
 				className={cn(
-					"[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border flex aspect-video justify-center text-xs [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
+					// `[&_.recharts-surface]:overflow-visible` un-clips recharts' root <svg> so an
+					// `overlay` (commit deploy markers) can draw its chip row ABOVE the plot,
+					// overflowing into the card's header/padding gap instead of reserving inner top
+					// margin (which would squish the series). Recharts clips series via clip-path, not
+					// surface overflow, so overlay-less charts are unaffected. See `commit-markers-layer.tsx`.
+					"[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border flex aspect-video justify-center text-xs [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden [&_.recharts-surface]:overflow-visible",
 					className,
 				)}
 				{...props}
@@ -153,15 +235,54 @@ function ChartTooltipContent({
 	nameKey,
 	labelKey,
 	coordinate,
-}: React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
+	resolveHighlightKey,
+}: Partial<
+	Pick<
+		RechartsPrimitive.TooltipContentProps,
+		"active" | "payload" | "label" | "labelFormatter" | "labelClassName" | "formatter" | "coordinate"
+	>
+> &
 	React.ComponentProps<"div"> & {
 		hideLabel?: boolean
 		hideIndicator?: boolean
 		indicator?: "line" | "dot" | "dashed"
 		nameKey?: string
 		labelKey?: string
+		/**
+		 * Optional resolver that returns the `dataKey` of the row to emphasise
+		 * (rendered bold) given the cursor position and the active payload —
+		 * used to bold the series whose line is nearest the pointer. Returning
+		 * `undefined` emphasises nothing.
+		 */
+		resolveHighlightKey?: (
+			coordinate: { x?: number; y?: number } | undefined,
+			payload: RechartsPrimitive.TooltipPayload,
+		) => string | undefined
 	}) {
 	const { config, containerRef, chartId } = useChart()
+	const suppressed = useChartTooltipSuppressed()
+
+	// When an in-chart overlay (the commit marker card) blocks pointer events, recharts
+	// goes inactive and this tooltip unmounts. On the next hover it remounts, and the
+	// left/top transition would otherwise slide it in from the chart origin (0,0). So we
+	// gate that position transition: it's OFF on the first painted frame after the
+	// inactive→active edge (the tooltip snaps to the cursor), then ON for subsequent
+	// moves (smooth follow). Continuous hovering stays active, so `followEnabled` stays
+	// true and the follow transition is never interrupted.
+	const isActive = !!active && !!payload?.length
+	const [followEnabled, setFollowEnabled] = React.useState(false)
+	const activeRef = React.useRef(false)
+	React.useEffect(() => {
+		if (isActive === activeRef.current) return
+		activeRef.current = isActive
+		if (!isActive) {
+			// Reset so the next activation starts snapped, not sliding in from the origin.
+			setFollowEnabled(false)
+			return
+		}
+		const raf = requestAnimationFrame(() => setFollowEnabled(true))
+		return () => cancelAnimationFrame(raf)
+	}, [isActive])
 
 	const tooltipLabel = React.useMemo(() => {
 		if (hideLabel || !payload?.length) {
@@ -191,6 +312,8 @@ function ChartTooltipContent({
 		return null
 	}
 
+	const highlightKey = resolveHighlightKey?.(coordinate, payload)
+
 	const nestLabel = payload.length === 1 && indicator !== "dot"
 
 	const anchor =
@@ -212,7 +335,18 @@ function ChartTooltipContent({
 					anchor={anchor}
 					side="right"
 					sideOffset={12}
-					className="z-50 pointer-events-none transition-[left,top,right,bottom] duration-200 ease-out"
+					className={cn(
+						"z-50 pointer-events-none ease-out",
+						// Snap to the cursor on first appearance (see `followEnabled` above);
+						// once settled, transition left/top so it follows the cursor smoothly.
+						followEnabled
+							? "transition-[left,top,right,bottom,opacity] duration-200"
+							: "transition-opacity duration-200",
+						// An in-chart overlay (commit markers) suppresses the data tooltip
+						// while its own card shows. Stay mounted-but-transparent so the
+						// position transition resumes from here, not from the origin.
+						suppressed && "opacity-0",
+					)}
 				>
 					<TooltipPrimitive.Popup data-chart={chartId}>
 						<TooltipPrimitive.Viewport>
@@ -255,10 +389,13 @@ function ChartTooltipContent({
 												if (formatted == null) return null
 												return (
 													<div
-														key={item.dataKey}
+														key={String(item.dataKey ?? index)}
 														className={cn(
 															"[&>svg]:text-muted-foreground flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5",
 															indicator === "dot" && "items-center",
+															highlightKey != null &&
+																item.dataKey === highlightKey &&
+																"[&_*]:font-semibold",
 														)}
 													>
 														{formatted}
@@ -268,10 +405,13 @@ function ChartTooltipContent({
 
 											return (
 												<div
-													key={item.dataKey}
+													key={String(item.dataKey ?? index)}
 													className={cn(
 														"[&>svg]:text-muted-foreground flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5",
 														indicator === "dot" && "items-center",
+														highlightKey != null &&
+															item.dataKey === highlightKey &&
+															"[&_*]:font-semibold",
 													)}
 												>
 													{itemConfig?.icon ? (
@@ -340,7 +480,7 @@ function ChartLegendContent({
 	verticalAlign = "bottom",
 	nameKey,
 }: React.ComponentProps<"div"> &
-	Pick<RechartsPrimitive.LegendProps, "payload" | "verticalAlign"> & {
+	Pick<RechartsPrimitive.DefaultLegendContentProps, "payload" | "verticalAlign"> & {
 		hideIcon?: boolean
 		nameKey?: string
 	}) {

@@ -13,11 +13,10 @@ Maple is now organized as a monorepo with a SPA frontend and an Effect-based bac
 ## Workspace Layout
 
 - `apps/web`: TanStack Router SPA (Vite)
-- `apps/api`: Effect HTTP API (Tinybird proxy + MCP server code)
+- `apps/api`: Effect HTTP API (Tinybird proxy + MCP server code + AI chat/triage on `@maple/llm`)
 - `apps/ingest`: OTLP ingest gateway (key auth + org enrichment + collector forwarding)
 - `apps/landing`: Astro landing site
 - `apps/alerting`: Alert evaluation worker
-- `apps/chat-agent`: Cloudflare Worker chat surface
 - `apps/cli`: CLI utilities
 - `apps/mobile`: Expo mobile app
 - `packages/domain`: Shared Effect HTTP contracts and domain types
@@ -97,26 +96,38 @@ Services:
 
 ## Cloudflare Deploy (Alchemy)
 
-Deployments are per-app Alchemy runs pinned to Cloudflare Workers + D1:
+Deployments run on **Alchemy v2** (Effect-based): the root `alchemy.run.ts` exports a
+single `Alchemy.Stack("maple", …)` whose program composes per-app factories:
 
-- `apps/api/alchemy.run.ts` — D1 database `MAPLE_DB` + api Worker with all env bindings
-- `apps/landing/alchemy.run.ts` — Astro build + Worker serving static assets
-- `apps/web/alchemy.run.ts` — TanStack Start app via the `Vite()` resource
+- `apps/api/alchemy.run.ts` — Hyperdrive (PlanetScale Postgres) `MAPLE_DB`, KV, queue,
+  workflows, the `ChatSession` Durable Object + api Worker with all env bindings
+- `apps/alerting/alchemy.run.ts` — cron-driven alerting Worker (cross-script workflow ref)
+- `apps/electric-sync/alchemy.run.ts` — ElectricSQL shape-proxy Worker
+- `apps/web/alchemy.run.ts` / `apps/landing/alchemy.run.ts` / `apps/local-ui/alchemy.run.ts`
+  — static builds via `Command.Build` + asset-serving Workers
 
-Stage grammar is `prd` / `stg` / `pr-<number>`, resolved via `@maple/infra/cloudflare` (`parseMapleStage`, `resolveMapleDomains`, `resolveWorkerName`, `resolveD1Name`).
+Stage grammar is `prd` / `stg` / `pr-<number>` / dev names, resolved via
+`@maple/infra/cloudflare` (`parseMapleStage`, `resolveMapleDomains`, `resolveWorkerName`,
+`resolveHyperdriveName`, `resolveHyperdriveRefId`, `resolveDatabaseMode`). stg/prd bind the
+dashboard-managed Hyperdrive by config ID (`resolveHyperdriveRefId`) — origin credentials
+never touch a deploy. `MAPLE_PG_URL` is only needed for dev stages, whose Hyperdrive alchemy
+manages itself. PR previews bind **no database at all** (`resolveDatabaseMode` → `"none"`):
+DB-backed routes 500, everything else in the preview works.
 
 Run locally:
 
 ```bash
-bun run alchemy:deploy:prd
 bun run alchemy:deploy:stg
 PR_NUMBER=123 bun run alchemy:deploy:pr
 ```
 
+The first v2 deploy against a stage with live v1-created resources needs `--adopt`
+(the pr script passes it already); v1 state is incompatible and simply abandoned —
+never run a v1 `alchemy destroy` against a live stage.
+
 Tear down:
 
 ```bash
-bun run alchemy:destroy:prd
 bun run alchemy:destroy:stg
 PR_NUMBER=123 bun run alchemy:destroy:pr
 ```
@@ -129,16 +140,21 @@ CI workflows:
 
 Secrets source model (CI):
 
-- GitHub Secrets (only one): `DOPPLER_TOKEN`
-- Doppler configs (`prd`, `stg`, `pr`) must define:
-    - `ALCHEMY_PASSWORD`
-    - `ALCHEMY_STATE_TOKEN`
+- Secrets are fetched from **Infisical** via `Infisical/secrets-action` using OIDC
+  (credential-less — GitHub's OIDC token authenticates a machine identity, no long-lived
+  token stored). CI needs:
+    - GitHub repo **variable** `INFISICAL_PROJECT_SLUG` (the project slug — a
+      **variable**, not a secret: GitHub masks secret values everywhere, and a
+      slug like `maple` would then blank out the PR-preview deployment URL
+      `app-pr-<n>.maple.dev`)
+    - GitHub repo **secret** `INFISICAL_MACHINE_IDENTITY_ID` (the machine identity ID)
+- Infisical environments (`prod`, `staging`, `dev` — mapped from the old Doppler
+  `prd`/`stg`/`pr` configs) must define:
     - `CLOUDFLARE_API_TOKEN`
-    - `CLOUDFLARE_DEFAULT_ACCOUNT_ID`
+    - `CLOUDFLARE_DEFAULT_ACCOUNT_ID` (bridged to alchemy v2's `CLOUDFLARE_ACCOUNT_ID` in the root `alchemy.run.ts`; `ALCHEMY_PASSWORD`/`ALCHEMY_STATE_TOKEN` were v1-only and are no longer read)
     - `TINYBIRD_HOST`
     - `TINYBIRD_TOKEN`
-    - `RESEND_API_KEY`
-    - `RESEND_FROM_EMAIL`
+    - `EMAIL_FROM` (sender address on an onboarded Cloudflare Email Service domain; delivery uses the `EMAIL` worker binding, no API key)
     - `MAPLE_INGEST_KEY_ENCRYPTION_KEY`
     - `MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY`
     - `MAPLE_AUTH_MODE`
@@ -147,7 +163,7 @@ Secrets source model (CI):
     - `CLERK_PUBLISHABLE_KEY`
     - `CLERK_JWT_KEY`
 
-Free/Starter note: when using a personal Doppler token, the workflow must also specify Doppler selectors (`doppler-project`, `doppler-config`). This repo uses `maple` with stage configs `prd`, `stg`, and `pr`.
+Setup note: the machine identity must have a **GitHub OIDC** auth method configured in Infisical (scoped to this repo, ideally to the `production`/`staging`/`pr-preview` GitHub environments) and read access to the project. The workflows select secrets via `project-slug` (`INFISICAL_PROJECT_SLUG`) and per-stage `env-slug` (`prod`/`staging`/`dev`).
 
 Runtime API URL behavior:
 
@@ -165,11 +181,14 @@ The web app expects `VITE_API_BASE_URL` to point to the API (defaults to `http:/
 For ingest + key auth, set these at minimum in your root `.env` when running the ingest gateway:
 
 - `MAPLE_INGEST_KEY_LOOKUP_HMAC_KEY`
+- `MAPLE_INGEST_KEY_ENCRYPTION_KEY` (required for D1-backed ingest deployments)
 - `INGEST_PORT`
 - `INGEST_FORWARD_OTLP_ENDPOINT`
 - `INGEST_FORWARD_TIMEOUT_MS`
 - `INGEST_MAX_REQUEST_BODY_BYTES`
 - `INGEST_REQUIRE_TLS`
+- `INGEST_REPLAY_MAX_SESSION_BYTES` (optional; ceiling on the decompressed rrweb
+  payload one replay session may record, default 1 GiB, `0` disables)
 
 ## Persistence (SQLite / Turso)
 

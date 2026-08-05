@@ -3,7 +3,7 @@ import { Reorder, useDragControls } from "motion/react"
 import { Button } from "@maple/ui/components/ui/button"
 import { Input } from "@maple/ui/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { WhereClauseEditor } from "@/components/query-builder/where-clause-editor"
 import { useWidgetBuilder } from "@/hooks/use-widget-builder"
 import { useAutocompleteValuesContext } from "@/hooks/use-autocomplete-values"
@@ -56,7 +56,8 @@ const LOG_FIELDS = ["timestamp", "severityText", "severityNumber", "serviceName"
 const UNIT_OPTIONS: Array<{ value: string; label: string }> = [
 	{ value: "none", label: "None" },
 	{ value: "number", label: "Number" },
-	{ value: "percent", label: "Percent" },
+	{ value: "percent", label: "Percent (0–1)" },
+	{ value: "percent_100", label: "Percent (0–100)" },
 	{ value: "duration_ms", label: "Duration (ms)" },
 	{ value: "duration_us", label: "Duration (us)" },
 	{ value: "bytes", label: "Bytes" },
@@ -222,14 +223,16 @@ export function ListConfigPanel() {
 	const [showFieldSuggestions, setShowFieldSuggestions] = React.useState<number | null>(null)
 
 	// Stable IDs for Reorder — kept in sync with columns array.
-	// addColumn/removeColumn/reorderColumns update the ref before calling onChange,
+	// addColumn/removeColumn/reorderColumns update the state before calling onChange,
 	// so a length mismatch here means an external reset (e.g. parent replaced columns).
-	const columnIdsRef = React.useRef<string[]>(columns.map(() => crypto.randomUUID()))
-	if (columnIdsRef.current.length !== columns.length) {
-		columnIdsRef.current = columns.map(() => crypto.randomUUID())
+	const [storedColumnIds, setStoredColumnIds] = React.useState<string[]>(() =>
+		columns.map(() => crypto.randomUUID()),
+	)
+	let columnIds = storedColumnIds
+	if (columnIds.length !== columns.length) {
+		columnIds = columns.map(() => crypto.randomUUID())
+		setStoredColumnIds(columnIds)
 	}
-
-	const columnIds = columnIdsRef.current
 
 	const knownFields = listDataSource === "traces" ? TRACE_FIELDS : LOG_FIELDS
 	// Query engine list returns full SpanAttributes/ResourceAttributes maps,
@@ -260,7 +263,7 @@ export function ListConfigPanel() {
 
 	const handleDataSourceChange = (ds: ListDataSource) => {
 		const newCols = ds === "traces" ? TRACE_DEFAULT_COLUMNS : LOG_DEFAULT_COLUMNS
-		columnIdsRef.current = newCols.map(() => crypto.randomUUID())
+		setStoredColumnIds(newCols.map(() => crypto.randomUUID()))
 		onChange({
 			listDataSource: ds,
 			listWhereClause: "",
@@ -274,12 +277,12 @@ export function ListConfigPanel() {
 	}
 
 	const removeColumn = (index: number) => {
-		columnIdsRef.current = columnIdsRef.current.filter((_, i) => i !== index)
+		setStoredColumnIds((current) => current.filter((_, i) => i !== index))
 		onChange({ listColumns: columns.filter((_, i) => i !== index) })
 	}
 
 	const addColumn = (field?: string) => {
-		columnIdsRef.current = [...columnIdsRef.current, crypto.randomUUID()]
+		setStoredColumnIds((current) => [...current, crypto.randomUUID()])
 		const newCol: ListColumnDraft = {
 			field: field ?? "",
 			header: field ?? "",
@@ -293,7 +296,7 @@ export function ListConfigPanel() {
 			const idx = columnIds.indexOf(id)
 			return columns[idx]!
 		})
-		columnIdsRef.current = newIdOrder
+		setStoredColumnIds(newIdOrder)
 		onChange({ listColumns: reordered })
 	}
 

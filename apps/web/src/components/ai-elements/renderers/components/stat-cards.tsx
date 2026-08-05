@@ -1,5 +1,5 @@
 import type { BaseComponentProps } from "@json-render/react"
-import { formatDuration, formatErrorRate, formatNumber } from "@/lib/format"
+import { formatDuration, formatErrorRate, formatNumber } from "@maple/ui/lib/format"
 
 interface StatCardsProps {
 	cards: Array<{
@@ -33,10 +33,7 @@ export function StatCards({ props }: BaseComponentProps<StatCardsProps>) {
 	return (
 		<div className="flex flex-wrap gap-1.5">
 			{cards.map((card) => (
-				<div
-					key={card.label}
-					className="min-w-[80px] rounded border border-border/40 px-2 py-1.5"
-				>
+				<div key={card.label} className="min-w-[80px] rounded border border-border/40 px-2 py-1.5">
 					<p className="text-[10px] text-muted-foreground">{card.label}</p>
 					<p className="font-mono text-sm font-medium">{formatValue(card.value, card.format)}</p>
 				</div>

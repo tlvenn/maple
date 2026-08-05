@@ -1,0 +1,132 @@
+---
+/**
+ * CustomerLogos — the "trusted by" band.
+ *
+ * Two shapes. `section` (default) is the standalone band: an infinite,
+ * edge-faded marquee in its own bordered section. `inline` is the hero foot —
+ * no section shell, and a static centred row instead of a belt, because a
+ * five-logo marquee visibly repeats every five items and announces "we have
+ * five" louder than simply showing five does.
+ *
+ * Companies come from the `logos` content collection; each entry's id maps to a
+ * brand logo component in the LOGOS registry below. The marquee is pure CSS
+ * (logo-marquee keyframe): one copy of the row is duplicated and the belt
+ * translates -50% for a seamless loop. No JS island. `href` is optional:
+ * present → external link, absent → static lockup.
+ */
+import { getCollection } from "astro:content";
+import * as m from "../paraglide/messages";
+import HazelLogo from "./icons/HazelLogo.astro";
+import SakuraLogo from "./icons/SakuraLogo.astro";
+import GymscoreLogo from "./icons/GymscoreLogo.astro";
+import SuperwallLogo from "./icons/SuperwallLogo.astro";
+import HypenLogo from "./icons/HypenLogo.astro";
+
+interface Props {
+	variant?: "section" | "inline";
+}
+
+const { variant = "section" } = Astro.props;
+
+// Entry id (filename) → brand mark. Add a new customer by dropping a
+// src/content/logos/<id>.md file and registering its logo component here.
+const LOGOS: Record<string, any> = {
+	hazel: HazelLogo,
+	sakura: SakuraLogo,
+	gymscore: GymscoreLogo,
+	superwall: SuperwallLogo,
+	hypen: HypenLogo,
+};
+
+const entries = (await getCollection("logos"))
+	.filter((e) => LOGOS[e.id])
+	.sort((a, b) => a.data.order - b.data.order);
+
+const base = entries.map((e) => ({ id: e.id, name: e.data.name, href: e.data.href }));
+
+// The customer set is small, so repeat it until one "copy" is wide enough to
+// fill a large viewport, then duplicate that copy so the -50% translate loops
+// seamlessly. Only the first real pass is announced to assistive tech.
+const repeats = Math.max(2, Math.ceil(12 / Math.max(base.length, 1)));
+const oneCopy = Array.from({ length: repeats }, () => base).flat();
+const belt = [...oneCopy, ...oneCopy];
+---
+
+{
+	variant === "inline" ? (
+		<div class="border-t border-border py-10 md:py-14">
+			<p class="text-center text-[10px] uppercase tracking-[0.2em] text-fg-muted mb-8">
+				{m.customers_eyebrow()}
+			</p>
+			<div class="flex flex-wrap items-center justify-center gap-x-10 gap-y-6 md:gap-x-14">
+				{base.map((logo) => {
+					const Logo = LOGOS[logo.id];
+					// Same lockup as the marquee — mark plus wordmark. The mark
+					// alone is ambiguous at this size for the single-letter brands.
+					const inner = (
+						<>
+							<Logo class="logo-cell__mark h-6 w-auto" />
+							<span class="font-display text-base font-semibold tracking-[-0.01em]">{logo.name}</span>
+						</>
+					);
+					return logo.href ? (
+						<a
+							href={logo.href}
+							target="_blank"
+							rel="noopener noreferrer"
+							aria-label={logo.name}
+							class="inline-flex items-center gap-2.5 text-fg-muted transition-colors hover:text-fg"
+						>
+							{inner}
+						</a>
+					) : (
+						<span class="inline-flex items-center gap-2.5 text-fg-muted">{inner}</span>
+					);
+				})}
+			</div>
+		</div>
+	) : (
+		<Fragment>
+<section class="border-y border-border bg-bg">
+	<div class="mx-auto max-w-6xl px-6 py-14 md:py-20">
+		<p class="text-center text-[11px] uppercase tracking-[0.2em] text-fg-muted mb-10">
+			{m.customers_eyebrow()}
+		</p>
+		<div class="logo-marquee">
+			<div class="logo-marquee__belt">
+				{
+					belt.map((logo, i) => {
+						const Logo = LOGOS[logo.id];
+						const decorative = i >= base.length;
+						const inner = (
+							<>
+								<Logo class="logo-cell__mark h-8 w-auto" />
+								<span class="logo-cell__name">{logo.name}</span>
+							</>
+						);
+						return logo.href ? (
+							<a
+								href={logo.href}
+								target="_blank"
+								rel="noopener noreferrer"
+								class="logo-cell"
+								aria-label={logo.name}
+								aria-hidden={decorative ? "true" : undefined}
+								tabindex={decorative ? -1 : undefined}
+							>
+								{inner}
+							</a>
+						) : (
+							<span class="logo-cell" aria-hidden={decorative ? "true" : undefined}>
+								{inner}
+							</span>
+						);
+					})
+				}
+			</div>
+		</div>
+	</div>
+</section>
+		</Fragment>
+	)
+}

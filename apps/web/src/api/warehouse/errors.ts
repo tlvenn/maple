@@ -1,5 +1,9 @@
 import { Clock, Effect, Schema } from "effect"
-import { QueryEngineExecuteRequest, warehouseDateTimeToIso } from "@maple/query-engine"
+import {
+	QueryEngineExecuteRequest,
+	warehouseDateTimeToIso,
+	formatWarehouseDateTime,
+} from "@maple/query-engine"
 import {
 	DeploymentEnvironment,
 	ErrorsByTypeRequest,
@@ -30,10 +34,6 @@ export interface ErrorByType {
 	affectedServicesCount: number
 	firstSeen: Date
 	lastSeen: Date
-}
-
-export interface ErrorsByTypeResponse {
-	data: ErrorByType[]
 }
 
 const GetErrorsByTypeInputSchema = Schema.Struct({
@@ -91,19 +91,9 @@ const getErrorsByTypeEffect = Effect.fn("QueryEngine.getErrorsByType")(function*
 	}
 })
 
-export interface FacetItem {
+interface FacetItem {
 	name: string
 	count: number
-}
-
-export interface ErrorsFacets {
-	services: FacetItem[]
-	deploymentEnvs: FacetItem[]
-	errorTypes: FacetItem[]
-}
-
-export interface ErrorsFacetsResponse {
-	data: ErrorsFacets
 }
 
 const GetErrorsFacetsInputSchema = Schema.Struct({
@@ -119,8 +109,10 @@ const GetErrorsFacetsInputSchema = Schema.Struct({
 export type GetErrorsFacetsInput = (typeof GetErrorsFacetsInputSchema)["Encoded"]
 
 const defaultErrorsTimeRange = (nowMillis: number) => {
-	const fmt = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 19)
-	return { startTime: fmt(nowMillis - 24 * 60 * 60 * 1000), endTime: fmt(nowMillis) }
+	return {
+		startTime: formatWarehouseDateTime(nowMillis - 24 * 60 * 60 * 1000),
+		endTime: formatWarehouseDateTime(nowMillis),
+	}
 }
 
 export function getErrorsFacets({ data }: { data: GetErrorsFacetsInput }) {
@@ -177,18 +169,6 @@ const getErrorsFacetsEffect = Effect.fn("QueryEngine.getErrorsFacets")(function*
 		data: { services, deploymentEnvs, errorTypes },
 	}
 })
-
-export interface ErrorsSummary {
-	totalErrors: number
-	totalSpans: number
-	errorRate: number
-	affectedServicesCount: number
-	affectedTracesCount: number
-}
-
-export interface ErrorsSummaryResponse {
-	data: ErrorsSummary | null
-}
 
 const GetErrorsSummaryInputSchema = Schema.Struct({
 	startTime: Schema.optional(WarehouseDateTimeString),
@@ -252,10 +232,6 @@ export interface ErrorDetailTrace {
 	services: string[]
 	rootSpanName: string
 	errorMessage: string
-}
-
-export interface ErrorDetailTracesResponse {
-	data: ErrorDetailTrace[]
 }
 
 const GetErrorDetailTracesInputSchema = Schema.Struct({

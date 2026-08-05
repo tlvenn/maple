@@ -15,7 +15,6 @@ const makeMockExecutor = (
 	statsRows: ReadonlyArray<Record<string, unknown>> = [],
 ): WarehouseExecutorShape => ({
 	orgId: "org_test",
-	sqlQuery: () => Effect.succeed([] as ReadonlyArray<never>),
 	compiledQuery: (compiled) => compiled.decodeRows([]).pipe(Effect.orDie),
 	compiledQueryFirst: (compiled) => compiled.decodeFirstRow([]).pipe(Effect.orDie),
 	query: (pipe: string, params: Record<string, unknown>) => {
@@ -128,13 +127,12 @@ describe("findSlowTraces", () => {
 		Effect.gen(function* () {
 			const failingExecutor: WarehouseExecutorShape = {
 				orgId: "org_test",
-				sqlQuery: () => Effect.succeed([]),
 				compiledQuery: (compiled) => compiled.decodeRows([]).pipe(Effect.orDie),
 				compiledQueryFirst: (compiled) => compiled.decodeFirstRow([]).pipe(Effect.orDie),
 				query: () =>
 					Effect.fail(
 						new WarehouseUpstreamError({
-							pipe: "find_slow_traces",
+							pipeName: "find_slow_traces",
 							message: "ClickHouse exploded",
 							upstreamStatus: 503,
 						}),

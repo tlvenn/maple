@@ -1,29 +1,21 @@
 import { Badge } from "@maple/ui/components/ui/badge"
 import {
 	ChartLineIcon,
-	CirclePercentageIcon,
 	GridIcon,
-	MenuIcon,
 	PencilIcon,
 	PlusIcon,
 	TrashIcon,
 	type IconComponent,
 } from "@/components/icons"
+import { widgetTypeFor } from "@/components/dashboard-builder/widgets/types"
 import { asArray, asRecord, asString, safeParseJson } from "./parse"
 
-const VIZ_ICONS: Record<string, IconComponent> = {
-	chart: ChartLineIcon,
-	stat: CirclePercentageIcon,
-	table: GridIcon,
-	list: MenuIcon,
-}
+// Icon and label come from the widget-type registry, so a widget kind the agent
+// proposes can't render as a generic chart just because this file wasn't updated
+// — which is what the hand-written maps here did for six of the ten kinds.
+const vizIcon = (visualization: string): IconComponent => widgetTypeFor(visualization).icon ?? ChartLineIcon
 
-const VIZ_LABELS: Record<string, string> = {
-	chart: "Chart",
-	stat: "Stat",
-	table: "Table",
-	list: "List",
-}
+const vizLabel = (visualization: string): string => widgetTypeFor(visualization).meta.label
 
 interface ApprovalRendererProps {
 	input: unknown
@@ -48,23 +40,15 @@ function normalizeWidget(raw: unknown): NormalizedWidget | undefined {
 	const title = asString(display?.title) ?? asString(obj.title) ?? "Untitled widget"
 
 	const source =
-		asString(dataSource?.endpoint) ??
-		asString(obj.source) ??
-		asString(dataParams?.source) ??
-		undefined
+		asString(dataSource?.endpoint) ?? asString(obj.source) ?? asString(dataParams?.source) ?? undefined
 
-	const groupBy =
-		asString(dataParams?.group_by) ??
-		asString(obj.group_by) ??
-		undefined
+	const groupBy = asString(dataParams?.group_by) ?? asString(obj.group_by) ?? undefined
 
 	return { visualization, title, source, groupBy }
 }
 
 function WidgetRow({ widget }: { widget: NormalizedWidget }) {
-	const Icon = Object.hasOwn(VIZ_ICONS, widget.visualization)
-		? VIZ_ICONS[widget.visualization]
-		: ChartLineIcon
+	const Icon = vizIcon(widget.visualization)
 	return (
 		<div className="flex items-center gap-2 rounded-md border border-border/60 bg-background/60 px-2 py-1.5">
 			<Icon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -164,9 +148,7 @@ export function CreateDashboardSummary({ input }: ApprovalRendererProps) {
 				</div>
 			</div>
 
-			{description ? (
-				<div className="text-xs text-muted-foreground">{description}</div>
-			) : null}
+			{description ? <div className="text-xs text-muted-foreground">{description}</div> : null}
 
 			<div className="flex flex-wrap gap-1.5">
 				<FieldChip label="template" value={template} />
@@ -254,19 +236,14 @@ export function AddDashboardWidgetSummary({ input }: ApprovalRendererProps) {
 	const obj = asRecord(input) ?? {}
 	const dashboardId = asString(obj.dashboard_id) ?? "—"
 	const visualization = asString(obj.visualization) ?? "chart"
-	const Icon = Object.hasOwn(VIZ_ICONS, visualization)
-		? VIZ_ICONS[visualization]
-		: ChartLineIcon
-	const vizLabel = Object.hasOwn(VIZ_LABELS, visualization)
-		? VIZ_LABELS[visualization]
-		: visualization
+	const Icon = vizIcon(visualization)
+	const label = vizLabel(visualization)
 
 	const display = safeParseJson<Record<string, unknown>>(obj.display_json)
 	const dataSource = safeParseJson<Record<string, unknown>>(obj.data_source_json)
 	const layout = safeParseJson<Record<string, unknown>>(obj.layout_json)
 
-	const title =
-		(display.ok ? asString(display.value.title) : undefined) ?? "Untitled widget"
+	const title = (display.ok ? asString(display.value.title) : undefined) ?? "Untitled widget"
 	const endpoint = dataSource.ok ? asString(dataSource.value.endpoint) : undefined
 	const params = dataSource.ok ? asRecord(dataSource.value.params) : undefined
 	const serviceName = params ? asString(params.service_name) : undefined
@@ -277,7 +254,12 @@ export function AddDashboardWidgetSummary({ input }: ApprovalRendererProps) {
 		const y = layout.value.y
 		const w = layout.value.w
 		const h = layout.value.h
-		if (typeof x === "number" && typeof y === "number" && typeof w === "number" && typeof h === "number") {
+		if (
+			typeof x === "number" &&
+			typeof y === "number" &&
+			typeof w === "number" &&
+			typeof h === "number"
+		) {
 			return `${x},${y} · ${w}×${h}`
 		}
 		return "auto-placed"
@@ -306,7 +288,7 @@ export function AddDashboardWidgetSummary({ input }: ApprovalRendererProps) {
 			</div>
 
 			<div className="flex flex-wrap gap-1.5">
-				<FieldChip label="viz" value={vizLabel} />
+				<FieldChip label="viz" value={label} />
 				{serviceName ? <FieldChip label="service" value={serviceName} /> : null}
 				<FieldChip label="layout" value={layoutLabel} />
 			</div>
@@ -385,9 +367,8 @@ export function RemoveDashboardWidgetSummary({ input }: ApprovalRendererProps) {
 		<div className="flex items-start gap-2">
 			<TrashIcon className="mt-0.5 size-3.5 shrink-0 text-destructive" />
 			<div className="text-xs leading-relaxed">
-				Remove widget{" "}
-				<span className="rounded bg-muted px-1 font-mono text-[11px]">{widgetId}</span> from
-				dashboard{" "}
+				Remove widget <span className="rounded bg-muted px-1 font-mono text-[11px]">{widgetId}</span>{" "}
+				from dashboard{" "}
 				<span className="rounded bg-muted px-1 font-mono text-[11px]">{dashboardId}</span>.
 			</div>
 		</div>
@@ -399,7 +380,7 @@ export function ReorderDashboardWidgetsSummary({ input }: ApprovalRendererProps)
 	const dashboardId = asString(obj.dashboard_id) ?? "—"
 
 	const layoutsRaw = safeParseJson(obj.layouts_json)
-	const layouts = layoutsRaw.ok ? asArray(layoutsRaw.value) ?? [] : []
+	const layouts = layoutsRaw.ok ? (asArray(layoutsRaw.value) ?? []) : []
 	const ids = layouts
 		.map((entry) => asString(asRecord(entry)?.id))
 		.filter((id): id is string => Boolean(id))

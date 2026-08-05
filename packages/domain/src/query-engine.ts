@@ -10,12 +10,12 @@ import {
 	TraceId,
 } from "./primitives"
 
-const dateTimePattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
+const dateTimePattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,9})?$/
 
 export const TinybirdDateTime = Schema.String.check(Schema.isPattern(dateTimePattern)).pipe(
 	Schema.annotate({
 		identifier: "TinybirdDateTime",
-		description: "Date time string in YYYY-MM-DD HH:mm:ss format",
+		description: "Date time string in YYYY-MM-DD HH:mm:ss[.fffffffff] format",
 	}),
 )
 
@@ -39,7 +39,9 @@ export type MetricType = Schema.Schema.Type<typeof MetricType>
 export const AttributeFilter = Schema.Struct({
 	key: Schema.String,
 	value: Schema.optional(Schema.String),
-	mode: Schema.Literals(["equals", "exists", "gt", "gte", "lt", "lte", "contains"]),
+	/** Candidate set for `mode: "in"`. Ignored by every other mode, which read `value`. */
+	values: Schema.optional(Schema.Array(Schema.String)),
+	mode: Schema.Literals(["equals", "exists", "gt", "gte", "lt", "lte", "contains", "in"]),
 	negated: Schema.optional(Schema.Boolean),
 })
 export type AttributeFilter = Schema.Schema.Type<typeof AttributeFilter>
@@ -55,6 +57,16 @@ export type TracesMatchModes = Schema.Schema.Type<typeof TracesMatchModes>
 export const TracesFilters = Schema.Struct({
 	serviceName: Schema.optional(ServiceName),
 	spanName: Schema.optional(SpanName),
+	/**
+	 * Multi-value spelling of `serviceName` / `spanName`, compiled to `IN (...)`.
+	 * The scalar fields stay for the dashboard DSL, MCP tools and alert rules that
+	 * only ever select one; when both are present the array wins. `matchModes`
+	 * "contains" only applies to the single-value case — a substring form of an
+	 * N-value IN has no meaning.
+	 */
+	serviceNames: Schema.optional(Schema.Array(ServiceName)),
+	spanNames: Schema.optional(Schema.Array(SpanName)),
+	statusCode: Schema.optional(Schema.Literals(["Ok", "Error", "Unset"])),
 	rootSpansOnly: Schema.optional(Schema.Boolean),
 	environments: Schema.optional(Schema.Array(DeploymentEnvironment)),
 	namespaces: Schema.optional(Schema.Array(ServiceNamespace)),
@@ -76,12 +88,16 @@ export type TracesFilters = Schema.Schema.Type<typeof TracesFilters>
 export const LogsFilters = Schema.Struct({
 	serviceName: Schema.optional(ServiceName),
 	severity: Schema.optional(Schema.String),
+	minSeverity: Schema.optional(Schema.Number),
 	traceId: Schema.optional(TraceId),
+	spanId: Schema.optional(Schema.String),
 	search: Schema.optional(Schema.String),
 	environments: Schema.optional(Schema.Array(DeploymentEnvironment)),
 	deploymentEnvMatchMode: Schema.optional(Schema.Literal("contains")),
 	namespaces: Schema.optional(Schema.Array(ServiceNamespace)),
 	namespaceMatchMode: Schema.optional(Schema.Literal("contains")),
+	attributeFilters: Schema.optional(Schema.Array(AttributeFilter)),
+	resourceAttributeFilters: Schema.optional(Schema.Array(AttributeFilter)),
 })
 export type LogsFilters = Schema.Schema.Type<typeof LogsFilters>
 
@@ -95,10 +111,25 @@ export type ErrorsFilters = Schema.Schema.Type<typeof ErrorsFilters>
 
 export const MetricsFilters = Schema.Struct({
 	metricName: MetricName,
+	// Optional set of candidate names matched with `MetricName IN (...)`, used to
+	// resolve a metric whose exact name is one of a few known spellings (e.g. the
+	// SpanMetrics `calls` counter as `span.metrics.calls` or `calls`) without a
+	// separate catalog round-trip. When present it supersedes the scalar
+	// `metricName` in the WHERE clause; `metricName` stays the required canonical.
+	metricNames: Schema.optional(Schema.Array(MetricName)),
 	metricType: MetricType,
 	serviceName: Schema.optional(ServiceName),
+	// Metrics tables have no pre-extracted DeploymentEnv column, so this lowers to
+	// a predicate on `ResourceAttributes['deployment.environment']` (see
+	// `metricsTimeseriesQuery`). Same field name as TracesFilters/LogsFilters.
+	environments: Schema.optional(Schema.Array(DeploymentEnvironment)),
 	groupByAttributeKey: Schema.optional(Schema.String),
+	// Resource-attribute counterpart of `groupByAttributeKey` — groups by a
+	// ResourceAttributes key (host.name, k8s.pod.name, …) instead of a datapoint
+	// Attributes key. Required when groupBy includes "resource_attribute".
+	groupByResourceAttributeKey: Schema.optional(Schema.String),
 	attributeFilters: Schema.optional(Schema.Array(AttributeFilter)),
+	resourceAttributeFilters: Schema.optional(Schema.Array(AttributeFilter)),
 })
 export type MetricsFilters = Schema.Schema.Type<typeof MetricsFilters>
 
@@ -115,6 +146,10 @@ export const TracesTimeseriesQuery = Schema.Struct({
 	),
 	filters: Schema.optional(TracesFilters),
 	bucketSeconds: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+	// Opt-in top-N series cap: keep only the N largest groups (by total count
+	// across buckets). Avoids fetching the long tail of a high-cardinality
+	// group-by. Ignored when there is no real group-by.
+	seriesLimit: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
 })
 export type TracesTimeseriesQuery = Schema.Schema.Type<typeof TracesTimeseriesQuery>
 
@@ -125,6 +160,9 @@ export const LogsTimeseriesQuery = Schema.Struct({
 	groupBy: Schema.optional(Schema.Array(Schema.Literals(["service", "severity", "none"]))),
 	filters: Schema.optional(LogsFilters),
 	bucketSeconds: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+	// Opt-in top-N series cap: keep only the N largest groups (by total count
+	// across buckets). Ignored when there is no real group-by.
+	seriesLimit: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
 })
 export type LogsTimeseriesQuery = Schema.Schema.Type<typeof LogsTimeseriesQuery>
 
@@ -132,9 +170,12 @@ export const MetricsTimeseriesQuery = Schema.Struct({
 	kind: Schema.Literal("timeseries"),
 	source: Schema.Literal("metrics"),
 	metric: MetricsMetric,
-	groupBy: Schema.optional(Schema.Array(Schema.Literals(["service", "attribute", "none"]))),
+	groupBy: Schema.optional(
+		Schema.Array(Schema.Literals(["service", "attribute", "resource_attribute", "none"])),
+	),
 	filters: MetricsFilters,
 	bucketSeconds: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+	seriesLimit: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
 })
 export type MetricsTimeseriesQuery = Schema.Schema.Type<typeof MetricsTimeseriesQuery>
 
@@ -167,13 +208,26 @@ export const MetricsBreakdownQuery = Schema.Struct({
 	kind: Schema.Literal("breakdown"),
 	source: Schema.Literal("metrics"),
 	metric: Schema.Literals(["avg", "sum", "count"]),
-	groupBy: Schema.Literal("service"),
+	groupBy: Schema.Literals(["service", "attribute", "resource_attribute"]),
 	filters: MetricsFilters,
 	limit: Schema.optional(
 		Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(100)),
 	),
 })
 export type MetricsBreakdownQuery = Schema.Schema.Type<typeof MetricsBreakdownQuery>
+
+// Batched preview series for the metrics-explorer browse grid: one query
+// returns a small timeseries per metric name (matched with `MetricName IN`),
+// so a page of sparkline cards costs one scan per metric type instead of one
+// query per card.
+export const MetricsSparklinesQuery = Schema.Struct({
+	kind: Schema.Literal("sparklines"),
+	source: Schema.Literal("metrics"),
+	metricType: MetricType,
+	metricNames: Schema.Array(MetricName),
+	bucketSeconds: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+})
+export type MetricsSparklinesQuery = Schema.Schema.Type<typeof MetricsSparklinesQuery>
 
 export const TracesListQuery = Schema.Struct({
 	kind: Schema.Literal("list"),
@@ -209,16 +263,36 @@ export const AttributeKeysQuery = Schema.Struct({
 	kind: Schema.Literal("attributeKeys"),
 	source: Schema.Literals(["traces", "logs", "metrics"]),
 	scope: Schema.optional(Schema.Literals(["span", "resource"])),
+	// Scope metrics-source discovery to a single metric (reads the raw metric
+	// table instead of the org-wide hourly rollup). Both fields must be set.
+	metricName: Schema.optional(Schema.String),
+	metricType: Schema.optional(MetricType),
 	limit: Schema.optional(
 		Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(500)),
 	),
 })
 export type AttributeKeysQuery = Schema.Schema.Type<typeof AttributeKeysQuery>
 
+// Scopes a facets query to a single dimension so only that UNION branch runs
+// (dashboard variables need one dropdown list, not the full facet sidebar).
+export const TracesFacetDimension = Schema.Literals([
+	"service",
+	"spanName",
+	"httpMethod",
+	"httpStatus",
+	"deploymentEnv",
+	"serviceNamespace",
+])
+export type TracesFacetDimension = typeof TracesFacetDimension.Type
+
+export const LogsFacetDimension = Schema.Literals(["severity", "service", "deploymentEnv", "namespace"])
+export type LogsFacetDimension = typeof LogsFacetDimension.Type
+
 export const TracesFacetsQuery = Schema.Struct({
 	kind: Schema.Literal("facets"),
 	source: Schema.Literal("traces"),
 	filters: Schema.optional(TracesFilters),
+	facet: Schema.optional(TracesFacetDimension),
 })
 export type TracesFacetsQuery = Schema.Schema.Type<typeof TracesFacetsQuery>
 
@@ -226,6 +300,7 @@ export const LogsFacetsQuery = Schema.Struct({
 	kind: Schema.Literal("facets"),
 	source: Schema.Literal("logs"),
 	filters: Schema.optional(LogsFilters),
+	facet: Schema.optional(LogsFacetDimension),
 })
 export type LogsFacetsQuery = Schema.Schema.Type<typeof LogsFacetsQuery>
 
@@ -254,6 +329,9 @@ export const AttributeValuesQuery = Schema.Struct({
 	source: Schema.Literals(["traces", "logs", "metrics"]),
 	scope: Schema.Literals(["span", "resource", "log", "metric"]),
 	attributeKey: Schema.String,
+	// Scope metrics-source discovery to a single metric (see AttributeKeysQuery).
+	metricName: Schema.optional(Schema.String),
+	metricType: Schema.optional(MetricType),
 	limit: Schema.optional(
 		Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(500)),
 	),
@@ -274,6 +352,7 @@ export const QuerySpec = Schema.Union([
 	TracesBreakdownQuery,
 	LogsBreakdownQuery,
 	MetricsBreakdownQuery,
+	MetricsSparklinesQuery,
 	TracesListQuery,
 	LogsListQuery,
 	AttributeKeysQuery,
@@ -337,6 +416,20 @@ export const AttributeValueItem = Schema.Struct({
 })
 export type AttributeValueItem = Schema.Schema.Type<typeof AttributeValueItem>
 
+export const SparklinePoint = Schema.Struct({
+	bucket: Schema.String,
+	avgValue: Schema.Number,
+	sumValue: Schema.Number,
+	dataPointCount: Schema.Number,
+})
+export type SparklinePoint = Schema.Schema.Type<typeof SparklinePoint>
+
+export const SparklineSeries = Schema.Struct({
+	metricName: Schema.String,
+	points: Schema.Array(SparklinePoint),
+})
+export type SparklineSeries = Schema.Schema.Type<typeof SparklineSeries>
+
 export const QueryEngineResult = Schema.Union([
 	Schema.Struct({
 		kind: Schema.Literal("timeseries"),
@@ -377,6 +470,11 @@ export const QueryEngineResult = Schema.Union([
 		kind: Schema.Literal("count"),
 		source: Schema.Literal("logs"),
 		data: Schema.Struct({ total: Schema.Number }),
+	}),
+	Schema.Struct({
+		kind: Schema.Literal("sparklines"),
+		source: Schema.Literal("metrics"),
+		data: Schema.Array(SparklineSeries),
 	}),
 ])
 export type QueryEngineResult = Schema.Schema.Type<typeof QueryEngineResult>
@@ -439,11 +537,14 @@ export class QueryEngineEvaluateResponse extends Schema.Class<QueryEngineEvaluat
  * Compiled, evaluation-ready form of an alert rule's query.
  *
  * - `kind: "spec"` — a structured QueryEngine `QuerySpec` (built from a query
- *   builder draft or one of the canned signal types). Evaluated via
- *   `QueryEngineService.evaluate`.
- * - `kind: "raw_sql"` — user-authored ClickHouse SQL with macros. Evaluated via
- *   `QueryEngineService.evaluateRawSql`. `query`/`sampleCountStrategy` are null;
- *   the alert value comes from the `value` column convention.
+ *   builder draft or one of the canned signal types).
+ * - `kind: "raw_sql"` — user-authored ClickHouse SQL with macros.
+ *   `query`/`sampleCountStrategy` are null; the alert value comes from the
+ *   `value` column convention.
+ *
+ * Both are evaluated by the same `QueryEngineService.evaluate`: the plan is
+ * lowered to an `AlertBucketSource` (see `planEvaluateSource`), which is the
+ * only place the evaluation path inspects `kind` at all.
  */
 export class CompiledAlertQueryPlan extends Schema.Class<CompiledAlertQueryPlan>("CompiledAlertQueryPlan")({
 	kind: Schema.Literals(["spec", "raw_sql"]),

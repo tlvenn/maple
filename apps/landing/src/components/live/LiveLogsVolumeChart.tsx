@@ -1,38 +1,24 @@
-import { useEffect, useRef, useState } from "react";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { useRef } from "react"
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
+import { useContainerSize } from "@maple/ui/hooks/use-container-size"
 
-import {
-	formatBucketTick,
-	formatNumber,
-	stubBuckets,
-	totalCount,
-} from "./live-logs-volume-data";
+import { formatBucketTick, formatNumber, stubBuckets, totalCount } from "./live-logs-volume-data"
 
 const SEVERITY_COLORS = {
 	INFO: "var(--severity-info)",
 	DEBUG: "var(--severity-debug)",
 	WARN: "var(--severity-warn)",
 	ERROR: "var(--severity-error)",
-} as const;
+} as const
 
-const STACK_ORDER: (keyof typeof SEVERITY_COLORS)[] = ["DEBUG", "INFO", "WARN", "ERROR"];
+const STACK_ORDER: (keyof typeof SEVERITY_COLORS)[] = ["DEBUG", "INFO", "WARN", "ERROR"]
 
-const HEIGHT = 140;
+const HEIGHT = 140
 
 export default function LiveLogsVolumeChart() {
-	const total = totalCount(stubBuckets);
-	const wrapRef = useRef<HTMLDivElement | null>(null);
-	const [width, setWidth] = useState(0);
-
-	useEffect(() => {
-		const el = wrapRef.current;
-		if (!el) return;
-		const update = () => setWidth(el.clientWidth);
-		update();
-		const ro = new ResizeObserver(update);
-		ro.observe(el);
-		return () => ro.disconnect();
-	}, []);
+	const total = totalCount(stubBuckets)
+	const wrapRef = useRef<HTMLDivElement | null>(null)
+	const { width } = useContainerSize(wrapRef)
 
 	return (
 		<div className="live-frame">
@@ -101,5 +87,5 @@ export default function LiveLogsVolumeChart() {
 				<span>warn cluster 11:10–11:40 · error blip 11:50</span>
 			</div>
 		</div>
-	);
+	)
 }

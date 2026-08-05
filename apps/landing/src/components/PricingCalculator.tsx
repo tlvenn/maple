@@ -1,6 +1,7 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef } from "react"
+import { trackLanding } from "../lib/telemetry"
 
-type Competitor = "datadog" | "grafana" | "new-relic" | "dash0"
+export type Competitor = "datadog" | "grafana" | "new-relic" | "dash0"
 
 interface SliderConfig {
 	key: string
@@ -12,7 +13,7 @@ interface SliderConfig {
 	unit: string
 }
 
-const competitorConfigs: Record<Competitor, { name: string; sliders: SliderConfig[] }> = {
+export const competitorConfigs: Record<Competitor, { name: string; sliders: SliderConfig[] }> = {
 	datadog: {
 		name: "Datadog",
 		sliders: [
@@ -222,7 +223,7 @@ function calculateMaple(values: Record<string, number>, competitor: Competitor) 
 	}
 
 	// Maple: 100 GB each for logs, traces, metrics = 300 GB total included
-	// Simplify: $0.30/GB overage beyond 300 GB total
+	// Overage billed at $0.30/GB beyond 300 GB total (autumn.config.ts)
 	const overage = Math.max(0, totalDataGB - 300) * 0.3
 
 	return {
@@ -238,7 +239,7 @@ function calculateMaple(values: Record<string, number>, competitor: Competitor) 
 						},
 					]
 				: []),
-			{ label: "Team seats", value: 0, detail: "Unlimited — always free" },
+			{ label: "Team seats", value: 0, detail: "No per-seat fees" },
 		],
 	}
 }
@@ -317,6 +318,16 @@ export function PricingCalculator({ competitor }: { competitor: Competitor }) {
 	const savings = competitorCost.total - mapleCost.total
 	const savingsPct = competitorCost.total > 0 ? Math.round((savings / competitorCost.total) * 100) : 0
 
+	// A range input fires onChange per tick of the drag, so the event is emitted
+	// once the slider settles — one row per adjustment, not one per pixel.
+	const settleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+	const trackSliderSettled = (key: string, value: number) => {
+		if (settleTimer.current) clearTimeout(settleTimer.current)
+		settleTimer.current = setTimeout(() => {
+			trackLanding("pricing_calculator_changed", { competitor, slider: key, value })
+		}, 800)
+	}
+
 	return (
 		<div>
 			{/* Sliders */}
@@ -329,7 +340,10 @@ export function PricingCalculator({ competitor }: { competitor: Competitor }) {
 						key={slider.key}
 						config={slider}
 						value={values[slider.key]}
-						onChange={(v) => setValues((prev) => ({ ...prev, [slider.key]: v }))}
+						onChange={(v) => {
+							setValues((prev) => ({ ...prev, [slider.key]: v }))
+							trackSliderSettled(slider.key, v)
+						}}
 					/>
 				))}
 			</div>
@@ -437,7 +451,7 @@ export function PricingCalculator({ competitor }: { competitor: Competitor }) {
 			<p className="mt-4 text-[10px] text-[oklch(0.4_0.02_60)] leading-relaxed">
 				Estimates based on published pricing as of 2025. Actual costs may vary based on contract
 				terms, volume discounts, and additional features. Maple pricing based on the Startup plan
-				($29/mo with 300 GB total included data).
+				($39/mo with 300 GB total included data, then $0.30/GB).
 				{competitor === "dash0" &&
 					" Dash0 bills per data point (spans & logs $0.60/M, metrics $0.20/M); Maple bills per GB, so the Maple estimate converts data points to volume at roughly 1 KB per span and log record and 0.1 KB per metric data point. Your real ratio depends on attribute and payload sizes."}
 			</p>

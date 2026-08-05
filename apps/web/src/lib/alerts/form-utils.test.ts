@@ -1,118 +1,39 @@
 import { describe, expect, it } from "vitest"
+import { AlertDeliveryEventId, AlertDestinationId, AlertIncidentId, AlertRuleId } from "@maple/domain/http"
 import {
-	buildRuleRequest,
+	buildDestinationCreateParamsV2,
+	buildDestinationUpdateParamsV2,
+	buildRuleCreateParamsV2,
+	defaultDestinationForm,
 	defaultRuleForm,
 	deriveRuleQueryIssues,
 	domainThresholdToForm,
-	flattenAlertChartData,
 	formThresholdToDomain,
+	normalizeRuleQueryDraft,
 	rawSqlHasValueColumn,
-	signalToQueryParams,
-	type RuleFormState,
+	v2CheckToDocument,
+	v2DeliveryToDocument,
+	v2PreviewToResponse,
 } from "./form-utils"
-
-const makePoint = (bucket: string, series: Record<string, number>) => ({ bucket, series })
-
-function queryRuleForm(overrides: Partial<RuleFormState["queryBuilderDraft"]>): RuleFormState {
-	const base = defaultRuleForm()
-	const groupBy = "groupBy" in overrides ? (overrides.groupBy ?? []) : []
-	const queryBuilderDraft = {
-		...base.queryBuilderDraft,
-		...overrides,
-		addOns: {
-			groupBy: groupBy.length > 0,
-			having: false,
-			orderBy: false,
-			limit: false,
-			legend: false,
-			...overrides.addOns,
-		},
-		groupBy,
-	} as RuleFormState["queryBuilderDraft"]
-	return {
-		...base,
-		signalType: "builder_query" as const,
-		queryBuilderDraft,
-	}
-}
-
-describe("flattenAlertChartData", () => {
-	it("filters to only selected services when multiple are specified", () => {
-		const points = [
-			makePoint("2026-03-25 10:00:00", { "svc-a": 1.5, "svc-b": 2.0, "svc-c": 3.0 }),
-			makePoint("2026-03-25 10:05:00", { "svc-a": 1.8, "svc-b": 2.5, "svc-c": 0.5 }),
-		]
-
-		const result = flattenAlertChartData(points, ["svc-a", "svc-b"])
-
-		expect(result).toEqual([
-			{ bucket: "2026-03-25 10:00:00", "svc-a": 1.5, "svc-b": 2.0 },
-			{ bucket: "2026-03-25 10:05:00", "svc-a": 1.8, "svc-b": 2.5 },
-		])
-	})
-
-	it("remaps series key to the service name for single service", () => {
-		const points = [
-			makePoint("2026-03-25 10:00:00", { "svc-a": 4.2 }),
-			makePoint("2026-03-25 10:05:00", { "svc-a": 3.1 }),
-		]
-
-		const result = flattenAlertChartData(points, ["svc-a"])
-
-		expect(result).toEqual([
-			{ bucket: "2026-03-25 10:00:00", "svc-a": 4.2 },
-			{ bucket: "2026-03-25 10:05:00", "svc-a": 3.1 },
-		])
-	})
-
-	it("defaults to 0 when single service is missing from series", () => {
-		const points = [makePoint("2026-03-25 10:00:00", { all: 5.0 })]
-
-		const result = flattenAlertChartData(points, ["svc-a"])
-
-		expect(result).toEqual([{ bucket: "2026-03-25 10:00:00", "svc-a": 0 }])
-	})
-
-	it("passes through all series keys when no services specified", () => {
-		const points = [makePoint("2026-03-25 10:00:00", { "svc-a": 1.0, "svc-b": 2.0, "svc-c": 3.0 })]
-
-		const result = flattenAlertChartData(points, [])
-
-		expect(result).toEqual([{ bucket: "2026-03-25 10:00:00", "svc-a": 1.0, "svc-b": 2.0, "svc-c": 3.0 }])
-	})
-
-	it("skips selected services not present in series data", () => {
-		const points = [makePoint("2026-03-25 10:00:00", { "svc-a": 1.0 })]
-
-		const result = flattenAlertChartData(points, ["svc-a", "svc-missing"])
-
-		expect(result).toEqual([{ bucket: "2026-03-25 10:00:00", "svc-a": 1.0 }])
-	})
-
-	it("handles empty points array", () => {
-		expect(flattenAlertChartData([], ["svc-a"])).toEqual([])
-		expect(flattenAlertChartData([], [])).toEqual([])
-	})
-})
 
 describe("rule notes", () => {
 	it("defaults to an empty note", () => {
 		expect(defaultRuleForm().notes).toBe("")
 	})
 
-	it("carries a trimmed note onto the upsert request", () => {
-		const request = buildRuleRequest({
+	it("carries a trimmed note onto the create params", () => {
+		const params = buildRuleCreateParamsV2({
 			...defaultRuleForm(),
 			name: "Error rate",
 			notes: "  See runbook: https://wiki/incidents  ",
 		})
 
-		expect(request.notes).toBe("See runbook: https://wiki/incidents")
+		expect(params.notes).toBe("See runbook: https://wiki/incidents")
 	})
 
 	it("sends null when the note is blank or whitespace-only", () => {
-		expect(buildRuleRequest({ ...defaultRuleForm(), name: "A", notes: "" }).notes).toBeNull()
-		expect(buildRuleRequest({ ...defaultRuleForm(), name: "A", notes: "   " }).notes).toBeNull()
+		expect(buildRuleCreateParamsV2({ ...defaultRuleForm(), name: "A", notes: "" }).notes).toBeNull()
+		expect(buildRuleCreateParamsV2({ ...defaultRuleForm(), name: "A", notes: "   " }).notes).toBeNull()
 	})
 })
 
@@ -132,57 +53,157 @@ describe("threshold unit conversion", () => {
 		expect(formThresholdToDomain("throughput", "1000")).toBe(1000)
 	})
 
-	it("stores error_rate threshold as a ratio on the upsert request", () => {
+	it("stores error_rate threshold as a ratio on the create params", () => {
 		// The default form threshold "5" must round-trip to the 0.05 ratio the
 		// MCP tool also uses — so a default error-rate alert can actually fire.
-		const request = buildRuleRequest({
+		const params = buildRuleCreateParamsV2({
 			...defaultRuleForm(),
 			name: "Error rate",
 			signalType: "error_rate",
 		})
-		expect(request.threshold).toBe(0.05)
+		expect(params.threshold).toBe(0.05)
 	})
 
-	it("keeps latency thresholds in their native units on the upsert request", () => {
-		const request = buildRuleRequest({
+	it("keeps latency thresholds in their native units on the create params", () => {
+		const params = buildRuleCreateParamsV2({
 			...defaultRuleForm(),
 			name: "P95",
 			signalType: "p95_latency",
 			threshold: "500",
 		})
-		expect(request.threshold).toBe(500)
+		expect(params.threshold).toBe(500)
 	})
 })
 
-describe("signalToQueryParams", () => {
-	it("returns null for builder_query — the preview runs the draft through the query-builder path", () => {
-		const form = queryRuleForm({
-			dataSource: "traces",
-			aggregation: "count",
-			whereClause: 'service.name = "checkout"',
+describe("buildRuleCreateParamsV2", () => {
+	it("dedupes destination ids", () => {
+		const form = defaultRuleForm()
+		const params = buildRuleCreateParamsV2({
+			...form,
+			name: "A",
+			destinationIds: [...form.destinationIds, ...form.destinationIds],
+		})
+		expect(params.destination_ids).toEqual([...new Set(params.destination_ids)])
+	})
+
+	it("empties the rule-level scope for query-owned signals", () => {
+		const params = buildRuleCreateParamsV2({
+			...defaultRuleForm(),
+			name: "Builder",
+			signalType: "builder_query",
+			serviceNames: ["checkout"],
+			excludeServiceNames: ["internal"],
+			environments: ["production"],
+			groupBy: ["service.name"],
+		})
+		expect(params.service_names).toEqual([])
+		expect(params.exclude_service_names).toEqual([])
+		expect(params.environments).toEqual([])
+		expect(params.group_by).toBeNull()
+		expect(params.query_builder_draft).not.toBeNull()
+	})
+
+	it("submits the environment scope for built-in signals", () => {
+		const params = buildRuleCreateParamsV2({
+			...defaultRuleForm(),
+			name: "Prod error rate",
+			signalType: "error_rate",
+			environments: ["production", "  ", "staging"],
+		})
+		expect(params.environments).toEqual(["production", "staging"])
+	})
+
+	it("defaults to an empty environment scope (all environments)", () => {
+		const params = buildRuleCreateParamsV2({ ...defaultRuleForm(), name: "A" })
+		expect(params.environments).toEqual([])
+	})
+
+	it("normalizes and submits one query-builder draft", () => {
+		const queryBuilderDraft = normalizeRuleQueryDraft({
+			id: "A",
+			name: "A",
+			dataSource: "metrics",
+			aggregation: "rate",
+			metricName: "http.requests",
+			metricType: "sum",
+		})
+		const params = buildRuleCreateParamsV2({
+			...defaultRuleForm(),
+			name: "Request rate",
+			signalType: "builder_query",
+			queryBuilderDraft,
 		})
 
-		expect(signalToQueryParams(form)).toBeNull()
+		expect(queryBuilderDraft).toMatchObject({
+			dataSource: "metrics",
+			whereClause: "",
+			groupBy: ["service.name"],
+			metricName: "http.requests",
+			metricType: "sum",
+			isMonotonic: true,
+		})
+		expect(params.query_builder_draft).toEqual(queryBuilderDraft)
 	})
 
-	it("returns null for raw_query — raw SQL has no structured preview", () => {
-		const form: RuleFormState = { ...defaultRuleForm(), signalType: "raw_query" }
-
-		expect(signalToQueryParams(form)).toBeNull()
-	})
-
-	it("maps built-in signals to the custom-chart preview params", () => {
-		const form: RuleFormState = {
+	it("keeps query-builder warnings non-fatal", () => {
+		const form = {
 			...defaultRuleForm(),
-			signalType: "error_rate",
-			serviceNames: ["checkout"],
+			name: "Requests by method",
+			signalType: "builder_query" as const,
+			queryBuilderDraft: normalizeRuleQueryDraft({
+				id: "A",
+				name: "A",
+				dataSource: "metrics",
+				aggregation: "avg",
+				metricName: "http.server.request.duration",
+				metricType: "histogram",
+				addOns: { groupBy: true, having: false, orderBy: false, limit: false, legend: false },
+				groupBy: ["attr.http.method", "attr.http.route"],
+			}),
 		}
 
-		expect(signalToQueryParams(form)).toEqual({
-			source: "traces",
-			metric: "error_rate",
-			filters: { serviceName: "checkout", rootSpansOnly: true },
+		expect(deriveRuleQueryIssues(form)).toEqual([])
+		expect(buildRuleCreateParamsV2(form).query_builder_draft).toEqual(form.queryBuilderDraft)
+	})
+})
+
+describe("slack-bot destination params", () => {
+	it("builds create params with channel id and trimmed name/channel name", () => {
+		const params = buildDestinationCreateParamsV2({
+			...defaultDestinationForm("slack-bot"),
+			name: "  Prod incidents  ",
+			slackChannelId: "C0789CHAN",
+			slackChannelName: "  incidents  ",
 		})
+		expect(params).toEqual({
+			type: "slack-bot",
+			name: "Prod incidents",
+			enabled: true,
+			channel_id: "C0789CHAN",
+			channel_name: "incidents",
+		})
+	})
+
+	it("omits channel_name when blank on create", () => {
+		const params = buildDestinationCreateParamsV2({
+			...defaultDestinationForm("slack-bot"),
+			name: "Prod",
+			slackChannelId: "C0789CHAN",
+			slackChannelName: "   ",
+		})
+		expect(params).not.toHaveProperty("channel_name")
+		expect(params).toMatchObject({ type: "slack-bot", channel_id: "C0789CHAN" })
+	})
+
+	it("drops omitted fields on update so a blank channel keeps the stored one", () => {
+		const params = buildDestinationUpdateParamsV2({
+			...defaultDestinationForm("slack-bot"),
+			name: "",
+			slackChannelId: "",
+			slackChannelName: "",
+			enabled: false,
+		})
+		expect(params).toEqual({ type: "slack-bot", enabled: false })
 	})
 })
 
@@ -205,5 +226,129 @@ describe("raw SQL alert query validation", () => {
 				rawQuerySql: sql,
 			}),
 		).toEqual(["SQL value column"])
+	})
+})
+
+describe("v2 response mappers", () => {
+	it("maps a v2 preview result onto the camelCase domain response", () => {
+		const response = v2PreviewToResponse({
+			object: "alert_rule.preview",
+			bucket_seconds: 300,
+			window_minutes: 5,
+			threshold: 0.05,
+			threshold_upper: null,
+			comparator: "gt",
+			truncated_to_start: "2026-07-15T00:00:00.000Z",
+			series: [
+				{
+					group_key: "__total__",
+					points: [
+						{
+							bucket: "2026-07-15T09:10:00.000Z",
+							value: 0.09,
+							sample_count: 132,
+							status: "breached",
+							provisional: true,
+						},
+					],
+				},
+			],
+			would_fire: [
+				{
+					group_key: "__total__",
+					start: "2026-07-15T09:10:00.000Z",
+					end: "2026-07-15T09:40:00.000Z",
+				},
+			],
+		})
+
+		expect(response.bucketSeconds).toBe(300)
+		expect(response.windowMinutes).toBe(5)
+		expect(response.truncatedToStart).toBe("2026-07-15T00:00:00.000Z")
+		expect(response.series[0]?.groupKey).toBe("__total__")
+		expect(response.series[0]?.points[0]).toMatchObject({
+			bucket: "2026-07-15T09:10:00.000Z",
+			value: 0.09,
+			sampleCount: 132,
+			status: "breached",
+			provisional: true,
+		})
+		expect(response.wouldFire[0]).toMatchObject({
+			groupKey: "__total__",
+			start: "2026-07-15T09:10:00.000Z",
+			end: "2026-07-15T09:40:00.000Z",
+		})
+	})
+
+	it("maps a v2 check onto the camelCase domain document", () => {
+		const document = v2CheckToDocument({
+			object: "alert_check",
+			timestamp: "2026-07-15T09:10:00.000Z",
+			group_key: "__total__",
+			status: "breached",
+			signal_type: "error_rate",
+			comparator: "gt",
+			threshold: 0.05,
+			threshold_upper: null,
+			observed_value: 0.09,
+			sample_count: 132,
+			window_minutes: 5,
+			window_start: "2026-07-15T09:05:00.000Z",
+			window_end: "2026-07-15T09:10:00.000Z",
+			consecutive_breaches: 2,
+			consecutive_healthy: 0,
+			incident_id: null,
+			incident_transition: "opened",
+			evaluation_duration_ms: 412,
+			error_message: null,
+			error_category: null,
+		})
+
+		expect(document).toMatchObject({
+			timestamp: "2026-07-15T09:10:00.000Z",
+			groupKey: "__total__",
+			status: "breached",
+			signalType: "error_rate",
+			observedValue: 0.09,
+			sampleCount: 132,
+			windowStart: "2026-07-15T09:05:00.000Z",
+			windowEnd: "2026-07-15T09:10:00.000Z",
+			consecutiveBreaches: 2,
+			consecutiveHealthy: 0,
+			incidentId: null,
+			incidentTransition: "opened",
+			evaluationDurationMs: 412,
+		})
+	})
+
+	it("maps a v2 delivery onto the camelCase domain document", () => {
+		const document = v2DeliveryToDocument({
+			id: AlertDeliveryEventId.make("00000000-0000-4000-8000-000000000101"),
+			object: "alert_delivery",
+			incident_id: AlertIncidentId.make("00000000-0000-4000-8000-000000000102"),
+			rule_id: AlertRuleId.make("00000000-0000-4000-8000-000000000103"),
+			destination_id: AlertDestinationId.make("00000000-0000-4000-8000-000000000104"),
+			destination_name: "On-call",
+			destination_type: "webhook",
+			delivery_key: "delivery-1",
+			event_type: "trigger",
+			attempt_number: 1,
+			status: "success",
+			scheduled_at: "2026-07-15T09:10:00.000Z",
+			attempted_at: "2026-07-15T09:10:01.000Z",
+			provider_message: "ok",
+			provider_reference: "ref-1",
+			response_code: 200,
+			error_message: null,
+		})
+
+		expect(document).toMatchObject({
+			destinationName: "On-call",
+			destinationType: "webhook",
+			deliveryKey: "delivery-1",
+			eventType: "trigger",
+			status: "success",
+			responseCode: 200,
+		})
 	})
 })

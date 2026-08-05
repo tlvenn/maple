@@ -10,13 +10,24 @@ import {
 	CommandItem,
 	CommandList,
 } from "@maple/ui/components/ui/command"
+import { isEditableTarget } from "@maple/ui/lib/keyboard"
 import { MagnifierIcon } from "@maple/ui/components/icons/magnifier"
 import Fuse, { type IFuseOptions } from "fuse.js"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { SearchDoc } from "../../lib/docs-search"
+import { trackLanding } from "../../lib/telemetry"
 
 /** Flat browse order — mirrors the sidebar group order (DocsSidebar.astro). */
-const GROUP_ORDER = ["Getting Started", "Concepts", "Infrastructure", "Integrations", "Local Mode", "Effect SDK", "Platforms", "Instrumentation"]
+const GROUP_ORDER = [
+	"Getting Started",
+	"Concepts",
+	"Infrastructure",
+	"Integrations",
+	"Local Mode",
+	"Effect SDK",
+	"Platforms",
+	"Instrumentation",
+]
 
 const MAX_RESULTS = 8
 
@@ -46,12 +57,6 @@ function loadIndex() {
 			})
 	}
 	return indexPromise
-}
-
-const EDITABLE_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"])
-function isEditableTarget(target: EventTarget | null): boolean {
-	if (!(target instanceof HTMLElement)) return false
-	return EDITABLE_TAGS.has(target.tagName) || target.isContentEditable
 }
 
 function groupOrder(group: string): number {
@@ -105,12 +110,22 @@ export default function DocsSearch() {
 
 	// `openRef` mirrors `open` so the mount-only key listener reads fresh state.
 	const openRef = useRef(false)
+	// Same reason: the close handler needs the final query, and it is created once.
+	const queryRef = useRef("")
 	const setPaletteOpen = useCallback(
 		(next: boolean) => {
 			openRef.current = next
 			setOpen(next)
-			if (next) ensureIndex()
-			else setQuery("")
+			if (next) {
+				ensureIndex()
+				return
+			}
+			// Emitted on close rather than per keystroke: what's worth knowing is
+			// what someone searched for, not every prefix they typed on the way.
+			const searched = queryRef.current.trim()
+			if (searched) trackLanding("docs_search", { query: searched.slice(0, 120) })
+			queryRef.current = ""
+			setQuery("")
 		},
 		[ensureIndex],
 	)
@@ -157,7 +172,9 @@ export default function DocsSearch() {
 			>
 				<MagnifierIcon className="size-3.5" />
 				<span className="hidden sm:inline">Search docs</span>
-				<kbd className="hidden font-medium text-[10px] text-fg-muted/70 tracking-widest sm:inline">⌘K</kbd>
+				<kbd className="hidden font-medium text-[10px] text-fg-muted/70 tracking-widest sm:inline">
+					⌘K
+				</kbd>
 			</button>
 
 			{/* Gate the popup on `open` so it unmounts cleanly — base-ui leaves the
@@ -170,7 +187,10 @@ export default function DocsSearch() {
 							inline={false}
 							filter={null}
 							value={query}
-							onValueChange={(value: string) => setQuery(value)}
+							onValueChange={(value: string) => {
+								queryRef.current = value
+								setQuery(value)
+							}}
 						>
 							<CommandInput placeholder="Search the docs…" />
 							<CommandList>

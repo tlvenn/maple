@@ -5,11 +5,12 @@ import { Badge } from "@maple/ui/components/ui/badge"
 import { Button } from "@maple/ui/components/ui/button"
 import { SheetClose } from "@maple/ui/components/ui/sheet"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@maple/ui/components/ui/tooltip"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { CopyableValue, tryParseJson } from "@/components/attributes"
 import { highlightCode } from "@/lib/sugar-high"
 import { SeverityBadge } from "@maple/ui/components/logs/severity-badge"
 import type { Log } from "@/api/warehouse/logs"
+import { ServiceDot } from "@maple/ui/components/service-dot"
 
 const HERO_TONE: Record<string, string> = {
 	TRACE: "bg-severity-trace/5 border-severity-trace/20",
@@ -83,12 +84,11 @@ export function LogHeroHeader({ log, showClose = true }: LogHeroHeaderProps) {
 					<TooltipContent side="bottom">OTel severity number {log.severityNumber}</TooltipContent>
 				</Tooltip>
 				<Badge variant="outline" className="font-mono text-[10px]">
+					<ServiceDot serviceName={log.serviceName} className="size-1.5" />
 					<CopyableValue value={log.serviceName}>{log.serviceName}</CopyableValue>
 				</Badge>
 				{showClose && (
-					<SheetClose
-						render={<Button variant="ghost" size="icon" className="ml-auto shrink-0" />}
-					>
+					<SheetClose render={<Button variant="ghost" size="icon" className="ml-auto shrink-0" />}>
 						<XmarkIcon size={16} />
 					</SheetClose>
 				)}

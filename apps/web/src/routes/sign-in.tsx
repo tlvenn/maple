@@ -2,7 +2,6 @@ import { createFileRoute } from "@tanstack/react-router"
 import { SignIn } from "@clerk/clerk-react"
 
 import { FormEvent, useState } from "react"
-import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 import { Button } from "@maple/ui/components/ui/button"
 import { Input } from "@maple/ui/components/ui/input"
@@ -12,12 +11,13 @@ import { isClerkAuthEnabled } from "@/lib/services/common/auth-mode"
 import { setSelfHostedSessionToken } from "@/lib/services/common/self-hosted-auth"
 import { AuthLayout } from "@/components/layout/auth-layout"
 import { clerkAppearance } from "@/lib/clerk-appearance"
+import { tracedFetch } from "@/lib/services/common/telemetry"
 
 const SignInSearch = Schema.Struct({
 	redirect_url: Schema.optional(Schema.String),
 })
 
-export const Route = effectRoute(createFileRoute("/sign-in"))({
+export const Route = createFileRoute("/sign-in")({
 	component: SignInPage,
 	validateSearch: Schema.toStandardSchemaV1(SignInSearch),
 })
@@ -40,7 +40,7 @@ function getErrorMessage(error: unknown): string {
 }
 
 async function loginSelfHosted(password: string) {
-	const response = await window.fetch(`${apiBaseUrl}/api/auth/login`, {
+	const response = await tracedFetch("maple-api", `${apiBaseUrl}/api/auth/login`, {
 		method: "POST",
 		headers: {
 			"content-type": "application/json",
@@ -106,11 +106,17 @@ export function SelfHostedSignInPage() {
 	)
 }
 
-export function SignInPage() {
+function SignInPage() {
+	const { redirect_url } = Route.useSearch()
+	// Clerk's <SignIn> defaults its post-sign-in redirect to "/", which would
+	// discard the guard-preserved redirect_url (e.g. after a hard reload on a
+	// deep link bounced through /sign-in while the session was still settling).
+	const target = validateInternalRedirect(redirect_url ?? null)
+
 	if (isClerkAuthEnabled) {
 		return (
 			<AuthLayout>
-				<SignIn appearance={clerkAppearance} />
+				<SignIn appearance={clerkAppearance} forceRedirectUrl={target ?? undefined} />
 			</AuthLayout>
 		)
 	}

@@ -1,69 +1,192 @@
-import { type MapleBrowserConfig, type ResolvedConfig, formatCHDateTime, resolveConfig } from "./config"
-import { getSession, parseUserAgent } from "./session"
+import {
+	clearPendingEvents,
+	clearSessionSink,
+	configurePrivacy,
+	getActiveSink,
+	getObservedTraceIds,
+	getSession,
+	hasConsent,
+	type IdentifyInput,
+	mayPersistIdentifier,
+	normalizeIdentity,
+	onConsentChange,
+	publishSessionSink,
+	rotateSession,
+	setActiveTraceIdProvider,
+	setVisitorTracking,
+	startEventSink,
+	startMetadataSession,
+	type MetadataSessionHandle,
+	type SessionEventSink,
+} from "@maple/browser-session"
+// Type-only: the replay entry pulls rrweb, so it may only be reached through the
+// dynamic import in `startRuntime`.
+import type { ReplaySessionHandle } from "@maple/browser-session/replay"
+import { trace } from "@opentelemetry/api"
+import { type MapleBrowserConfig, type ResolvedConfig, resolveConfig } from "./config"
 import { setupTracing } from "./tracing"
-import { getObservedTraceIds, publishSessionSink } from "./session-sink"
-import { startRecording, type Recorder } from "./replay/record"
-import { startEventCapture, type EventCapture } from "./replay/events"
-import { postSessionMeta } from "./replay/transport"
 
 export interface MapleBrowserHandle {
+	/** Empty until consent is granted when `requireConsent` is enabled. */
 	readonly sessionId: string
-	/** Tear down tracing + replay (flushing the final chunk). */
+	/** Tear down tracing + session capture, flushing the final buffers. */
 	readonly shutdown: () => Promise<void>
 }
 
+interface BrowserRuntime {
+	readonly initialSessionId: string
+	readonly sink: SessionEventSink
+	replay?: ReplaySessionHandle | undefined
+	metadata?: MetadataSessionHandle | undefined
+	/** Settles when the lazy replay chunk resolved; absent on the metadata path. */
+	replayPending?: Promise<void> | undefined
+}
+
 let active: MapleBrowserHandle | undefined
-// Same object the lifecycle closures capture, so `identify()` mutations are seen
-// by the ended-metadata row that `finalize()` posts.
+// Same object the session lifecycle's `getIdentity` reads, so `identify()`
+// mutations are seen by later metadata rows.
 let activeConfig: ResolvedConfig | undefined
 
 /**
- * Initialize Maple browser telemetry: OTel tracing + (sampled) rrweb session
- * replay, both tagged with one shared session id so a trace can link to its
- * replay and vice versa. Idempotent — repeated calls return the live handle.
+ * Initialize Maple browser telemetry. With consent gating enabled the returned
+ * handle remains live while denied: granting starts capture, revoking detaches
+ * it without flushing, and a later grant starts cleanly again.
  */
 export function init(rawConfig: MapleBrowserConfig): MapleBrowserHandle {
 	if (active) return active
 	if (typeof window === "undefined") {
-		// SSR / non-browser: no-op handle so isomorphic apps can call init freely.
 		return { sessionId: "", shutdown: () => Promise.resolve() }
 	}
 
 	const config = resolveConfig(rawConfig)
 	activeConfig = config
-	// One bounded session per activity window: reused across reloads (so traces
-	// and replay chunks correlate), rotated once idle. `startedAt` comes from the
-	// record so `duration_ms` reflects the whole session, not just this page load.
-	const session = getSession()
-	const sessionId = session.id
-	const startedAt = new Date(session.startedAt)
-
-	// Publish first so external tracers (Effect client SDK) can feed trace ids
-	// into this session regardless of init ordering.
-	publishSessionSink(sessionId)
-
-	const shutdownTracing = config.tracingEnabled ? setupTracing(config, sessionId) : undefined
+	configurePrivacy(config)
+	if (!hasConsent()) clearPendingEvents()
+	setActiveTraceIdProvider(() => trace.getActiveSpan()?.spanContext().traceId)
 
 	const recordReplay = config.replayEnabled && Math.random() < config.replaySampleRate
-	let recorder: Recorder | undefined
-	let events: EventCapture | undefined
-	if (recordReplay) {
-		recorder = startRecording(config, sessionId)
-		// Distilled events (console/network/error/nav/clicks) ride the same
-		// sampling decision as the rrweb recording.
-		events = startEventCapture(config, sessionId)
-		void postSessionMeta(config, sessionMetaRow(config, sessionId, startedAt, 1, "active", null))
-		installLifecycleHandlers(config, sessionId, startedAt, recorder, events)
+	let runtime: BrowserRuntime | undefined
+	let stopped = false
+	let rotateOnNextStart = false
+	let shutdownTracing: (() => Promise<void>) | undefined
+	// Bumped by every start and stop, so a replay chunk that lands after a
+	// consent revoke (or a rotation) never attaches a recorder to a dead runtime.
+	let generation = 0
+
+	const startRuntime = (): void => {
+		if (stopped || runtime || !hasConsent()) return
+		setVisitorTracking(config.persistVisitorId && mayPersistIdentifier())
+		const session = (rotateOnNextStart ? rotateSession() : undefined) ?? getSession()
+		rotateOnNextStart = false
+		publishSessionSink(session.id)
+		const sink = startEventSink(
+			{
+				endpoint: config.endpoint,
+				ingestKey: config.ingestKey,
+				maskAllInputs: config.maskAllInputs,
+				maskAllText: config.maskAllText,
+			},
+			session.id,
+		)
+		if (config.tracingEnabled && !shutdownTracing) shutdownTracing = setupTracing(config)
+		const shared = {
+			endpoint: config.endpoint,
+			ingestKey: config.ingestKey,
+			serviceName: config.serviceName,
+			environment: config.environment,
+			serviceVersion: config.serviceVersion,
+			getIdentity: () => activeConfig?.identity,
+			captureUserEmail: config.captureUserEmail,
+		}
+		// The replay path publishes the sink and sources trace ids itself — the
+		// Effect SDK drives it with neither wired — so only the metadata path takes
+		// them from here. Passing both would republish the sink twice per rotation.
+		const startMetadata = (): MetadataSessionHandle | undefined =>
+			startMetadataSession({
+				...shared,
+				getTraceIds: getObservedTraceIds,
+				onSessionChange: publishSessionSink,
+			})
+
+		if (!recordReplay) {
+			runtime = { initialSessionId: session.id, sink, metadata: startMetadata() }
+			return
+		}
+
+		// Sampled in: rrweb rides in a code-split chunk so the ~90% of visitors a
+		// sample rate excludes never download it. The sampling decision above is
+		// synchronous — only the recorder handle arrives late.
+		const next: BrowserRuntime = { initialSessionId: session.id, sink }
+		runtime = next
+		const ownGeneration = ++generation
+		const stale = (): boolean =>
+			stopped || !hasConsent() || generation !== ownGeneration || runtime !== next
+		next.replayPending = import("@maple/browser-session/replay")
+			.then(({ startReplaySession }) => {
+				if (stale()) return
+				next.replay = startReplaySession({
+					...shared,
+					maskAllInputs: config.maskAllInputs,
+					maskAllText: config.maskAllText,
+				})
+			})
+			.catch(() => {
+				// A blocked or failed chunk should still leave a session row behind.
+				if (stale()) return
+				next.metadata = startMetadata()
+			})
 	}
 
+	const stopRuntime = async (flush: boolean): Promise<void> => {
+		// Before the first await, so an in-flight replay chunk sees a stale
+		// generation and never starts a recorder behind the teardown.
+		generation++
+		const previous = runtime
+		runtime = undefined
+		if (!previous) return
+		const replayShutdown = previous.replay?.shutdown({ flush })
+		const metadataShutdown = previous.metadata?.shutdown({ flush })
+		const currentSessionId = previous.replay?.sessionId ?? previous.metadata?.sessionId
+		const liveSink = getActiveSink()
+		const sink =
+			liveSink && currentSessionId && liveSink.sessionId === currentSessionId ? liveSink : previous.sink
+		if (flush) await sink.flush(true)
+		sink.stop()
+		if (sink !== previous.sink) previous.sink.stop()
+		clearSessionSink(currentSessionId ?? previous.initialSessionId)
+		// Awaiting the import too keeps `shutdown()` a real quiescence point: it
+		// resolves with no replay work still scheduled behind it.
+		await Promise.all([replayShutdown, metadataShutdown, previous.replayPending])
+	}
+
+	startRuntime()
+	const stopConsentListener = config.requireConsent
+		? onConsentChange((allowed) => {
+				if (allowed) {
+					startRuntime()
+					return
+				}
+				rotateOnNextStart = runtime !== undefined
+				clearPendingEvents()
+				setVisitorTracking(false)
+				void stopRuntime(false)
+			})
+		: () => {}
+
 	const handle: MapleBrowserHandle = {
-		sessionId,
+		get sessionId() {
+			return (
+				runtime?.replay?.sessionId ?? runtime?.metadata?.sessionId ?? runtime?.initialSessionId ?? ""
+			)
+		},
 		shutdown: async () => {
-			if (recorder) await recorder.flush(true)
-			if (events) await events.flush(true)
-			recorder?.stop()
-			events?.stop()
+			if (stopped) return
+			stopped = true
+			stopConsentListener()
+			await stopRuntime(true)
 			await shutdownTracing?.()
+			shutdownTracing = undefined
+			setActiveTraceIdProvider(() => undefined)
 			active = undefined
 			activeConfig = undefined
 		},
@@ -73,95 +196,22 @@ export function init(rawConfig: MapleBrowserConfig): MapleBrowserHandle {
 }
 
 /**
- * Attach (or replace) the user id on the active session. Idempotent and safe to
- * call on every render. The session's authoritative row is the `Version=2`
- * "ended" row posted on unload, which reads `config.userId` at that moment — so
- * an id set here before the session ends is what the session is tagged with.
- * We deliberately do not re-post the active row (the SDK already writes a fresh
- * `Version=1` row on every reload; a second write here would collide under
- * `argMax(field, Version)`).
+ * Attach, replace, or clear the end-user identity on the active session.
+ * Idempotent and safe to call on every render. Future browser-created spans
+ * read the id when they start, and future session metadata rows read the whole
+ * identity when they post.
+ *
+ * Accepts a bare user id or the full object:
+ *
+ * ```ts
+ * MapleBrowser.identify("user_123")
+ * MapleBrowser.identify({ id: "user_123", email: "a@b.com", groupId: "org_1", groupName: "Acme" })
+ * ```
+ *
+ * Each call replaces the identity rather than merging — merging would leak a
+ * signed-out user's email into whoever signs in next on a shared device.
  */
-export function identify(userId: string): void {
-	if (typeof window === "undefined") return
-	if (!activeConfig) return
-	if (!userId) return
-	if (activeConfig.userId === userId) return
-	activeConfig.userId = userId
-}
-
-function installLifecycleHandlers(
-	config: ResolvedConfig,
-	sessionId: string,
-	startedAt: Date,
-	recorder: Recorder,
-	events: EventCapture,
-): void {
-	let finalized = false
-	const finalize = () => {
-		if (finalized) return
-		finalized = true
-		// keepalive flush survives unload; the ended-metadata row carries the
-		// observed trace ids for trace↔replay correlation.
-		void recorder.flush(true)
-		void events.flush(true)
-		void postSessionMeta(
-			config,
-			sessionMetaRow(config, sessionId, startedAt, 2, "ended", recorder.getClickCount()),
-			true,
-		)
-		// flush() snapshots its buffer synchronously before awaiting, so stopping
-		// immediately after is safe and clears the rrweb subscription + flush timer.
-		recorder.stop()
-		events.stop()
-	}
-	// `visibilitychange → hidden` is the reliable "leaving" signal on mobile;
-	// pagehide covers desktop tab close / navigation.
-	document.addEventListener("visibilitychange", () => {
-		if (document.visibilityState === "hidden") finalize()
-	})
-	window.addEventListener("pagehide", finalize)
-}
-
-function sessionMetaRow(
-	config: ResolvedConfig,
-	sessionId: string,
-	startedAt: Date,
-	version: number,
-	status: "active" | "ended",
-	clickCount: number | null,
-): Record<string, unknown> {
-	const ua = parseUserAgent(navigator.userAgent)
-	const now = new Date()
-	const row: Record<string, unknown> = {
-		session_id: sessionId,
-		start_time: formatCHDateTime(startedAt),
-		status,
-		version,
-		user_id: config.userId ?? "",
-		url_initial: window.location.href,
-		user_agent: navigator.userAgent,
-		browser_name: ua.browserName,
-		os_name: ua.osName,
-		device_type: ua.deviceType,
-		service_name: config.serviceName,
-		resource_attributes: {
-			...(config.environment
-				? {
-						// Dual-emit: legacy key (pre-extracted by Tinybird MVs) + canonical.
-						"deployment.environment": config.environment,
-						"deployment.environment.name": config.environment,
-					}
-				: {}),
-			...(config.serviceVersion
-				? { "deployment.commit_sha": config.serviceVersion }
-				: {}),
-		},
-	}
-	if (status === "ended") {
-		row.end_time = formatCHDateTime(now)
-		row.duration_ms = Math.max(0, now.getTime() - startedAt.getTime())
-		row.click_count = clickCount ?? 0
-		row.trace_ids = getObservedTraceIds()
-	}
-	return row
+export function identify(input?: IdentifyInput): void {
+	if (typeof window === "undefined" || !activeConfig) return
+	activeConfig.identity = normalizeIdentity(input)
 }

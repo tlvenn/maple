@@ -1,6 +1,7 @@
 import type { BaseComponentProps } from "@json-render/react"
-import { cn } from "@maple/ui/utils"
-import { formatDuration, formatErrorRate, formatNumber } from "@/lib/format"
+import { cn } from "@maple/ui/lib/utils"
+import { latencyToneClass } from "@maple/ui/lib/latency-tone"
+import { formatDuration, formatErrorRate, formatNumber } from "@maple/ui/lib/format"
 
 interface SystemHealthCardProps {
 	serviceCount: number
@@ -49,8 +50,16 @@ export function SystemHealthCard({ props }: BaseComponentProps<SystemHealthCardP
 								: "text-severity-info"
 					}
 				/>
-				<StatCell label="P50 Latency" value={formatDuration(latency.p50Ms)} />
-				<StatCell label="P95 Latency" value={formatDuration(latency.p95Ms)} />
+				<StatCell
+					label="P50 Latency"
+					value={formatDuration(latency.p50Ms)}
+					color={latencyToneClass(latency.p50Ms, "p50")}
+				/>
+				<StatCell
+					label="P95 Latency"
+					value={formatDuration(latency.p95Ms)}
+					color={latencyToneClass(latency.p95Ms, "p95")}
+				/>
 			</div>
 			{topErrors.length > 0 && (
 				<div className="space-y-1">

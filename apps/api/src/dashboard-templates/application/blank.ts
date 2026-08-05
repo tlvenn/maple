@@ -1,5 +1,5 @@
-import { buildPortableDashboard, templateId } from "../helpers"
-import type { TemplateDefinition } from "../types"
+import { buildPortableDashboard, templateId } from "@/dashboard-templates/helpers"
+import type { TemplateDefinition } from "@/dashboard-templates/types"
 
 export const blankTemplate: TemplateDefinition = {
 	id: templateId("blank"),
@@ -7,7 +7,6 @@ export const blankTemplate: TemplateDefinition = {
 	description: "Start from an empty dashboard and add widgets manually.",
 	category: "application",
 	tags: [],
-	requirements: [],
 	parameters: [],
 	build: () =>
 		buildPortableDashboard({

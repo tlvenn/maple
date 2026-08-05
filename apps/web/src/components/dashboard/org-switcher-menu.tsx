@@ -24,10 +24,14 @@ export function OrgAvatar({
 	name,
 	imageUrl,
 	className,
+	fit = "cover",
 }: {
 	name: string
 	imageUrl?: string | null
 	className?: string
+	/** How the logo image fills its box. "cover" (default) crops to a square for compact avatars;
+	 * "contain" shows the full logo undistorted (used in the settings preview). */
+	fit?: "cover" | "contain"
 }) {
 	const initial = name.charAt(0).toUpperCase()
 	const baseClass = className ?? "size-8"
@@ -35,7 +39,7 @@ export function OrgAvatar({
 		<img
 			src={imageUrl}
 			alt={name}
-			className={`${baseClass} shrink-0 rounded-md object-cover`}
+			className={`${baseClass} shrink-0 rounded-md ${fit === "contain" ? "object-contain" : "object-cover"}`}
 		/>
 	) : (
 		<div

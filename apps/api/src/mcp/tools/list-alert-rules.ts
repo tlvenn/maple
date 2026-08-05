@@ -1,10 +1,10 @@
 import { McpQueryError, optionalBooleanParam, optionalStringParam, type McpToolRegistrar } from "./types"
-import { formatTable } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatTable } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { AlertsService } from "@/services/AlertsService"
+import { AlertsService } from "@/services/alerts/AlertsService"
 
 const comparatorLabel: Record<string, string> = {
 	gt: ">",
@@ -39,7 +39,7 @@ export function registerListAlertRulesTool(server: McpToolRegistrar) {
 					(error) =>
 						new McpQueryError({
 							message: error.message,
-							pipe: "list_alert_rules",
+							pipeName: "list_alert_rules",
 							cause: error,
 						}),
 				),
@@ -70,7 +70,7 @@ export function registerListAlertRulesTool(server: McpToolRegistrar) {
 				orgId: tenant.orgId,
 				signalType: signal_type ?? "all",
 				severity: severity ?? "all",
-				resultCount: rules.length,
+				"result.rowCount": rules.length,
 			})
 
 			const lines: string[] = [
@@ -111,6 +111,7 @@ export function registerListAlertRulesTool(server: McpToolRegistrar) {
 							enabled: r.enabled,
 							severity: r.severity,
 							serviceNames: [...r.serviceNames],
+							environments: [...r.environments],
 							signalType: r.signalType,
 							comparator: r.comparator,
 							threshold: r.threshold,

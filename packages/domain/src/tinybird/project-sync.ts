@@ -9,6 +9,7 @@ import {
 } from "./ttl-override"
 
 const REQUEST_TIMEOUT = Duration.seconds(30)
+const STALE_DEPLOYMENT_DELETE_CONCURRENCY = 3
 
 const FeedbackEntrySchema = Schema.Struct({
 	resource: Schema.NullOr(Schema.String),
@@ -115,12 +116,10 @@ export interface TinybirdInstanceHealth {
 const SqlResponseSchema = Schema.Struct({
 	data: Schema.optional(Schema.Array(Schema.Record(Schema.String, Schema.Unknown))),
 })
-type SqlResponse = typeof SqlResponseSchema.Type
 
 const WorkspaceProbeSchema = Schema.Struct({
 	name: Schema.optional(Schema.String),
 })
-type WorkspaceProbe = typeof WorkspaceProbeSchema.Type
 
 export class TinybirdSyncRejectedError extends Schema.TaggedErrorClass<TinybirdSyncRejectedError>()(
 	"@maple/tinybird/errors/SyncRejected",
@@ -447,7 +446,7 @@ export class TinybirdProjectSync extends Context.Service<TinybirdProjectSync, Ti
 								),
 								Effect.ignore,
 							),
-						{ concurrency: "unbounded", discard: true },
+						{ concurrency: STALE_DEPLOYMENT_DELETE_CONCURRENCY, discard: true },
 					)
 				},
 			)
@@ -698,7 +697,7 @@ export class TinybirdProjectSync extends Context.Service<TinybirdProjectSync, Ti
 				cleanupOwnedDeployment,
 				fetchInstanceHealth,
 				getCurrentProjectRevision,
-			}
+			} satisfies TinybirdProjectSyncShape
 		}),
 	},
 ) {

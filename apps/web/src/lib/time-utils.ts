@@ -1,10 +1,13 @@
-import { subMinutes, subHours, subDays, subWeeks, subMonths, startOfDay, format } from "date-fns"
+import { format } from "date-fns"
+import { formatWarehouseDateTime, resolveRelativeRangeToWarehouse } from "@maple/query-engine"
 import { normalizeTimestampInput } from "@/lib/timezone-format"
 
-// Format date for Tinybird/ClickHouse DateTime compatibility
-// Converts to ClickHouse format: "YYYY-MM-DD HH:mm:ss"
+/**
+ * Format a Date as the ClickHouse/Tinybird `YYYY-MM-DD HH:mm:ss` shape.
+ * Thin Date-taking wrapper over the shared epoch-ms formatter.
+ */
 export function formatForTinybird(date: Date): string {
-	return date.toISOString().replace("T", " ").slice(0, 19)
+	return formatWarehouseDateTime(date.getTime())
 }
 
 export interface TimePreset {
@@ -18,68 +21,32 @@ export interface QuickSelectOption {
 	value: string
 }
 
-const TIME_UNITS: Record<string, (date: Date, amount: number) => Date> = {
-	m: subMinutes,
-	h: subHours,
-	d: subDays,
-	w: subWeeks,
-	mo: subMonths,
+export function isTimeRangeWithin(
+	range: { startTime: string; endTime: string },
+	maxRangeSeconds: number,
+): boolean {
+	const durationSeconds =
+		(Date.parse(normalizeTimestampInput(range.endTime)) -
+			Date.parse(normalizeTimestampInput(range.startTime))) /
+		1000
+	return Number.isFinite(durationSeconds) && durationSeconds >= 0 && durationSeconds <= maxRangeSeconds
 }
 
-export function parseTimeShorthand(value: string): number | null {
-	const trimmed = value.trim().toLowerCase()
-
-	if (trimmed === "today") {
-		const now = new Date()
-		const start = startOfDay(now)
-		return now.getTime() - start.getTime()
-	}
-
-	// Match patterns like "1m", "2h", "4d", "6w", "2mo"
-	const match = trimmed.match(/^(\d+)(mo|m|h|d|w)$/)
-	if (!match) return null
-
-	const [, amountStr, unit] = match
-	const amount = parseInt(amountStr, 10)
-
-	const multipliers: Record<string, number> = {
-		m: 60 * 1000,
-		h: 60 * 60 * 1000,
-		d: 24 * 60 * 60 * 1000,
-		w: 7 * 24 * 60 * 60 * 1000,
-		mo: 30 * 24 * 60 * 60 * 1000,
-	}
-
-	return amount * multipliers[unit]
-}
-
+/**
+ * Resolve a relative shorthand ("15m", "7d", "3mo", "today") to an absolute
+ * window.
+ *
+ * Delegates to the shared resolver so this app, the API, and the query engine
+ * can't drift on what a shorthand means. The shared implementation reproduces
+ * date-fns' local-calendar semantics — month-end clamping and local midnight
+ * for "today" — so behaviour here is unchanged.
+ */
 export function relativeToAbsolute(shorthand: string): { startTime: string; endTime: string } | null {
-	const trimmed = shorthand.trim().toLowerCase()
-	const now = new Date()
-
-	if (trimmed === "today") {
-		return {
-			startTime: formatForTinybird(startOfDay(now)),
-			endTime: formatForTinybird(now),
-		}
-	}
-
-	const match = trimmed.match(/^(\d+)(mo|m|h|d|w)$/)
-	if (!match) return null
-
-	const [, amountStr, unit] = match
-	const amount = parseInt(amountStr, 10)
-
-	const subtractor = TIME_UNITS[unit]
-	if (!subtractor) return null
-
-	return {
-		startTime: formatForTinybird(subtractor(now, amount)),
-		endTime: formatForTinybird(now),
-	}
+	return resolveRelativeRangeToWarehouse(shorthand)
 }
 
 export function presetLabel(shorthand: string): string {
+	if (shorthand === "12mo") return "Last 1 year"
 	// Check PRESET_OPTIONS first for exact match
 	const preset = PRESET_OPTIONS.find((p) => p.value === shorthand)
 	if (preset) return preset.label
@@ -196,6 +163,27 @@ export const PRESET_OPTIONS: TimePreset[] = [
 	},
 ]
 
+export const LONG_RANGE_PRESET_OPTIONS: TimePreset[] = [
+	...PRESET_OPTIONS,
+	{
+		label: "Last 3 months",
+		value: "3mo",
+		getRange: () => relativeToAbsolute("3mo")!,
+	},
+	{
+		label: "Last 6 months",
+		value: "6mo",
+		getRange: () => relativeToAbsolute("6mo")!,
+	},
+	{
+		label: "Last 1 year",
+		value: "12mo",
+		// The service and alert endpoints enforce an exact 365-day maximum.
+		// A calendar 12-month subtraction can span 366 days across leap day.
+		getRange: () => relativeToAbsolute("365d")!,
+	},
+]
+
 export const QUICK_SELECT_OPTIONS: QuickSelectOption[] = [
 	{ label: "3h", value: "3h" },
 	{ label: "4d", value: "4d" },
@@ -218,7 +206,7 @@ export function getTimezoneAbbr(): string {
 	return Intl.DateTimeFormat().resolvedOptions().timeZone
 }
 
-export const CACHE_SNAP_INTERVAL_S = 15
+const CACHE_SNAP_INTERVAL_S = 15
 
 /**
  * Snap a Tinybird-format datetime string ("YYYY-MM-DD HH:mm:ss") to the

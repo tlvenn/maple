@@ -44,7 +44,7 @@ export const InstructionsResource = McpServer.resource({
 - Performance analysis: find_slow_traces -> inspect_trace -> get_service_top_operations
 - Trend analysis: query_data (timeseries or breakdown)
 - Service discovery: list_services -> diagnose_service
-- Alert management: list_alert_rules -> get_alert_rule -> list_alert_incidents
+- Alert management: list_alert_rules -> get_alert_rule -> create_alert_rule / update_alert_rule / delete_alert_rule -> list_alert_incidents
 
 ## Dashboard Widget JSON
 
@@ -96,6 +96,9 @@ Valid aggregates: \`sum | first | count | avg | max | min\`. **No \`last\`.** Wi
 \`\`\`
 \`baseNames\` matches each hidden query's \`legend || name\`. Otherwise the auxiliary series render at full scale and skew percent-axis charts.
 
+### Per-widget time range (rare)
+A widget follows the dashboard's time range unless it carries its own optional top-level \`timeRange\`, in the dashboard's shape: \`{"type":"relative","value":"30m"}\` or \`{"type":"absolute","startTime":"...","endTime":"..."}\` (ISO 8601). Omit it for almost every widget — pin one only when the window is part of what the tile means ("active in the last 30 minutes" on a 7-day board). A relative override rebases against "now" on each refresh; the widget header labels the pinned range; dashboard variables still apply. \`add_dashboard_widget\` takes it as \`time_range_json\`; the widget-JSON tools take it inline — and since \`update_dashboard_widget\` replaces the whole widget, omitting \`timeRange\` there REMOVES an existing override.
+
 ### Batch rebuild
 \`replace_dashboard_widgets\` replaces a dashboard's ENTIRE widget list in one atomic, validated write — \`widgets_json\` is a JSON array of widget objects (same shape as \`widgets[]\` from \`get_dashboard\`); per-widget \`id\`/\`layout\` are optional (auto-generated/auto-placed). Every widget is validated before anything persists, so one bad widget aborts the whole batch. Prefer it over many incremental calls or a corruption-prone full \`dashboard_json\` replace.
 
@@ -107,7 +110,7 @@ The mutation tools now reject clauses the engine can't honor BEFORE persisting (
 When you pass \`sql\` to \`add_dashboard_widget\` (or build a widget with \`dataSource.endpoint: "raw_sql_chart"\`), you author ClickHouse SQL directly. The server expands macros and runs the SQL through the warehouse. Use this path when the structured query builder can't express what you need (window functions, multi-step CTEs, unusual aggregations, joins).
 
 ### Macros — what gets substituted
-- \`$__orgFilter\` → \`OrgId = '<your org>'\` — **REQUIRED**; without it the request is rejected before execution. Org isolation depends on this macro appearing in the SQL.
+- \`$__orgFilter\` → \`OrgId = '<your org>'\` — **REQUIRED** for sorting-key pruning and defense in depth. Tenant isolation is also enforced by scoped warehouse credentials.
 - \`$__timeFilter(Column)\` → \`Column >= toDateTime('<start>') AND Column <= toDateTime('<end>')\`. \`Column\` must be a bare identifier (letters/digits/underscores/dots) — no expressions. **Prefer this over \`$__startTime\`/\`$__endTime\`** for WHERE clauses.
 - \`$__startTime\` / \`$__endTime\` → \`toDateTime('…')\` literals. Use when you need the bound inline somewhere other than a WHERE comparison.
 - \`$__interval_s\` → integer bucket size in seconds. Resolved from \`granularity_seconds\` (or auto-derived from the dashboard time range when omitted). **Only interpolate this if your SQL actually buckets time** — otherwise \`granularity_seconds\` is a no-op.
@@ -115,7 +118,7 @@ When you pass \`sql\` to \`add_dashboard_widget\` (or build a widget with \`data
 ### Safety rules (server-enforced)
 - One statement only. Multiple statements separated by \`;\` are rejected.
 - Deny-listed keywords (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, RENAME, ATTACH, DETACH, CREATE, GRANT, REVOKE, OPTIMIZE, SYSTEM, KILL) trigger a \`DisallowedStatement\` error. Comments and string literals are masked first so a SELECT containing the word "drop" in a string is fine.
-- \`LIMIT 10000\` is auto-appended when no LIMIT clause is present.
+- Every query is wrapped in an outer \`LIMIT 1001\`; the extra row is an overflow sentinel for the public 1,000-row cap.
 
 ### Tables — discover at call time
 
@@ -191,6 +194,16 @@ The renderer is opinionated about column names. Get these wrong and the chart sh
   LIMIT 8
   \`\`\`
 
+- **hbar** — SELECT a \`name\` (string category label) column plus a numeric column (first numeric wins as the value). Rows are sorted by value and drawn as horizontal bars; each shows its value and its share of the **total**. This is the panel for any ranked "top N by volume" question — prefer it over \`funnel\`, which implies sequential stages and labels each bar as a share of the largest one. Cap to ≤ ~10 rows.
+  \`\`\`sql
+  SELECT SpanName AS name, count() AS value
+  FROM service_overview_spans
+  WHERE $__orgFilter AND $__timeFilter(Timestamp)
+  GROUP BY name
+  ORDER BY value DESC
+  LIMIT 10
+  \`\`\`
+
 - **heatmap** — SELECT three columns aliased \`x\`, \`y\`, \`value\`. Cast \`x\`/\`y\` to strings if they're numeric (the renderer treats them as labels).
   \`\`\`sql
   SELECT ServiceName AS x,
@@ -222,6 +235,6 @@ The renderer is opinionated about column names. Get these wrong and the chart sh
 - **Pie missing \`name\` column** → renderer can't label slices.
 - **Timeseries with no DateTime in the first row** → reshape skips and you get raw rows; the chart looks empty. Put the bucket column first OR alias it \`bucket\`.
 - **\`Map\` lookup on missing key** returns empty string, not NULL — use \`SpanAttributes['k'] != ''\` not \`IS NOT NULL\`.
-- **High-cardinality groupBy** without LIMIT → server appends \`LIMIT 10000\` but the chart still struggles. Always add an explicit \`LIMIT\` for pie/table/heatmap.`,
+- **High-cardinality groupBy** without LIMIT → the server's outer 1,000-row cap protects the response, but the chart can still struggle. Add a tighter explicit \`LIMIT\` for pie/table/heatmap.`,
 	),
 })

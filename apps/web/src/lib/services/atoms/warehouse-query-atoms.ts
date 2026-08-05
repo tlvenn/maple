@@ -1,12 +1,16 @@
 import { Atom } from "@/lib/effect-atom"
 import { Effect, Schema } from "effect"
-import { encodeKey } from "@/lib/cache-key"
+import { encodeOrgScopedKey, orgScopedKeyPayload } from "@/lib/cache-key"
+import { getActiveOrgId } from "@/lib/services/common/auth-headers"
+import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
 import type { BackendError, WarehouseApiError } from "@/api/warehouse/effect-utils"
 import {
-	getCustomChartServiceDetail,
 	getCustomChartServiceSparklines,
 	getCustomChartTimeSeries,
+	getOverviewThroughputRefinement,
 	getOverviewTimeSeries,
+	getServiceDetailOverview,
+	getServiceDetailThroughputRefinement,
 } from "@/api/warehouse/custom-charts"
 import {
 	getErrorDetailTraces,
@@ -18,13 +22,14 @@ import {
 import {
 	getLog,
 	getLogAttributeKeys,
-	getLogAttributeValues,
+	getLogsFacetValues,
 	getLogsFacets,
 	listLogs,
 } from "@/api/warehouse/logs"
 import {
 	getMetricAttributeKeys,
-	getMetricTimeSeries,
+	getMetricSparklines,
+	getMetricAttributeValues,
 	getMetricsSummary,
 	listMetrics,
 } from "@/api/warehouse/metrics"
@@ -37,6 +42,7 @@ import {
 	hostInfraTimeseries,
 	listHosts,
 	listPods,
+	podsSummary,
 	podDetailSummary,
 	podInfraTimeseries,
 	listNodes,
@@ -47,21 +53,40 @@ import {
 	workloadInfraTimeseries,
 } from "@/api/warehouse/infra"
 import { getServiceUsage } from "@/api/warehouse/service-usage"
+import { getServiceOperations } from "@/api/warehouse/service-operations"
 import {
+	getServiceDependenciesBundle,
 	getServiceMap,
+	getPlanetScaleBranchStats,
+	getServiceMapCloudflare,
+	getServiceMapPlanetScale,
 	getServiceMapDbEdges,
-	getServiceMapDbEdgesForService,
 	getServiceDbQuerySummary,
-	getServiceMapForService,
 	getServicePlatforms,
 } from "@/api/warehouse/service-map"
-import { getServiceExternalEdges } from "@/api/warehouse/service-external-edges"
 import { getServiceWorkloads } from "@/api/warehouse/service-infra"
 import {
-	getServiceApdexTimeSeries,
+	getCloudflarePlatformResources,
+	getCloudflareTopTraffic,
+	getCloudflareWorkers,
+	getCloudflareZoneBreakdown,
+	getCloudflareZoneDetail,
+	getCloudflareZoneDns,
+	getCloudflareZoneFacets,
+	getCloudflareZoneHosts,
+	getCloudflareZones,
+	getCloudflareZoneSecurity,
+	getCloudflareZoneTimeseries,
+} from "@/api/warehouse/cloudflare-infra"
+import {
+	getPlanetScaleEvents,
+	getPlanetScaleInfraTimeseries,
+	getPlanetScaleQueryInsights,
+} from "@/api/warehouse/planetscale-infra"
+import {
 	getServiceHealthBaseline,
+	getServiceHealthSnapshot,
 	getServiceOverview,
-	getServiceReleasesTimeline,
 	getServicesFacets,
 } from "@/api/warehouse/services"
 import {
@@ -71,13 +96,16 @@ import {
 	getSpanAttributeValues,
 	getSpanDetail,
 	getSpanHierarchy,
+	getTracesFacetValues,
 	getTracesFacets,
 	listTraces,
 } from "@/api/warehouse/traces"
 import { getQueryBuilderTimeseries } from "@/api/warehouse/query-builder-timeseries"
+import { getQueryBuilderBreakdown } from "@/api/warehouse/query-builder-breakdown"
 import {
 	getReplay,
 	getReplayEvents,
+	getReplayManifest,
 	getReplaysFacets,
 	getReplaysForTrace,
 	getSessionTranscript,
@@ -97,21 +125,17 @@ interface QueryAtomOptions {
 	staleTime?: number
 }
 
-export class QueryAtomError extends Schema.TaggedErrorClass<QueryAtomError>()(
-	"@maple/web/services/QueryAtomError",
-	{
-		message: Schema.String,
-		cause: Schema.optionalKey(Schema.Unknown),
-	},
-) {}
+class QueryAtomError extends Schema.TaggedErrorClass<QueryAtomError>()("@maple/web/services/QueryAtomError", {
+	message: Schema.String,
+	cause: Schema.optionalKey(Schema.Unknown),
+}) {}
 
 // The error union surfaced to atom consumers: the structured query errors plus
 // any tagged backend error, all normalized through `QueryAtomError`'s shape for
 // anything that is not already a known tagged error.
-type QueryAtomFailure = QueryError | QueryAtomError
+export type QueryAtomFailure = QueryError | QueryAtomError
 
-const isTaggedBackendError = (error: QueryError): boolean =>
-	error._tag.startsWith("@maple/http/errors/")
+const isTaggedBackendError = (error: QueryError): boolean => error._tag.startsWith("@maple/http/errors/")
 
 const toQueryAtomError = (error: QueryError): QueryAtomFailure => {
 	// Tagged `@maple/http/errors/*` errors are already user-presentable via
@@ -129,8 +153,16 @@ function makeQueryAtomFamily<Input, Output>(query: QueryEffect<Input, Output>, o
 	const UnknownFromJson = Schema.fromJsonString(Schema.Unknown)
 
 	const family = Atom.family((key: string) => {
-		let resultAtom = Atom.make(
-			Schema.decodeUnknownEffect(UnknownFromJson)(key).pipe(
+		// Build on the mounted `MapleApiAtomClient.runtime` (not bare `Atom.make`,
+		// which runs on the default atom runtime). That runtime owns the Maple OTLP
+		// tracer that actually flushes, so the wrapper span each `query` opens — e.g.
+		// `QueryEngine.getCustomChartServiceDetail`, the composite that fans out to
+		// several `executeQueryEngine` calls — is exported instead of silently
+		// dropped, which is what left traces rootless (a child whose parent never
+		// shipped). The inner query spans already export by re-providing this same
+		// (memoized) layer; this lifts the parent onto the same tracer.
+		let resultAtom = MapleApiAtomClient.runtime.atom(
+			Schema.decodeUnknownEffect(UnknownFromJson)(orgScopedKeyPayload(key)).pipe(
 				Effect.flatMap((input) => query(input as Input)),
 				Effect.mapError(toQueryAtomError),
 			),
@@ -143,11 +175,15 @@ function makeQueryAtomFamily<Input, Output>(query: QueryEffect<Input, Output>, o
 		return resultAtom
 	})
 
-	return (input: Input) => family(encodeKey(input))
+	return (input: Input) => family(encodeOrgScopedKey(getActiveOrgId(), input))
 }
 
 export const getServiceUsageResultAtom = makeQueryAtomFamily(getServiceUsage, {
 	staleTime: 60_000,
+})
+
+export const getServiceOperationsResultAtom = makeQueryAtomFamily(getServiceOperations, {
+	staleTime: 30_000,
 })
 
 export const getServicesFacetsResultAtom = makeQueryAtomFamily(getServicesFacets, {
@@ -158,6 +194,10 @@ export const getServicesFacetsResultAtom = makeQueryAtomFamily(getServicesFacets
 })
 
 export const getServiceOverviewResultAtom = makeQueryAtomFamily(getServiceOverview, {
+	staleTime: 30_000,
+})
+
+export const getServiceHealthSnapshotResultAtom = makeQueryAtomFamily(getServiceHealthSnapshot, {
 	staleTime: 30_000,
 })
 
@@ -182,7 +222,17 @@ export const getTracesFacetsResultAtom = makeQueryAtomFamily(getTracesFacets, {
 	staleTime: 30_000,
 })
 
-export const getSpanHierarchyResultAtom = makeQueryAtomFamily(getSpanHierarchy)
+// Single-dimension facet list for dashboard variables — server compiles only
+// the requested UNION branch, so this never triggers the full facets scan.
+export const getTracesFacetValuesResultAtom = makeQueryAtomFamily(getTracesFacetValues, {
+	staleTime: 30_000,
+})
+
+// Trace spans are near-immutable once ingested — keep the most expensive
+// detail query warm across back-navigation instead of refetching every mount.
+export const getSpanHierarchyResultAtom = makeQueryAtomFamily(getSpanHierarchy, {
+	staleTime: 60_000,
+})
 
 export const listReplaysResultAtom = makeQueryAtomFamily(listReplays, {
 	staleTime: 30_000,
@@ -200,12 +250,20 @@ export const getSessionTraceSummariesResultAtom = makeQueryAtomFamily(getSession
 	staleTime: 60_000,
 })
 
-// Idle TTL keeps the chunks (and their inline rrweb events) stable across the
-// player's frequent re-renders so the decode memo in the player context isn't
-// thrown away and re-run. Events come straight from ClickHouse — no R2, no
-// signed URLs, no client-side fetch/gunzip.
-export const getReplayEventsResultAtom = makeQueryAtomFamily(getReplayEvents, {
+// The session's chunk timeline without payloads. Cheap enough to fetch on every
+// replay open, and the prerequisite for every payload range.
+export const getReplayManifestResultAtom = makeQueryAtomFamily(getReplayManifest, {
 	staleTime: 240_000,
+})
+
+// One entry per chunk range. Held far longer than a normal list query because a
+// chunk row is immutable once written (plain MergeTree, 30-day TTL) — so
+// scrubbing back over an already-played stretch must never refetch it.
+//
+// Idle TTL also keeps the chunks stable across the player's frequent
+// re-renders, so the decode memo in the player context isn't thrown away.
+export const getReplayEventsResultAtom = makeQueryAtomFamily(getReplayEvents, {
+	staleTime: 600_000,
 })
 
 // Distilled session transcript (console/network/error/nav/click) for the panels.
@@ -230,6 +288,10 @@ export const getLogResultAtom = makeQueryAtomFamily(getLog, {
 })
 
 export const getLogsFacetsResultAtom = makeQueryAtomFamily(getLogsFacets, {
+	staleTime: 30_000,
+})
+
+export const getLogsFacetValuesResultAtom = makeQueryAtomFamily(getLogsFacetValues, {
 	staleTime: 30_000,
 })
 
@@ -261,11 +323,15 @@ export const getMetricsSummaryResultAtom = makeQueryAtomFamily(getMetricsSummary
 	staleTime: 60_000,
 })
 
-export const getMetricTimeSeriesResultAtom = makeQueryAtomFamily(getMetricTimeSeries, {
-	staleTime: 30_000,
+export const getMetricSparklinesResultAtom = makeQueryAtomFamily(getMetricSparklines, {
+	staleTime: 60_000,
 })
 
 export const getMetricAttributeKeysResultAtom = makeQueryAtomFamily(getMetricAttributeKeys, {
+	staleTime: 60_000,
+})
+
+export const getMetricAttributeValuesResultAtom = makeQueryAtomFamily(getMetricAttributeValues, {
 	staleTime: 60_000,
 })
 
@@ -286,6 +352,10 @@ export const fleetUtilizationTimeseriesResultAtom = makeQueryAtomFamily(fleetUti
 })
 
 export const listPodsResultAtom = makeQueryAtomFamily(listPods, {
+	staleTime: 30_000,
+})
+
+export const podsSummaryResultAtom = makeQueryAtomFamily(podsSummary, {
 	staleTime: 30_000,
 })
 
@@ -333,21 +403,76 @@ export const workloadFacetsResultAtom = makeQueryAtomFamily(getWorkloadFacets, {
 	staleTime: 30_000,
 })
 
-export const getServiceApdexTimeSeriesResultAtom = makeQueryAtomFamily(getServiceApdexTimeSeries, {
+// Cloudflare infrastructure page (/infra/cloudflare): per-zone HTTP edge
+// analytics + per-Worker invocation analytics from the direct integration.
+export const cloudflareZonesResultAtom = makeQueryAtomFamily(getCloudflareZones, {
 	staleTime: 30_000,
 })
 
-export const getServiceReleasesTimelineResultAtom = makeQueryAtomFamily(getServiceReleasesTimeline, {
+export const cloudflareZoneTimeseriesResultAtom = makeQueryAtomFamily(getCloudflareZoneTimeseries, {
+	staleTime: 30_000,
+})
+
+export const cloudflareZoneDetailResultAtom = makeQueryAtomFamily(getCloudflareZoneDetail, {
+	staleTime: 30_000,
+})
+
+export const cloudflareWorkersResultAtom = makeQueryAtomFamily(getCloudflareWorkers, {
+	staleTime: 30_000,
+})
+
+export const cloudflareZoneHostsResultAtom = makeQueryAtomFamily(getCloudflareZoneHosts, {
+	staleTime: 30_000,
+})
+
+export const cloudflareZoneSecurityResultAtom = makeQueryAtomFamily(getCloudflareZoneSecurity, {
+	staleTime: 30_000,
+})
+
+export const cloudflareZoneDnsResultAtom = makeQueryAtomFamily(getCloudflareZoneDns, {
+	staleTime: 30_000,
+})
+
+export const cloudflarePlatformResourcesResultAtom = makeQueryAtomFamily(getCloudflarePlatformResources, {
+	staleTime: 30_000,
+})
+
+export const cloudflareZoneBreakdownResultAtom = makeQueryAtomFamily(getCloudflareZoneBreakdown, {
+	staleTime: 30_000,
+})
+
+export const cloudflareZoneFacetsResultAtom = makeQueryAtomFamily(getCloudflareZoneFacets, {
+	staleTime: 30_000,
+})
+
+// Live Cloudflare GraphQL proxy — server edge-caches ~60s, so match that here.
+export const cloudflareTopTrafficResultAtom = makeQueryAtomFamily(getCloudflareTopTraffic, {
 	staleTime: 60_000,
 })
 
-export const getCustomChartServiceDetailResultAtom = makeQueryAtomFamily(getCustomChartServiceDetail, {
+// Service-detail Overview tab bundle: primary chart + releases timeline +
+// environments in one fetch. The chart grid and the environment switcher read
+// this atom with the same input key, so they share a single round-trip.
+export const getServiceDetailOverviewResultAtom = makeQueryAtomFamily(getServiceDetailOverview, {
 	staleTime: 30_000,
 })
 
 export const getOverviewTimeSeriesResultAtom = makeQueryAtomFamily(getOverviewTimeSeries, {
 	staleTime: 30_000,
 })
+
+// Non-blocking exact pre-sampling throughput overlays. Keyed (via the encoded
+// input) on `samplingActive`, so they only issue the slow SpanMetrics query once
+// the primary chart confirms sampling is active; otherwise they resolve empty.
+export const getServiceDetailThroughputRefinementResultAtom = makeQueryAtomFamily(
+	getServiceDetailThroughputRefinement,
+	{ staleTime: 30_000 },
+)
+
+export const getOverviewThroughputRefinementResultAtom = makeQueryAtomFamily(
+	getOverviewThroughputRefinement,
+	{ staleTime: 30_000 },
+)
 
 export const getCustomChartTimeSeriesResultAtom = makeQueryAtomFamily(getCustomChartTimeSeries, {
 	staleTime: 30_000,
@@ -357,11 +482,17 @@ export const getQueryBuilderTimeseriesResultAtom = makeQueryAtomFamily(getQueryB
 	staleTime: 30_000,
 })
 
+export const getQueryBuilderBreakdownResultAtom = makeQueryAtomFamily(getQueryBuilderBreakdown, {
+	staleTime: 30_000,
+})
+
 export const getServiceMapResultAtom = makeQueryAtomFamily(getServiceMap, {
 	staleTime: 15_000,
 })
 
-export const getServiceMapForServiceResultAtom = makeQueryAtomFamily(getServiceMapForService, {
+// Service-detail Dependencies tab bundle: service edges + DB edges + external
+// edges in one fetch (replaces the three separate *ForService atoms).
+export const getServiceDependenciesBundleResultAtom = makeQueryAtomFamily(getServiceDependenciesBundle, {
 	staleTime: 15_000,
 })
 
@@ -369,17 +500,35 @@ export const getServiceMapDbEdgesResultAtom = makeQueryAtomFamily(getServiceMapD
 	staleTime: 15_000,
 })
 
-export const getServiceMapDbEdgesForServiceResultAtom = makeQueryAtomFamily(
-	getServiceMapDbEdgesForService,
-	{ staleTime: 15_000 },
-)
-
-export const getServiceDbQuerySummaryResultAtom = makeQueryAtomFamily(getServiceDbQuerySummary, {
+export const getServiceMapCloudflareResultAtom = makeQueryAtomFamily(getServiceMapCloudflare, {
 	staleTime: 15_000,
 })
 
-export const getServiceExternalEdgesResultAtom = makeQueryAtomFamily(getServiceExternalEdges, {
+export const getServiceMapPlanetScaleResultAtom = makeQueryAtomFamily(getServiceMapPlanetScale, {
+	staleTime: 15_000,
+})
+
+export const planetscaleInfraTimeseriesResultAtom = makeQueryAtomFamily(getPlanetScaleInfraTimeseries, {
+	staleTime: 15_000,
+})
+
+export const planetscaleQueryInsightsResultAtom = makeQueryAtomFamily(getPlanetScaleQueryInsights, {
+	// Server-side edge cache is 60s; match it so refreshes don't hammer PlanetScale.
+	staleTime: 60_000,
+})
+
+export const planetscaleEventsResultAtom = makeQueryAtomFamily(getPlanetScaleEvents, {
+	// Server-side edge cache is 30s — a deploy marker showing up late is the
+	// visible failure mode, so this stays tighter than the other PlanetScale reads.
 	staleTime: 30_000,
+})
+
+export const getPlanetScaleBranchStatsResultAtom = makeQueryAtomFamily(getPlanetScaleBranchStats, {
+	staleTime: 15_000,
+})
+
+export const getServiceDbQuerySummaryResultAtom = makeQueryAtomFamily(getServiceDbQuerySummary, {
+	staleTime: 15_000,
 })
 
 export const getServicePlatformsResultAtom = makeQueryAtomFamily(getServicePlatforms, {
@@ -408,8 +557,4 @@ export const getResourceAttributeValuesResultAtom = makeQueryAtomFamily(getResou
 
 export const getLogAttributeKeysResultAtom = makeQueryAtomFamily(getLogAttributeKeys, {
 	staleTime: 60_000,
-})
-
-export const getLogAttributeValuesResultAtom = makeQueryAtomFamily(getLogAttributeValues, {
-	staleTime: 30_000,
 })

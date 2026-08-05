@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Button } from "@maple/ui/components/ui/button"
@@ -12,9 +12,10 @@ import {
 	ComboboxItem,
 	ComboboxList,
 } from "@maple/ui/components/ui/combobox"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { GroupByMultiSelect } from "@/components/query-builder/group-by-multi-select"
 import { WhereClauseEditor } from "@/components/query-builder/where-clause-editor"
+import { useMetricScopedAutocomplete } from "@/hooks/use-metric-scoped-autocomplete"
 import type { WhereClauseAutocompleteValues } from "@/lib/query-builder/where-clause-autocomplete"
 import {
 	AGGREGATIONS_BY_SOURCE,
@@ -384,6 +385,34 @@ function MetricsBody({
 	}) => void
 	onAggregationChange: (aggregation: string) => void
 }) {
+	// Scope attribute suggestions (WHERE clause + group-by) to the selected
+	// metric — the shared context values span every metric in the org.
+	const metricsQuery = query.dataSource === "metrics" ? query : undefined
+	const scopedAutocomplete = useMetricScopedAutocomplete({
+		base: autocompleteValues.metrics,
+		metricName: metricsQuery?.metricName || undefined,
+		metricType: metricsQuery?.metricType || undefined,
+	})
+
+	// The options list is one fetched page (and narrows further as you search),
+	// so a metric that arrived by prefill — a dashboard widget, or an "Alert on
+	// this" suggestion — often isn't in it, leaving the combobox with no item to
+	// render the selection from. Synthesize one so the current metric always
+	// shows and stays reselectable.
+	const metricOptions = useMemo(() => {
+		if (!metricValue || metricSelectionOptions.some((o) => o.value === metricValue)) {
+			return metricSelectionOptions
+		}
+		return [
+			{
+				value: metricValue,
+				label: `${metricsQuery?.metricName} (${metricsQuery?.metricType})`,
+				isMonotonic: metricsQuery?.isMonotonic ?? metricsQuery?.metricType === "sum",
+			},
+			...metricSelectionOptions,
+		]
+	}, [metricValue, metricSelectionOptions, metricsQuery])
+
 	return (
 		<>
 			{/* Row 1: Metric type + name */}
@@ -394,7 +423,7 @@ function MetricsBody({
 					onValueChange={(value) => {
 						const parsed = value ? parseMetricSelection(value) : null
 						if (!parsed) return
-						const selectedOption = metricSelectionOptions.find((o) => o.value === value)
+						const selectedOption = metricOptions.find((o) => o.value === value)
 						const isMonotonic = selectedOption?.isMonotonic ?? parsed.metricType === "sum"
 						onMetricSelectionChange({
 							metricName: parsed.metricName,
@@ -409,13 +438,13 @@ function MetricsBody({
 						onChange={(e) => onMetricSearch?.(e.target.value)}
 					/>
 					<ComboboxContent>
-						{metricSelectionOptions.length === 0 ? (
+						{metricOptions.length === 0 ? (
 							<div className="py-4 text-center text-xs text-muted-foreground">
 								No metrics found.
 							</div>
 						) : (
 							<ComboboxList>
-								{metricSelectionOptions.map((metric) => (
+								{metricOptions.map((metric) => (
 									<ComboboxItem key={metric.value} value={metric.value}>
 										{metric.label}
 									</ComboboxItem>
@@ -431,7 +460,8 @@ function MetricsBody({
 				rows={1}
 				value={query.whereClause}
 				dataSource={query.dataSource}
-				values={autocompleteValues.metrics}
+				values={scopedAutocomplete.values}
+				onActiveAttributeKey={scopedAutocomplete.onActiveAttributeKey}
 				onChange={(nextWhereClause) =>
 					onUpdate((current) => ({
 						...current,
@@ -529,7 +559,7 @@ function MetricsBody({
 						<ComboboxList>
 							<ComboboxItem value="__none__">Everything (no breakdown)</ComboboxItem>
 							<ComboboxItem value="service.name">service.name</ComboboxItem>
-							{(autocompleteValues.metrics?.attributeKeys ?? []).map((key) => (
+							{scopedAutocomplete.groupByKeys.map((key) => (
 								<ComboboxItem key={key} value={`attr.${key}`}>
 									attr.{key}
 								</ComboboxItem>

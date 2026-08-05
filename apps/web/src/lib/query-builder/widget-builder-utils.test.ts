@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { createFormulaDraft, createQueryDraft } from "@/lib/query-builder/model"
+import { BREAKDOWN_TAIL_LIMIT, createFormulaDraft, createQueryDraft } from "@/lib/query-builder/model"
 import {
 	buildWidgetDataSource,
 	buildWidgetDisplay,
+	deriveDefaultWidgetTitle,
 	inferDisplayUnitForQuery,
 	inferDefaultUnitForQueries,
+	toInitialState,
+	validateQueries,
 	type QueryBuilderWidgetState,
 } from "@/lib/query-builder/widget-builder-utils"
 import type { DashboardWidget } from "@/components/dashboard-builder/types"
@@ -27,6 +30,7 @@ function makeState(): QueryBuilderWidgetState {
 		visualization: "chart",
 		title: "",
 		description: "",
+		timeRange: null,
 		chartId: "query-builder-line",
 		stacked: false,
 		curveType: "linear",
@@ -52,6 +56,7 @@ function makeState(): QueryBuilderWidgetState {
 		gaugeMin: "",
 		gaugeMax: "",
 		sparklineEnabled: false,
+		markdownContent: "",
 	}
 }
 
@@ -196,5 +201,263 @@ describe("widget-builder hidden series behavior", () => {
 			queries: state.queries,
 			formulas: state.formulas,
 		})
+	})
+})
+
+describe("funnel/heatmap endpoint routing (MAP-49)", () => {
+	it.each(["funnel", "heatmap", "pie", "histogram"] as const)(
+		"routes %s widgets to the breakdown endpoint",
+		(visualization) => {
+			const widget = makeWidget()
+			const state = { ...makeState(), visualization }
+			const dataSource = buildWidgetDataSource(widget, state, ["A", "B"])
+			expect(dataSource.endpoint).toBe("custom_query_builder_breakdown")
+		},
+	)
+
+	it("keeps charts on the timeseries endpoint", () => {
+		const widget = makeWidget()
+		const dataSource = buildWidgetDataSource(widget, makeState(), ["A", "B"])
+		expect(dataSource.endpoint).toBe("custom_query_builder_timeseries")
+	})
+
+	it("sends breakdown params the endpoint schema accepts, and nothing more", () => {
+		// QueryBuilderBreakdownInputSchema accepts only startTime/endTime/queries
+		// and the optional defaultLimit. An extra key (formulas, comparison, debug)
+		// fails the request decode and leaves the widget stuck on its loading
+		// skeleton, so this is a contract test, not a style preference.
+		const state = {
+			...makeState(),
+			visualization: "pie" as const,
+			formulas: [createFormulaDraft(0, ["A", "B"])],
+		}
+		const dataSource = buildWidgetDataSource(makeWidget(), state, ["A", "B"])
+		expect(Object.keys(dataSource.params ?? {})).toEqual(["queries", "defaultLimit"])
+	})
+
+	it("asks for the long tail on a pie, and only on a pie", () => {
+		// The pie is the only breakdown panel that collapses its tail into "Other",
+		// so it is the only one that fetches past what it draws. Handing 50 rows to
+		// a funnel turns a 10-stage funnel into a truncated list.
+		const pie = buildWidgetDataSource(makeWidget(), { ...makeState(), visualization: "pie" as const }, [
+			"A",
+			"B",
+		])
+		expect(pie.params?.defaultLimit).toBe(BREAKDOWN_TAIL_LIMIT)
+
+		for (const visualization of ["funnel", "heatmap", "histogram"] as const) {
+			const dataSource = buildWidgetDataSource(makeWidget(), { ...makeState(), visualization }, [
+				"A",
+				"B",
+			])
+			expect(dataSource.params?.defaultLimit).toBeUndefined()
+		}
+	})
+})
+
+describe("histogram data shape routing", () => {
+	function ungroupedTraceState() {
+		const base = createQueryDraft(0)
+		return {
+			...makeState(),
+			visualization: "histogram" as const,
+			queries: [{ ...base, addOns: { ...base.addOns, groupBy: false }, groupBy: [] }],
+		}
+	}
+
+	it("routes an ungrouped trace histogram to the list endpoint with a numeric column", () => {
+		// An ungrouped histogram is a distribution of raw values bucketized
+		// client-side — a count-by-group breakdown is a different chart (MAP-49).
+		const dataSource = buildWidgetDataSource(makeWidget(), ungroupedTraceState(), ["A"])
+		expect(dataSource.endpoint).toBe("custom_query_builder_list")
+		expect(dataSource.params).toMatchObject({ columns: ["durationMs"] })
+	})
+
+	it("routes a grouped histogram to the breakdown endpoint", () => {
+		const state = { ...makeState(), visualization: "histogram" as const }
+		expect(buildWidgetDataSource(makeWidget(), state, ["A"]).endpoint).toBe(
+			"custom_query_builder_breakdown",
+		)
+	})
+
+	it("round-trips a list-backed histogram instead of dropping its query", () => {
+		const state = ungroupedTraceState()
+		const dataSource = buildWidgetDataSource(makeWidget(), state, ["A"])
+		const reopened = toInitialState({ ...makeWidget(), visualization: "histogram", dataSource })
+		expect(reopened.queries[0].id).toBe(state.queries[0].id)
+	})
+})
+
+describe("display key ownership across type switches", () => {
+	it("replaces a stale chartId when switching a line chart to a pie", () => {
+		// The bug this guards: `...widget.display` carried `query-builder-line` into
+		// a pie widget, and pie-widget.tsx's `?? "query-builder-pie"` fallback never
+		// fires on a defined-but-wrong id — so it mounted a line chart.
+		const widget = { ...makeWidget(), display: { chartId: "query-builder-line" } }
+		const display = buildWidgetDisplay(widget, { ...makeState(), visualization: "pie" })
+		expect(display.chartId).toBe("query-builder-pie")
+	})
+
+	it("clears per-visualization keys the new visualization does not own", () => {
+		const widget = {
+			...makeWidget(),
+			visualization: "markdown",
+			display: {
+				markdown: { content: "# note" },
+				heatmap: { colorScale: "reds" as const, scaleType: "log" as const },
+				gauge: { min: 0, max: 10 },
+			},
+		}
+		const display = buildWidgetDisplay(widget, makeState())
+		expect(display.markdown).toBeUndefined()
+		expect(display.heatmap).toBeUndefined()
+		expect(display.gauge).toBeUndefined()
+	})
+
+	it("preserves a non-canonical chart style on a same-category switch", () => {
+		const widget = { ...makeWidget(), display: { chartId: "latency-line" } }
+		const display = buildWidgetDisplay(widget, { ...makeState(), chartId: "latency-line" })
+		expect(display.chartId).toBe("latency-line")
+	})
+
+	it("repairs a widget corrupted by the old Chart Style dropdown on open", () => {
+		const state = toInitialState({
+			...makeWidget(),
+			visualization: "chart",
+			display: { chartId: "query-builder-pie" },
+		})
+		expect(state.visualization).toBe("pie")
+		expect(state.chartId).toBe("query-builder-pie")
+	})
+})
+
+describe("markdown widgets", () => {
+	it("uses the static endpoint and round-trips its content", () => {
+		const state = { ...makeState(), visualization: "markdown" as const, markdownContent: "# Runbook" }
+		const dataSource = buildWidgetDataSource(makeWidget(), state, [])
+		const display = buildWidgetDisplay(makeWidget(), state)
+
+		expect(dataSource.endpoint).toBe("markdown_static")
+		expect(display.markdown).toEqual({ content: "# Runbook" })
+		expect(
+			toInitialState({ ...makeWidget(), visualization: "markdown", dataSource, display })
+				.markdownContent,
+		).toBe("# Runbook")
+	})
+})
+
+describe("validateQueries", () => {
+	it("exempts lists and notes, which have no query panels to fix", () => {
+		expect(validateQueries({ ...makeState(), visualization: "list" })).toBeNull()
+		expect(validateQueries({ ...makeState(), visualization: "markdown" })).toBeNull()
+	})
+
+	it("accepts a grouped pie", () => {
+		expect(validateQueries({ ...makeState(), visualization: "pie" })).toBeNull()
+	})
+
+	it("rejects a de-grouped pie before Apply instead of after Run Preview", () => {
+		const base = createQueryDraft(0)
+		const state = {
+			...makeState(),
+			visualization: "pie" as const,
+			queries: [{ ...base, addOns: { ...base.addOns, groupBy: false }, groupBy: [] }],
+		}
+		expect(validateQueries(state)).toMatch(/group-by/)
+	})
+
+	it("rejects an ungrouped logs histogram, which has no numeric column to bucketize", () => {
+		const base = createQueryDraft(0)
+		const state = {
+			...makeState(),
+			visualization: "histogram" as const,
+			queries: [
+				{
+					...base,
+					dataSource: "logs" as const,
+					// Logs only support `count`; leaving the traces default here would
+					// trip the per-query check first and never reach the histogram rule.
+					aggregation: "count",
+					addOns: { ...base.addOns, groupBy: false },
+					groupBy: [],
+				},
+			],
+		}
+		expect(validateQueries(state)).toMatch(/group-by/)
+	})
+})
+
+describe("deriveDefaultWidgetTitle (MAP-49)", () => {
+	it("derives from the default traces draft (error rate grouped by service)", () => {
+		expect(deriveDefaultWidgetTitle([createQueryDraft(0)])).toBe("Error rate by service.name")
+	})
+
+	it("describes counts and group-bys", () => {
+		const draft = { ...createQueryDraft(1), aggregation: "count" }
+		expect(deriveDefaultWidgetTitle([draft])).toBe("Count of traces by service.name")
+	})
+
+	it("handles logs and metrics sources", () => {
+		const logs = { ...createQueryDraft(0), dataSource: "logs" as const, groupBy: ["severity"] }
+		expect(deriveDefaultWidgetTitle([logs])).toBe("Count of logs by severity")
+
+		const base = createQueryDraft(0)
+		const metrics = {
+			...base,
+			dataSource: "metrics" as const,
+			signalSource: "default" as const,
+			metricName: "process.runtime.nodejs.handles",
+			metricType: "gauge" as const,
+			isMonotonic: false,
+			aggregation: "avg",
+			addOns: { ...base.addOns, groupBy: false },
+		}
+		expect(deriveDefaultWidgetTitle([metrics])).toBe("avg of process.runtime.nodejs.handles")
+	})
+
+	it("fills an empty saved title with the derived one", () => {
+		const widget = makeWidget()
+		const display = buildWidgetDisplay(widget, makeState())
+		expect(display.title).toBe("Error rate by service.name")
+	})
+
+	it("keeps an explicit title", () => {
+		const widget = makeWidget()
+		const display = buildWidgetDisplay(widget, { ...makeState(), title: "My chart" })
+		expect(display.title).toBe("My chart")
+	})
+})
+
+// The Min/Max/Mean/Last table used to be inferred from legend visibility, which
+// switched it on for every widget that showed a legend. It is opt-in now, so a
+// widget has to say so — a visible legend on its own must not bring it back.
+describe("widget-builder series stats default", () => {
+	function widgetWithPresentation(
+		chartPresentation: DashboardWidget["display"]["chartPresentation"],
+	): DashboardWidget {
+		const widget = makeWidget()
+		return { ...widget, display: { ...widget.display, chartPresentation } }
+	}
+
+	it("leaves the stats table off when the widget does not ask for it", () => {
+		expect(toInitialState(widgetWithPresentation({ legend: "visible" })).seriesStatsEnabled).toBe(false)
+		expect(toInitialState(widgetWithPresentation(undefined)).seriesStatsEnabled).toBe(false)
+	})
+
+	it("honors an explicit flag in both directions", () => {
+		expect(
+			toInitialState(widgetWithPresentation({ legend: "visible", seriesStats: true }))
+				.seriesStatsEnabled,
+		).toBe(true)
+		expect(
+			toInitialState(widgetWithPresentation({ legend: "visible", seriesStats: false }))
+				.seriesStatsEnabled,
+		).toBe(false)
+	})
+
+	it("round-trips the flag back into the saved display config", () => {
+		const widget = widgetWithPresentation({ legend: "visible", seriesStats: true })
+		const state = toInitialState(widget)
+		expect(buildWidgetDisplay(widget, state).chartPresentation?.seriesStats).toBe(true)
 	})
 })

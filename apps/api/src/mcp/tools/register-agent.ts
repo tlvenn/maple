@@ -6,9 +6,9 @@ import {
 	type McpToolRegistrar,
 } from "./types"
 import { Effect, Option, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-warehouse"
-import { ErrorsService } from "@/services/ErrorsService"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { ErrorsService } from "@/services/errors/ErrorsService"
 
 const decodeStringArray = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Array(Schema.String)))
 
@@ -52,7 +52,7 @@ export function registerRegisterAgentTool(server: McpToolRegistrar) {
 						(error) =>
 							new McpQueryError({
 								message: error.message,
-								pipe: "register_agent",
+								pipeName: "register_agent",
 								cause: error,
 							}),
 					),

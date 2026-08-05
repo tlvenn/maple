@@ -1,6 +1,6 @@
 import { Cause, Effect, Exit, Option, Result, Schema } from "effect"
-import { QueryEngineService } from "@/services/QueryEngineService"
-import { WarehouseQueryService } from "@/lib/WarehouseQueryService"
+import { QueryEngineService } from "@/services/warehouse/QueryEngineService"
+import { WarehouseQueryService } from "@/services/warehouse/WarehouseQueryService"
 import {
 	QuerySpec,
 	type QueryEngineResult,
@@ -24,6 +24,7 @@ import {
 } from "./chart-statistics"
 import { resolveDashboardTimeRange, type DashboardTimeRangeInput } from "./resolve-dashboard-time-range"
 import { resolveTimeRange } from "./time"
+import { autoBucketSeconds, runRawSql } from "./run-raw-sql"
 import type { DashboardDocument, DashboardWidgetSchema } from "@maple/domain/http"
 import type {
 	InspectChartDataData,
@@ -34,11 +35,15 @@ import type {
 	WidgetInspectionSummary,
 	WidgetInspectionVerdict,
 } from "@maple/domain"
-import type { TenantContext } from "@/lib/tenant-context"
+import type { TenantContext } from "@/services/auth/tenant-context"
 
 const TIMESERIES_ENDPOINT = "custom_query_builder_timeseries"
 const BREAKDOWN_ENDPOINT = "custom_query_builder_breakdown"
+const RAW_SQL_ENDPOINT = "raw_sql_chart"
 const MAX_QUERIES = 5
+// Rows captured for a raw-SQL widget inspection — enough to spot-check, capped
+// so a wide/long result doesn't bloat the response.
+const RAW_SQL_INSPECT_ROWS = 50
 
 export type DashboardWidget = typeof DashboardWidgetSchema.Type
 
@@ -203,10 +208,7 @@ function statsToData(stats: QueryStats): InspectChartQueryStats {
 // A real grouping was requested when the draft enables groupBy and lists at
 // least one token that isn't the ungrouped sentinel (`none`/`all`). Used to
 // distinguish an intentional ungrouped chart from a grouping that collapsed.
-function isGroupByRequested(draft: {
-	addOns?: { groupBy?: boolean }
-	groupBy?: readonly string[]
-}): boolean {
+function isGroupByRequested(draft: { addOns?: { groupBy?: boolean }; groupBy?: readonly string[] }): boolean {
 	if (!draft.addOns?.groupBy) return false
 	return (draft.groupBy ?? []).some((g) => {
 		const t = g.trim().toLowerCase()
@@ -246,7 +248,7 @@ const metricExistsInCatalog = Effect.fn("metricExistsInCatalog")(function* (
 	const warehouse = yield* WarehouseQueryService
 	return yield* warehouse
 		.query(tenant, {
-			pipe: "list_metrics",
+			pipeName: "list_metrics",
 			params: {
 				start_time: startTime,
 				end_time: endTime,
@@ -258,7 +260,9 @@ const metricExistsInCatalog = Effect.fn("metricExistsInCatalog")(function* (
 		})
 		.pipe(
 			Effect.map((resp) =>
-				(resp.data as ReadonlyArray<{ metricName?: string }>).some((m) => m.metricName === metricName),
+				(resp.data as ReadonlyArray<{ metricName?: string }>).some(
+					(m) => m.metricName === metricName,
+				),
 			),
 			Effect.orElseSucceed(() => true),
 		)
@@ -267,11 +271,29 @@ const metricExistsInCatalog = Effect.fn("metricExistsInCatalog")(function* (
 export interface InspectWidgetTimeRange {
 	startTime: string
 	endTime: string
-	source: "override" | "dashboard" | "fallback"
+	/** `widget` is the widget's own `timeRange` override; `override` is a caller-supplied window. */
+	source: "override" | "widget" | "dashboard" | "fallback"
+}
+
+/** Result of executing a raw_sql_chart widget's stored SQL during inspection. */
+export interface RawSqlInspectionData {
+	endpoint: string
+	sql: string
+	/** Macro-expanded SQL actually executed; absent when expansion/validation failed. */
+	expandedSql?: string
+	status: "ok" | "error"
+	/** Validation/execution error message when status is "error". */
+	error?: string
+	rowCount: number
+	columns: ReadonlyArray<string>
+	rows: ReadonlyArray<Record<string, unknown>>
+	truncated: boolean
+	timeRange: InspectWidgetTimeRange
 }
 
 export type InspectionOutcome =
 	| { kind: "supported"; data: InspectChartDataData }
+	| { kind: "raw_sql"; data: RawSqlInspectionData }
 	| { kind: "unsupported"; endpoint: string }
 	| {
 			kind: "skipped"
@@ -288,6 +310,81 @@ export interface InspectWidgetInput {
 }
 
 /**
+ * Inspect a raw_sql_chart widget by running its stored SQL through the exact
+ * same macro-expansion + safety pass + warehouse execution as the dashboard UI,
+ * returning a rows preview. Never fails the caller — validation/execution
+ * errors are encoded as `status: "error"` in the returned data.
+ */
+const inspectRawSqlWidget = Effect.fn("inspectRawSqlWidget")(function* (
+	tenant: TenantContext,
+	widget: DashboardWidget,
+	timeRange: InspectWidgetTimeRange,
+) {
+	const rawParams = widget.dataSource.params as Record<string, unknown> | undefined
+	const sql = typeof rawParams?.sql === "string" ? rawParams.sql : undefined
+
+	if (!sql) {
+		return {
+			kind: "skipped",
+			reason: "no_params",
+			detail: "raw_sql_chart widget has no `params.sql` to inspect.",
+		} satisfies InspectionOutcome
+	}
+
+	const granularitySeconds =
+		typeof rawParams?.granularitySeconds === "number"
+			? rawParams.granularitySeconds
+			: autoBucketSeconds(timeRange.startTime, timeRange.endTime)
+
+	const result = yield* runRawSql({
+		tenant,
+		sql,
+		startTime: timeRange.startTime,
+		endTime: timeRange.endTime,
+		granularitySeconds,
+	}).pipe(
+		Effect.map((value) => ({ ok: true as const, value })),
+		Effect.catchTag("@maple/http/errors/RawSqlValidationError", (error) =>
+			Effect.succeed({ ok: false as const, error: `${error.code}: ${error.message}` }),
+		),
+		Effect.catch((error) => Effect.succeed({ ok: false as const, error: error.message })),
+	)
+
+	if (!result.ok) {
+		return {
+			kind: "raw_sql",
+			data: {
+				endpoint: RAW_SQL_ENDPOINT,
+				sql,
+				status: "error",
+				error: result.error,
+				rowCount: 0,
+				columns: [],
+				rows: [],
+				truncated: false,
+				timeRange,
+			},
+		} satisfies InspectionOutcome
+	}
+
+	const rendered = result.value.rows.slice(0, RAW_SQL_INSPECT_ROWS)
+	return {
+		kind: "raw_sql",
+		data: {
+			endpoint: RAW_SQL_ENDPOINT,
+			sql,
+			expandedSql: result.value.expandedSql,
+			status: "ok",
+			rowCount: result.value.rowCount,
+			columns: result.value.columns,
+			rows: rendered,
+			truncated: result.value.rowCount > rendered.length,
+			timeRange,
+		},
+	} satisfies InspectionOutcome
+})
+
+/**
  * Run the validation pipeline for a single widget. Never fails the caller —
  * problems are encoded in the returned `InspectionOutcome` so post-mutation
  * callers can always finish their response.
@@ -299,6 +396,10 @@ export const inspectWidget = Effect.fn("inspectWidget")(
 		const endpoint = widget.dataSource.endpoint
 		const isTimeseries = endpoint === TIMESERIES_ENDPOINT
 		const isBreakdown = endpoint === BREAKDOWN_ENDPOINT
+
+		if (endpoint === RAW_SQL_ENDPOINT) {
+			return yield* inspectRawSqlWidget(tenant, widget, timeRange)
+		}
 
 		if (!isTimeseries && !isBreakdown) {
 			return { kind: "unsupported", endpoint } satisfies InspectionOutcome
@@ -641,6 +742,28 @@ function summarizeOutcome(widget: DashboardWidget, outcome: InspectionOutcome): 
 			note: `Predefined endpoint (${outcome.endpoint}); inspect with query_data if needed.`,
 		}
 	}
+	if (outcome.kind === "raw_sql") {
+		const verdict: WidgetInspectionVerdict =
+			outcome.data.status === "error"
+				? "broken"
+				: outcome.data.rowCount === 0
+					? "suspicious"
+					: "looks_healthy"
+		const note =
+			outcome.data.status === "error"
+				? `Raw SQL failed: ${outcome.data.error ?? "unknown error"}`
+				: outcome.data.rowCount === 0
+					? "Raw SQL returned no rows for this window."
+					: `Raw SQL returned ${outcome.data.rowCount} row(s).`
+		return {
+			widgetId: widget.id,
+			...(widget.display.title !== undefined && { title: widget.display.title }),
+			visualization: widget.visualization,
+			verdict,
+			flags: [],
+			note,
+		}
+	}
 	if (outcome.kind === "skipped") {
 		return {
 			widgetId: widget.id,
@@ -724,15 +847,26 @@ export const inspectWidgetsAfterMutation = Effect.fn("inspectWidgetsAfterMutatio
 					return { startTime: fallback.st, endTime: fallback.et, source: "fallback" as const }
 				})()
 
-		const outcomes = yield* Effect.all(
-			toInspect.map((widget) =>
+		// A widget pinned to its own window must be validated against that window —
+		// inspecting a "last 30 minutes" tile over the board's 7 days would report
+		// on data the tile will never show.
+		const timeRangeFor = (widget: DashboardWidget): InspectWidgetTimeRange => {
+			if (!widget.timeRange) return timeRange
+			const widgetResolved = resolveDashboardTimeRange(widget.timeRange as DashboardTimeRangeInput)
+			return widgetResolved
+				? { startTime: widgetResolved.startTime, endTime: widgetResolved.endTime, source: "widget" }
+				: timeRange
+		}
+
+		const outcomes = yield* Effect.forEach(
+			toInspect,
+			(widget) =>
 				inspectWidget({
 					tenant,
 					dashboardName: dashboard.name,
 					widget,
-					timeRange,
+					timeRange: timeRangeFor(widget),
 				}),
-			),
 			{ concurrency: maxConcurrent },
 		)
 

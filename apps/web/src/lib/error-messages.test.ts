@@ -1,4 +1,6 @@
+import { HttpClientError, HttpClientRequest } from "effect/unstable/http"
 import { describe, expect, it } from "vitest"
+import { WAREHOUSE_ERROR_TAGS } from "@maple/domain"
 import { formatBackendError } from "./error-messages"
 
 describe("formatBackendError", () => {
@@ -33,14 +35,28 @@ describe("formatBackendError", () => {
 		expect(result.description).toContain("30 seconds")
 	})
 
-	it("formats QueryEngineValidationError with details", () => {
+	it("keeps the engine's message as the title and details as the description", () => {
 		const result = formatBackendError({
 			_tag: "@maple/http/errors/QueryEngineValidationError",
-			message: "invalid",
-			details: ["startTime must be before endTime", "limit too high"],
+			message: "List query time range too large",
+			details: ["List queries support a maximum range of 7 days", "Narrow the time range"],
 		})
-		expect(result.title).toBe("Invalid query parameters")
-		expect(result.description).toBe("startTime must be before endTime; limit too high")
+		// The specific headline used to be discarded in favour of a generic
+		// "Invalid query parameters" whenever details were present.
+		expect(result.title).toBe("List query time range too large")
+		expect(result.description).toBe(
+			"List queries support a maximum range of 7 days; Narrow the time range",
+		)
+	})
+
+	it("falls back to the message as the description when there are no details", () => {
+		const result = formatBackendError({
+			_tag: "@maple/http/errors/QueryEngineValidationError",
+			message: "Invalid time range",
+			details: [],
+		})
+		expect(result.title).toBe("Invalid time range")
+		expect(result.description).toBe("Invalid time range")
 	})
 
 	it("formats QueryEngineExecutionError with causeMessage", () => {
@@ -118,6 +134,35 @@ describe("formatBackendError", () => {
 		expect(result.description).toContain("schema apply")
 	})
 
+	it("formats decode-kind WarehouseSchemaDriftError without the schema-apply hint", () => {
+		const result = formatBackendError({
+			_tag: "@maple/http/errors/WarehouseSchemaDriftError",
+			message: "Compiled query row 0 did not match its declared output schema",
+			kind: "decode",
+			pipe: "serviceOverview",
+		})
+		expect(result.description).not.toContain("schema apply")
+		expect(result.description).toContain("Maple bug")
+	})
+
+	it("formats WarehouseMalformedQueryError as a Maple bug, not a database problem", () => {
+		const result = formatBackendError({
+			_tag: "@maple/http/errors/WarehouseMalformedQueryError",
+			message: "NO_COMMON_TYPE: There is no supertype for types UInt64, Float64",
+			pipe: "traces_timeseries",
+		})
+		expect(result.title).toBe("This chart hit a bug in Maple")
+		expect(result.description).toContain("our fault")
+		expect(result.description).not.toContain("schema apply")
+	})
+
+	it("gives every warehouse tag a specific title", () => {
+		for (const tag of WAREHOUSE_ERROR_TAGS) {
+			const result = formatBackendError({ _tag: tag, message: "boom" })
+			expect(result.title, tag).not.toBe("Something went wrong")
+		}
+	})
+
 	it("formats WarehouseValidationError as an invalid query", () => {
 		const result = formatBackendError({
 			_tag: "@maple/http/errors/WarehouseValidationError",
@@ -166,6 +211,27 @@ describe("formatBackendError", () => {
 			_tag: "@maple/http/errors/UnauthorizedError",
 		})
 		expect(result.title).toBe("Not authorized")
+	})
+
+	it("tags transport HttpClientError as a network error", () => {
+		const error = new HttpClientError.HttpClientError({
+			reason: new HttpClientError.TransportError({
+				request: HttpClientRequest.get("https://api.maple.dev/v1/services"),
+			}),
+		})
+		const result = formatBackendError(error)
+		expect(result.title).toBe("Cannot reach Maple API")
+		expect(result.kind).toBe("network")
+	})
+
+	it("tags fetch-failure Error messages as network errors", () => {
+		const result = formatBackendError(new Error("Failed to fetch"))
+		expect(result.title).toBe("Cannot reach Maple API")
+		expect(result.kind).toBe("network")
+	})
+
+	it("does not tag non-network errors", () => {
+		expect(formatBackendError(new Error("boom")).kind).toBeUndefined()
 	})
 
 	it("falls back for plain Error", () => {

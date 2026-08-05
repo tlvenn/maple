@@ -1,15 +1,11 @@
-import {
-	requiredStringParam,
-	optionalNumberParam,
-	type McpToolRegistrar,
-} from "./types"
-import { warehouseToMcpHandlers } from "../lib/map-warehouse-error"
-import { withTenantExecutor, resolveTenant } from "../lib/query-warehouse"
-import { clampLimit } from "../lib/limits"
-import { formatTable, truncate } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { requiredStringParam, optionalNumberParam, type McpToolRegistrar } from "./types"
+import { warehouseToMcpHandlers } from "@/mcp/lib/map-warehouse-error"
+import { withTenantExecutor, resolveTenant } from "@/mcp/lib/query-warehouse"
+import { clampLimit } from "@/mcp/lib/limits"
+import { formatTable, truncate } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Array as Arr, Effect, Schema, pipe } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { getSessionTraces } from "@maple/query-engine/observability"
 
 export function registerGetSessionTracesTool(server: McpToolRegistrar) {
@@ -32,9 +28,7 @@ export function registerGetSessionTracesTool(server: McpToolRegistrar) {
 
 			const { session, traces, totalTraceCount } = yield* withTenantExecutor(
 				getSessionTraces({ sessionId: session_id, limit: lim }),
-			).pipe(
-				Effect.catchTags(warehouseToMcpHandlers("get_session_traces")),
-			)
+			).pipe(Effect.catchTags(warehouseToMcpHandlers("get_session_traces")))
 
 			if (!session) {
 				return {
@@ -57,11 +51,15 @@ export function registerGetSessionTracesTool(server: McpToolRegistrar) {
 			// Tinybird path returns numbers (see the facets handler in
 			// session-replay.http.ts); coerce every numeric at the edge.
 			const errorCount = Number(session.errorCount)
+			const activeTimeMs = session.activeTimeMs != null ? Number(session.activeTimeMs) : null
+			const idleTimeMs = session.idleTimeMs != null ? Number(session.idleTimeMs) : null
 			const metaParts = [
 				device || "unknown client",
 				session.country || null,
 				errorCount > 0 ? `${errorCount} errors` : "no errors",
-				session.durationMs != null ? `${Math.round(Number(session.durationMs))}ms` : null,
+				session.durationMs != null ? `${Math.round(Number(session.durationMs))}ms total` : null,
+				activeTimeMs != null ? `${Math.round(activeTimeMs)}ms active` : null,
+				idleTimeMs != null ? `${Math.round(idleTimeMs)}ms idle` : null,
 			].filter((p): p is string => Boolean(p))
 
 			const lines: string[] = [`## Session ${session.sessionId}`, metaParts.join(" · ")]
@@ -124,6 +122,8 @@ export function registerGetSessionTracesTool(server: McpToolRegistrar) {
 							pageViews: Number(session.pageViews),
 							clickCount: Number(session.clickCount),
 							errorCount,
+							activeTimeMs,
+							idleTimeMs,
 						},
 						totalTraceCount,
 						traces: pipe(

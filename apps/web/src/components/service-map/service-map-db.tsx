@@ -1,5 +1,8 @@
+import { HYPERDRIVE_DB_NAMESPACE } from "@maple/domain/tinybird/db-query-shape-sql"
+
 import {
 	ClickhouseIcon,
+	CloudflareIcon,
 	DatabaseIcon,
 	FireIcon,
 	type IconComponent,
@@ -7,11 +10,13 @@ import {
 	MongodbIcon,
 	MysqlIcon,
 	PaperPlaneIcon,
+	PlanetScaleIcon,
 	PostgresIcon,
 	RedisIcon,
 } from "@/components/icons"
+import { PLANETSCALE_COLOR } from "@/components/infra/planetscale/metrics"
 
-export type DbCategory = "database" | "cache" | "queue" | "search"
+type DbCategory = "database" | "cache" | "queue" | "search"
 
 export interface DbDescriptor {
 	/** Coarse classification used for the node's silhouette label + fallback icon. */
@@ -109,6 +114,18 @@ export function getDbDescriptor(system: string | undefined): DbDescriptor {
 				color: "oklch(0.58 0.2 25)",
 				branded: true,
 			}
+		case "tinybird":
+			// No Nucleo/brand icon for Tinybird yet, so the generic database glyph
+			// carries the brand color rather than shipping an invented mark. The
+			// case still earns its keep: without it the node renders the raw
+			// lowercase `tinybird` in the default database blue.
+			return {
+				category: "database",
+				Icon: DatabaseIcon,
+				label: "Tinybird",
+				color: "oklch(0.82 0.19 155)",
+				branded: false,
+			}
 	}
 
 	const category = categoryOf(s)
@@ -121,9 +138,96 @@ export function getDbDescriptor(system: string | undefined): DbDescriptor {
 	}
 }
 
-/** Per-system brand color with a neutral fallback for unknown systems. */
-export function getDbColor(system: string | undefined): string {
-	return getDbDescriptor(system).color
+/** Cloudflare brand orange, used to brand the collapsed Hyperdrive node. */
+const HYPERDRIVE_COLOR = "oklch(0.7 0.16 50)"
+
+/** Everything a DB node / detail-panel header needs to render, brand included. */
+export interface DbNodePresentation {
+	/** Node title — the database identity, or "Hyperdrive" for the collapsed proxy node. */
+	title: string
+	/** Small uppercase badge — the underlying system, or the coarse category. */
+	badge: string
+	Icon: IconComponent
+	color: string
+	branded: boolean
+	category: DbCategory
+	/** Tooltip / long-form label (e.g. "PostgreSQL via Hyperdrive"). */
+	systemLabel: string
+}
+
+/**
+ * Resolve how a database node is presented, given its system and namespace.
+ *
+ * When the namespace is the `HYPERDRIVE_DB_NAMESPACE` sentinel (all of an org's
+ * Cloudflare Hyperdrive config IDs collapse to it — see the query engine's
+ * `collapseHyperdriveNs`), the node is branded as **Hyperdrive** with the
+ * underlying system ("PostgreSQL") kept in the badge. Otherwise it mirrors the
+ * prior behavior: the namespace is the title, the friendly system name the badge.
+ *
+ * Shared by the map node and the detail-panel header so they always agree — and
+ * the sentinel branch is the hook for a future per-connection Hyperdrive panel.
+ */
+export function resolveDbNodePresentation(
+	dbSystem: string | undefined,
+	dbNamespace: string | undefined,
+): DbNodePresentation {
+	const ns = dbNamespace ?? ""
+	const sys = getDbDescriptor(dbSystem)
+	if (ns === HYPERDRIVE_DB_NAMESPACE) {
+		return {
+			title: "Hyperdrive",
+			badge: sys.label,
+			Icon: CloudflareIcon,
+			color: HYPERDRIVE_COLOR,
+			branded: true,
+			category: sys.category,
+			systemLabel: `${sys.label} via Hyperdrive`,
+		}
+	}
+	return {
+		title: ns || dbSystem || sys.label,
+		badge: ns ? sys.label : sys.category,
+		Icon: sys.Icon,
+		color: sys.color,
+		branded: sys.branded,
+		category: sys.category,
+		systemLabel: sys.label,
+	}
+}
+
+/**
+ * Node color with a neutral fallback for unknown systems, honoring the Hyperdrive
+ * collapse (Cloudflare orange) so the minimap, "color by" accent, and edge
+ * endpoints match the branded node.
+ */
+export function getDbNodeColor(system: string | undefined, namespace: string): string {
+	return resolveDbNodePresentation(system, namespace).color
+}
+
+export { PLANETSCALE_COLOR }
+
+/**
+ * Branded presentation for a DB node whose namespace matched the org's
+ * PlanetScale inventory: the PlanetScale mark takes the icon slot, "PlanetScale"
+ * takes the badge, and the underlying system keeps the long-form label
+ * ("MySQL on PlanetScale"). `kind` is the inventory's product kind and wins
+ * over `dbSystem` when the trace attributes were ambiguous.
+ */
+export function resolvePlanetScaleDbPresentation(
+	dbSystem: string | undefined,
+	dbNamespace: string | undefined,
+	kind: string | undefined,
+): DbNodePresentation {
+	const sys = getDbDescriptor(dbSystem || (kind === "postgresql" ? "postgresql" : "mysql"))
+	return {
+		title: dbNamespace || sys.label,
+		badge: "PlanetScale",
+		Icon: PlanetScaleIcon,
+		color: PLANETSCALE_COLOR,
+		branded: false,
+		category: "database",
+		systemLabel: `${sys.label} on PlanetScale`,
+	}
 }
 
 /** Append an alpha channel to an `oklch(L C H)` color string. */

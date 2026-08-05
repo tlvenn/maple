@@ -3,17 +3,15 @@
 import type { ComponentProps } from "react"
 
 import { Button } from "@maple/ui/components/ui/button"
-import { ScrollArea, ScrollBar } from "@maple/ui/components/ui/scroll-area"
-import { cn } from "@/lib/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { useCallback } from "react"
 
-export type SuggestionsProps = ComponentProps<typeof ScrollArea>
+export type SuggestionsProps = ComponentProps<"div">
 
 export const Suggestions = ({ className, children, ...props }: SuggestionsProps) => (
-	<ScrollArea className="h-auto w-full overflow-x-auto whitespace-nowrap" {...props}>
-		<div className={cn("flex w-max flex-nowrap items-center gap-2", className)}>{children}</div>
-		<ScrollBar className="hidden" orientation="horizontal" />
-	</ScrollArea>
+	<div className={cn("flex flex-wrap items-center gap-2", className)} {...props}>
+		{children}
+	</div>
 )
 
 export type SuggestionProps = Omit<ComponentProps<typeof Button>, "onClick"> & {
@@ -21,6 +19,18 @@ export type SuggestionProps = Omit<ComponentProps<typeof Button>, "onClick"> & {
 	onClick?: (suggestion: string) => void
 }
 
+/**
+ * A one-line pill. Deliberately not a wrapping one: this previously set
+ * `h-auto … whitespace-normal`, and `twMerge` does resolve `h-auto` against the
+ * `h-8` in `buttonVariants({size:"sm"})` — but that variant also carries
+ * `sm:h-7`, which is a *different* modifier group and survives the merge. Above
+ * 640px the pill stayed locked at 1.75rem while its text wrapped freely, so long
+ * suggestions spilled over the border and collided with the row below.
+ *
+ * So the height belongs to the size variant and the text truncates instead. The
+ * cap is a backstop — a suggestion long enough to reach it is a generator bug
+ * (see `investigationSuggestions`), not something to design around.
+ */
 export const Suggestion = ({
 	suggestion,
 	onClick,
@@ -36,14 +46,15 @@ export const Suggestion = ({
 
 	return (
 		<Button
-			className={cn("cursor-pointer rounded-full px-4", className)}
+			className={cn("max-w-[min(100%,24rem)] cursor-pointer rounded-full px-3.5", className)}
 			onClick={handleClick}
 			size={size}
+			title={children ? undefined : suggestion}
 			type="button"
 			variant={variant}
 			{...props}
 		>
-			{children || suggestion}
+			<span className="min-w-0 truncate">{children || suggestion}</span>
 		</Button>
 	)
 }

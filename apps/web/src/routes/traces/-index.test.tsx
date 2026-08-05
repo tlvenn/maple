@@ -27,14 +27,26 @@ vi.mock("@tanstack/react-router", async () => {
 	}
 })
 
-vi.mock("@/components/layout/dashboard-layout", () => ({
-	DashboardLayout: ({ headerActions, children }: { headerActions?: ReactNode; children?: ReactNode }) => (
-		<div>
-			{headerActions}
-			{children}
-		</div>
-	),
-}))
+vi.mock("@/components/layout/dashboard-layout", () => {
+	// Pass-through shell: every region just renders its children, so a test can
+	// assert on header actions and page body without the sidebar/router chrome.
+	const passthrough = ({ children }: { children?: ReactNode }) => <div>{children}</div>
+	return {
+		DashboardLayout: {
+			Root: passthrough,
+			Breadcrumbs: () => null,
+			Body: passthrough,
+			Filters: passthrough,
+			Content: passthrough,
+			Sticky: passthrough,
+			Header: passthrough,
+			Scroll: passthrough,
+			RightPanel: passthrough,
+			Title: passthrough,
+			Description: passthrough,
+		},
+	}
+})
 
 vi.mock("@/components/traces/traces-table", () => ({
 	TracesTable: () => <div>traces-table</div>,
@@ -144,6 +156,12 @@ vi.mock("@/lib/effect-atom", async () => {
 				case atoms.resourceAttributeValues:
 					return actual.Result.success({ data: [] })
 				default:
+					// The lazy AutocompleteValuesProvider subscribes to a static idle
+					// atom (a real Atom, unlike the sentinel symbols above) until
+					// activate() is called — it holds Result.initial.
+					if (actual.Atom.isAtom(atom)) {
+						return actual.Result.initial()
+					}
 					throw new Error(`Unexpected atom: ${String(atom)}`)
 			}
 		},
@@ -151,6 +169,7 @@ vi.mock("@/lib/effect-atom", async () => {
 })
 
 import * as TracesRoute from "./index"
+import { component as TracesPage } from "./index?tsr-split=component"
 
 describe("TracesPage timePreset search updates", () => {
 	beforeEach(() => {
@@ -185,14 +204,14 @@ describe("TracesPage timePreset search updates", () => {
 	})
 
 	it("does not attach route-level relative refresh rebasing", () => {
-		render(<TracesRoute.TracesPage />)
+		render(<TracesPage />)
 
 		expect(providerProps.timePreset).toBe("12h")
 		expect(providerProps.onRelativeRangeRefresh).toBeUndefined()
 	})
 
 	it("writes timePreset for preset-based selections", () => {
-		render(<TracesRoute.TracesPage />)
+		render(<TracesPage />)
 
 		fireEvent.click(screen.getByRole("button", { name: "preset" }))
 
@@ -231,7 +250,7 @@ describe("TracesPage timePreset search updates", () => {
 			deploymentEnvMatchMode: undefined,
 		})
 
-		render(<TracesRoute.TracesPage />)
+		render(<TracesPage />)
 
 		fireEvent.click(screen.getByRole("button", { name: "custom" }))
 

@@ -1,9 +1,42 @@
 import type { SeverityLevel } from "@/components/infra/format"
 import type { ServiceLatencyBaseline } from "@/api/warehouse/services"
-import type { AlertIncidentDocument } from "@maple/domain/http"
+import type { AlertIncidentDocument, AnomalySignalType } from "@maple/domain/http"
 
-/** Health rollup for a single service, combining golden-signal metrics with live alerts. */
+/** Health rollup for a single service. */
 export type ServiceHealth = "healthy" | "degraded" | "unhealthy"
+
+export interface ServiceHealthCause {
+	severity: "warning" | "critical"
+	label: string
+	metric?: "error" | "latency" | "traffic"
+	direction?: "up" | "down"
+}
+
+/**
+ * Direction detected by each baseline anomaly. These are detector semantics,
+ * not a comparison with the latest sample: an incident can remain open while
+ * it is recovering, but it was still opened for the direction shown here.
+ */
+export function anomalyDirection(signalType: AnomalySignalType): "up" | "down" {
+	return signalType === "throughput" ? "down" : "up"
+}
+
+/**
+ * Incident-backed health used by the main overview. Unlike the legacy metric
+ * heuristic below, these causes have already passed either a user-authored
+ * alert rule or Maple's volume-aware seasonal anomaly detector.
+ */
+export function deriveServiceHealthFromCauses(causes: readonly ServiceHealthCause[]): ServiceHealth {
+	if (causes.some((cause) => cause.severity === "critical")) return "unhealthy"
+	if (causes.length > 0) return "degraded"
+	return "healthy"
+}
+
+export function primaryServiceHealthCause(
+	causes: readonly ServiceHealthCause[],
+): ServiceHealthCause | undefined {
+	return causes.find((cause) => cause.severity === "critical") ?? causes[0]
+}
 
 // Error-rate thresholds are global absolutes — an error ratio means the same
 // thing for every service. Error rate is a fraction (errors / requests).
@@ -67,8 +100,14 @@ export function latencySeverity(
 	if (spanCount !== undefined && spanCount < MIN_CURRENT_SPANS) return "ok"
 
 	if (baseline !== undefined && baseline.spanCount >= MIN_BASELINE_SPANS && baseline.p95LatencyMs > 0) {
-		const unhealthyAt = Math.max(LATENCY_ABS_FLOOR_MS, baseline.p95LatencyMs * LATENCY_BASELINE_UNHEALTHY_RATIO)
-		const degradedAt = Math.max(LATENCY_ABS_FLOOR_MS, baseline.p95LatencyMs * LATENCY_BASELINE_DEGRADED_RATIO)
+		const unhealthyAt = Math.max(
+			LATENCY_ABS_FLOOR_MS,
+			baseline.p95LatencyMs * LATENCY_BASELINE_UNHEALTHY_RATIO,
+		)
+		const degradedAt = Math.max(
+			LATENCY_ABS_FLOOR_MS,
+			baseline.p95LatencyMs * LATENCY_BASELINE_DEGRADED_RATIO,
+		)
 		if (p95LatencyMs >= unhealthyAt) return "crit"
 		if (p95LatencyMs >= degradedAt) return "warn"
 		return "ok"
@@ -145,10 +184,10 @@ export function healthRank(health: ServiceHealth): number {
 }
 
 /**
- * Key for matching a baseline row to an overview row. Must mirror the
- * `${serviceName}::${serviceNamespace}::${environment}` grouping key used by
- * `aggregateByServiceEnvironment` in `@/api/warehouse/services` — a mismatch
- * silently (and fail-safely) reverts that service to absolute thresholds.
+ * Key for matching a baseline row to an overview row. Overview metrics collapse
+ * namespace variants by service name + environment, then retain the dominant
+ * namespace for this baseline lookup. A mismatch silently (and fail-safely)
+ * reverts that service to absolute thresholds.
  */
 export function baselineKey(serviceName: string, serviceNamespace: string, environment: string): string {
 	return `${serviceName}::${serviceNamespace}::${environment}`

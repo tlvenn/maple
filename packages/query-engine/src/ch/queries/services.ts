@@ -4,21 +4,103 @@
 // DSL-based query definitions for service overview, releases, apdex, and usage.
 // ---------------------------------------------------------------------------
 
-import * as CH from "../expr"
-import { param } from "../param"
-import { from, type ColumnAccessor } from "../query"
-import { unionAll, type CHUnionQuery } from "../union"
-import { ServiceOverviewSpans, ServiceUsage } from "../tables"
-import { apdexExprs, serviceOverviewWhereConditions } from "./query-helpers"
+import { Schema } from "effect"
+import * as CH from "@maple-dev/clickhouse-builder/expr"
+import { param } from "@maple-dev/clickhouse-builder"
+import {
+	from,
+	fromUnion,
+	type CHQuery,
+	type ColumnAccessor,
+	type CompiledQueryRowSchema,
+} from "@maple-dev/clickhouse-builder"
+import { unionAll, type CHUnionQuery } from "@maple-dev/clickhouse-builder"
+import type { ColumnDefs } from "@maple-dev/clickhouse-builder/types"
+import { ServiceOverviewHourly, ServiceOverviewSpans, ServiceUsage, TracesAggregatesHourly } from "../tables"
+import { CHNumber } from "../schema"
+import { apdexExprs, serviceOverviewWhereConditions, hourFloor, type FacetOutput } from "./query-helpers"
+import { edgeCondition, interiorConditions } from "./rollup-splice"
 
 // ---------------------------------------------------------------------------
 // Service overview
 // ---------------------------------------------------------------------------
 
+const SERVICE_RAW_DURATION_STATE = "quantilesTDigestState(0.5, 0.95, 0.99)(Duration)"
+const SERVICE_ROLLUP_DURATION_STATE = "quantilesTDigestMergeState(0.5, 0.95, 0.99)(DurationQuantiles)"
+
+interface ServiceWindowFilters {
+	readonly serviceName?: string
+	readonly environments?: readonly string[]
+	readonly namespaces?: readonly string[]
+	readonly commitShas?: readonly string[]
+}
+
+/**
+ * One logical service-history stream: exact raw rows for the two partial
+ * boundary hours, plus hourly aggregate states for every complete interior
+ * hour. The raw projection is intentionally retained for only 30 days; an old
+ * partial first hour can therefore be absent while all reconstructible full
+ * hours remain exact.
+ */
+function serviceOverviewWindows(filters: ServiceWindowFilters) {
+	const rawEdges = from(ServiceOverviewSpans)
+		.select(($) => ({
+			bHour: CH.toStartOfHour($.Timestamp),
+			bServiceName: $.ServiceName,
+			bServiceNamespace: $.ServiceNamespace,
+			bEnvironment: $.DeploymentEnv,
+			bCommitSha: $.CommitSha,
+			bSpanCount: CH.count(),
+			bEstimatedSpanCount: CH.sum($.SampleRate),
+			bErrorCount: CH.countIf($.StatusCode.eq("Error")),
+			bEstimatedErrorCount: CH.sumIf($.SampleRate, $.StatusCode.eq("Error")),
+			bDurationSum: CH.sum(CH.rawExpr<number>("toFloat64(Duration)")),
+			bDurationQuantiles: CH.rawExpr<string>(SERVICE_RAW_DURATION_STATE),
+			bFirstSeen: CH.min_($.Timestamp),
+			bApdexSatisfiedCount: CH.countIf($.StatusCode.neq("Error").and($.Duration.lt(500_000_000))),
+			bApdexToleratingCount: CH.countIf(
+				$.StatusCode.neq("Error").and($.Duration.gte(500_000_000)).and($.Duration.lt(2_000_000_000)),
+			),
+		}))
+		.where(($) => [...serviceOverviewWhereConditions($, filters), edgeCondition("Timestamp")])
+		.groupBy("bHour", "bServiceName", "bServiceNamespace", "bEnvironment", "bCommitSha")
+
+	const hourlyInterior = from(ServiceOverviewHourly)
+		.select(($) => ({
+			bHour: $.Hour,
+			bServiceName: $.ServiceName,
+			bServiceNamespace: $.ServiceNamespace,
+			bEnvironment: $.DeploymentEnv,
+			bCommitSha: $.CommitSha,
+			bSpanCount: CH.sum($.SpanCount),
+			bEstimatedSpanCount: CH.sum($.EstimatedSpanCount),
+			bErrorCount: CH.sum($.ErrorCount),
+			bEstimatedErrorCount: CH.sum($.EstimatedErrorCount),
+			bDurationSum: CH.sum($.DurationSum),
+			bDurationQuantiles: CH.rawExpr<string>(SERVICE_ROLLUP_DURATION_STATE),
+			bFirstSeen: CH.min_($.FirstSeen),
+			bApdexSatisfiedCount: CH.sum($.ApdexSatisfiedCount),
+			bApdexToleratingCount: CH.sum($.ApdexToleratingCount),
+		}))
+		.where(($) => [
+			$.OrgId.eq(param.string("orgId")),
+			...interiorConditions($.Hour),
+			CH.when(filters.serviceName, (value: string) => $.ServiceName.eq(value)),
+			filters.environments?.length ? CH.inList($.DeploymentEnv, filters.environments) : undefined,
+			filters.namespaces?.length ? CH.inList($.ServiceNamespace, filters.namespaces) : undefined,
+			filters.commitShas?.length ? CH.inList($.CommitSha, filters.commitShas) : undefined,
+		])
+		.groupBy("bHour", "bServiceName", "bServiceNamespace", "bEnvironment", "bCommitSha")
+
+	return fromUnion(unionAll(rawEdges, hourlyInterior), "service_windows")
+}
+
 export interface ServiceOverviewOpts {
 	environments?: readonly string[]
 	namespaces?: readonly string[]
 	commitShas?: readonly string[]
+	serviceName?: string
+	limit?: number
 }
 
 export interface ServiceOverviewOutput {
@@ -28,44 +110,187 @@ export interface ServiceOverviewOutput {
 	readonly commitSha: string
 	readonly throughput: number
 	readonly errorCount: number
+	readonly estimatedErrorCount: number
 	readonly spanCount: number
 	readonly p50LatencyMs: number
 	readonly p95LatencyMs: number
 	readonly p99LatencyMs: number
 	readonly estimatedSpanCount: number
+	readonly firstSeen: string
+}
+
+export const serviceOverviewRowSchema = Schema.Struct({
+	serviceName: Schema.String,
+	serviceNamespace: Schema.String,
+	environment: Schema.String,
+	commitSha: Schema.String,
+	throughput: CHNumber,
+	errorCount: CHNumber,
+	estimatedErrorCount: CHNumber,
+	spanCount: CHNumber,
+	p50LatencyMs: CHNumber,
+	p95LatencyMs: CHNumber,
+	p99LatencyMs: CHNumber,
+	estimatedSpanCount: CHNumber,
+	firstSeen: Schema.String,
+}) satisfies CompiledQueryRowSchema<ServiceOverviewOutput>
+
+export interface ServiceCatalogOpts {
+	serviceName?: string
+	deploymentEnvironment?: string
+	serviceNamespace?: string
+	limit?: number
+	offset?: number
+}
+
+export interface ServiceCatalogOutput {
+	readonly serviceName: string
+	readonly serviceNamespaces: readonly string[]
+	readonly deploymentEnvironments: readonly string[]
+	readonly spanCount: number
+	readonly errorCount: number
+	readonly estimatedErrorCount: number
+	readonly estimatedSpanCount: number
+	readonly p50LatencyMs: number
+	readonly p95LatencyMs: number
+	readonly p99LatencyMs: number
+}
+
+/** Name-level public service catalog, intentionally aggregated across env/namespace. */
+export function serviceCatalogQuery(opts: ServiceCatalogOpts) {
+	return serviceOverviewWindows({
+		serviceName: opts.serviceName,
+		environments: opts.deploymentEnvironment === undefined ? undefined : [opts.deploymentEnvironment],
+		namespaces: opts.serviceNamespace === undefined ? undefined : [opts.serviceNamespace],
+	})
+		.select(($) => ({
+			serviceName: $.bServiceName,
+			serviceNamespaces: CH.rawExpr<readonly string[]>(
+				"arraySort(arrayFilter(x -> x != '', arrayDistinct(groupArray(bServiceNamespace))))",
+			),
+			deploymentEnvironments: CH.rawExpr<readonly string[]>(
+				"arraySort(arrayFilter(x -> x != '', arrayDistinct(groupArray(bEnvironment))))",
+			),
+			spanCount: CH.sum($.bSpanCount),
+			errorCount: CH.sum($.bErrorCount),
+			estimatedErrorCount: CH.sum($.bEstimatedErrorCount),
+			estimatedSpanCount: CH.sum($.bEstimatedSpanCount),
+			p50LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 1) / 1000000",
+			),
+			p95LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 2) / 1000000",
+			),
+			p99LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 3) / 1000000",
+			),
+		}))
+		.groupBy("serviceName")
+		.orderBy(["estimatedSpanCount", "desc"], ["serviceName", "asc"])
+		.limit(opts.limit ?? 20)
+		.offset(opts.offset ?? 0)
+		.format("JSON")
 }
 
 export function serviceOverviewQuery(opts: ServiceOverviewOpts) {
-	return from(ServiceOverviewSpans)
+	return serviceOverviewWindows(opts)
 		.select(($) => ({
-			serviceName: $.ServiceName,
-			serviceNamespace: $.ServiceNamespace,
-			environment: $.DeploymentEnv,
-			commitSha: $.CommitSha,
-			throughput: CH.count(),
-			errorCount: CH.countIf($.StatusCode.eq("Error")),
-			spanCount: CH.count(),
-			p50LatencyMs: CH.quantile(0.5)($.Duration).div(1000000),
-			p95LatencyMs: CH.quantile(0.95)($.Duration).div(1000000),
-			p99LatencyMs: CH.quantile(0.99)($.Duration).div(1000000),
+			serviceName: $.bServiceName,
+			serviceNamespace: $.bServiceNamespace,
+			environment: $.bEnvironment,
+			commitSha: $.bCommitSha,
+			throughput: CH.sum($.bSpanCount),
+			errorCount: CH.sum($.bErrorCount),
+			estimatedErrorCount: CH.sum($.bEstimatedErrorCount),
+			spanCount: CH.sum($.bSpanCount),
+			p50LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 1) / 1000000",
+			),
+			p95LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 2) / 1000000",
+			),
+			p99LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 3) / 1000000",
+			),
 			// Per-span weighted sum: each row's `SampleRate` is 1.0 for unsampled
 			// rows or `1 / acceptanceProbability` for spans carrying a `th:` value.
 			// Replaces the broken `sampledSpanCount * dominantWeight` approximation.
-			estimatedSpanCount: CH.sum($.SampleRate),
+			estimatedSpanCount: CH.sum($.bEstimatedSpanCount),
+			// Earliest span per (service, env, commit) inside the window — the
+			// list page derives deploy age / errors-since-deploy from this, so it
+			// is window-clamped by construction.
+			firstSeen: CH.min_($.bFirstSeen),
+		}))
+		.groupBy("serviceName", "serviceNamespace", "environment", "commitSha")
+		.orderBy(["throughput", "desc"])
+		.limit(opts.limit ?? 100)
+		.format("JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Service health snapshot
+// ---------------------------------------------------------------------------
+
+export interface ServiceHealthSnapshotOpts {
+	environments?: readonly string[]
+	limit?: number
+}
+
+export interface ServiceHealthSnapshotOutput {
+	readonly serviceName: string
+	readonly environment: string
+	readonly requestCount: number
+	readonly errorCount: number
+	readonly p95LatencyMs: number
+}
+
+/**
+ * Fast metrics snapshot for the main overview's service-health section.
+ *
+ * This deliberately reads the generalized hourly aggregate rather than
+ * `service_overview_spans`: the dashboard only needs service + environment
+ * golden signals, so scanning raw entry-point rows (and then a second raw
+ * seven-day baseline) is wasted work. Quantile states are merged here, which
+ * also avoids the mathematically-invalid weighted average of per-commit p95s
+ * used by the richer service catalog response.
+ *
+ * Hour bounds are floored because the aggregate is hour-grain. The main
+ * overview uses multi-hour presets; including both boundary hours is the
+ * least-surprising approximation and keeps the current partial hour visible.
+ */
+export function serviceHealthSnapshotQuery(opts: ServiceHealthSnapshotOpts) {
+	return from(TracesAggregatesHourly)
+		.select(($) => ({
+			serviceName: $.ServiceName,
+			environment: $.DeploymentEnv,
+			requestCount: CH.rawExpr<number>("sum(WeightedCount)"),
+			errorCount: CH.rawExpr<number>("sum(WeightedErrorCount)"),
+			p95LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestWeightedMerge(0.95)(DurationQuantiles), 1) / 1000000",
+			),
 		}))
 		.where(($) => [
 			$.OrgId.eq(param.string("orgId")),
-			$.Timestamp.gte(param.dateTime("startTime")),
-			$.Timestamp.lte(param.dateTime("endTime")),
+			$.IsEntryPoint.eq(1),
+			$.Hour.gte(hourFloor("startTime")),
+			$.Hour.lte(hourFloor("endTime")),
 			opts.environments?.length ? CH.inList($.DeploymentEnv, opts.environments) : undefined,
-			opts.namespaces?.length ? CH.inList($.ServiceNamespace, opts.namespaces) : undefined,
-			opts.commitShas?.length ? CH.inList($.CommitSha, opts.commitShas) : undefined,
 		])
-		.groupBy("serviceName", "serviceNamespace", "environment", "commitSha")
-		.orderBy(["throughput", "desc"])
-		.limit(100)
+		.groupBy("serviceName", "environment")
+		.orderBy(["requestCount", "desc"], ["serviceName", "asc"])
+		.limit(opts.limit ?? 500)
 		.format("JSON")
 }
+
+/** BYO ClickHouse string-number coercion for the snapshot response. */
+export const serviceHealthSnapshotRowSchema: CompiledQueryRowSchema<ServiceHealthSnapshotOutput> =
+	Schema.Struct({
+		serviceName: Schema.String,
+		environment: Schema.String,
+		requestCount: CHNumber,
+		errorCount: CHNumber,
+		p95LatencyMs: CHNumber,
+	})
 
 // ---------------------------------------------------------------------------
 // Service health baseline
@@ -92,21 +317,16 @@ export interface ServiceHealthBaselineOutput {
  * flagged when it's slow relative to its own history.
  */
 export function serviceHealthBaselineQuery(opts: ServiceHealthBaselineOpts) {
-	return from(ServiceOverviewSpans)
+	return serviceOverviewWindows(opts)
 		.select(($) => ({
-			serviceName: $.ServiceName,
-			serviceNamespace: $.ServiceNamespace,
-			environment: $.DeploymentEnv,
-			baselineP95LatencyMs: CH.quantile(0.95)($.Duration).div(1000000),
-			baselineSpanCount: CH.count(),
+			serviceName: $.bServiceName,
+			serviceNamespace: $.bServiceNamespace,
+			environment: $.bEnvironment,
+			baselineP95LatencyMs: CH.rawExpr<number>(
+				"arrayElement(quantilesTDigestMerge(0.5, 0.95, 0.99)(bDurationQuantiles), 2) / 1000000",
+			),
+			baselineSpanCount: CH.sum($.bSpanCount),
 		}))
-		.where(($) => [
-			$.OrgId.eq(param.string("orgId")),
-			$.Timestamp.gte(param.dateTime("startTime")),
-			$.Timestamp.lte(param.dateTime("endTime")),
-			opts.environments?.length ? CH.inList($.DeploymentEnv, opts.environments) : undefined,
-			opts.namespaces?.length ? CH.inList($.ServiceNamespace, opts.namespaces) : undefined,
-		])
 		.groupBy("serviceName", "serviceNamespace", "environment")
 		.orderBy(["baselineSpanCount", "desc"])
 		.limit(200)
@@ -125,25 +345,59 @@ export interface ServiceReleasesTimelineOutput {
 	readonly bucket: string
 	readonly commitSha: string
 	readonly count: number
+	readonly errorCount: number
 }
 
+export const serviceReleasesTimelineRowSchema: CompiledQueryRowSchema<ServiceReleasesTimelineOutput> =
+	Schema.Struct({
+		bucket: Schema.String,
+		commitSha: Schema.String,
+		count: CHNumber,
+		errorCount: CHNumber,
+	})
+
 export function serviceReleasesTimelineQuery(opts: ServiceReleasesTimelineOpts) {
-	return from(ServiceOverviewSpans)
+	return serviceOverviewWindows({ serviceName: opts.serviceName })
 		.select(($) => ({
-			bucket: CH.toStartOfInterval($.Timestamp, param.int("bucketSeconds")),
-			commitSha: $.CommitSha,
-			count: CH.count(),
+			bucket: CH.toStartOfInterval($.bHour, param.int("bucketSeconds")),
+			commitSha: $.bCommitSha,
+			count: CH.sum($.bSpanCount),
+			errorCount: CH.sum($.bErrorCount),
 		}))
-		.where(($) => [
-			$.OrgId.eq(param.string("orgId")),
-			$.ServiceName.eq(opts.serviceName),
-			$.CommitSha.neq(""),
-			$.Timestamp.gte(param.dateTime("startTime")),
-			$.Timestamp.lte(param.dateTime("endTime")),
-		])
+		.where(($) => [$.bCommitSha.neq("")])
 		.groupBy("bucket", "commitSha")
 		.orderBy(["bucket", "asc"])
 		.limit(1000)
+		.format("JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Service environments
+//
+// Distinct non-empty deployment environments a single service reports in the
+// window. Backs the service-detail environment switcher, replacing an
+// all-services overview scan that fetched every service's rows just to extract
+// one service's environments. Service-scoped + time-windowed so ClickHouse
+// prunes both the service and the date partitions.
+// ---------------------------------------------------------------------------
+
+export interface ServiceEnvironmentsOpts {
+	serviceName: string
+}
+
+export interface ServiceEnvironmentsOutput {
+	readonly environment: string
+}
+
+export function serviceEnvironmentsQuery(opts: ServiceEnvironmentsOpts) {
+	return serviceOverviewWindows({ serviceName: opts.serviceName })
+		.select(($) => ({
+			environment: $.bEnvironment,
+		}))
+		.where(($) => [$.bEnvironment.neq("")])
+		.groupBy("environment")
+		.orderBy(["environment", "asc"])
+		.limit(100)
 		.format("JSON")
 }
 
@@ -164,8 +418,42 @@ export interface ServiceApdexTimeseriesOutput {
 	readonly apdexScore: number
 }
 
-export function serviceApdexTimeseriesQuery(opts: ServiceApdexTimeseriesOpts) {
+export const serviceApdexTimeseriesRowSchema: CompiledQueryRowSchema<ServiceApdexTimeseriesOutput> =
+	Schema.Struct({
+		bucket: Schema.String,
+		totalCount: CHNumber,
+		satisfiedCount: CHNumber,
+		toleratingCount: CHNumber,
+		apdexScore: CHNumber,
+	})
+
+export function serviceApdexTimeseriesQuery(
+	opts: ServiceApdexTimeseriesOpts,
+): CHQuery<ColumnDefs, ServiceApdexTimeseriesOutput, {}> {
 	const thresholdMs = opts.apdexThresholdMs ?? 500
+
+	if (thresholdMs === 500) {
+		return serviceOverviewWindows({ serviceName: opts.serviceName })
+			.select(($) => {
+				const total = CH.sum($.bSpanCount)
+				const satisfied = CH.sum($.bApdexSatisfiedCount)
+				const tolerating = CH.sum($.bApdexToleratingCount)
+				return {
+					bucket: CH.toStartOfInterval($.bHour, param.int("bucketSeconds")),
+					totalCount: total,
+					satisfiedCount: satisfied,
+					toleratingCount: tolerating,
+					apdexScore: CH.if_(
+						total.gt(0),
+						CH.round_(satisfied.div(total).add(tolerating.mul(0.5).div(total)), 4),
+						CH.lit(0),
+					),
+				}
+			})
+			.groupBy("bucket")
+			.orderBy(["bucket", "asc"])
+			.format("JSON") as unknown as CHQuery<ColumnDefs, ServiceApdexTimeseriesOutput, {}>
+	}
 
 	// Routes through `service_overview_spans` (the entry-point MV) rather than
 	// raw `traces`. The MV pre-filters at write time to
@@ -183,7 +471,7 @@ export function serviceApdexTimeseriesQuery(opts: ServiceApdexTimeseriesOpts) {
 		.where(($) => serviceOverviewWhereConditions($, { serviceName: opts.serviceName }))
 		.groupBy("bucket")
 		.orderBy(["bucket", "asc"])
-		.format("JSON")
+		.format("JSON") as unknown as CHQuery<ColumnDefs, ServiceApdexTimeseriesOutput, {}>
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +498,23 @@ export interface ServiceUsageOutput {
 	readonly totalExpHistogramMetricSizeBytes: number
 	readonly totalSizeBytes: number
 }
+
+export const serviceUsageRowSchema = Schema.Struct({
+	serviceName: Schema.String,
+	totalLogCount: CHNumber,
+	totalLogSizeBytes: CHNumber,
+	totalTraceCount: CHNumber,
+	totalTraceSizeBytes: CHNumber,
+	totalSumMetricCount: CHNumber,
+	totalSumMetricSizeBytes: CHNumber,
+	totalGaugeMetricCount: CHNumber,
+	totalGaugeMetricSizeBytes: CHNumber,
+	totalHistogramMetricCount: CHNumber,
+	totalHistogramMetricSizeBytes: CHNumber,
+	totalExpHistogramMetricCount: CHNumber,
+	totalExpHistogramMetricSizeBytes: CHNumber,
+	totalSizeBytes: CHNumber,
+}) satisfies CompiledQueryRowSchema<ServiceUsageOutput>
 
 export function serviceUsageQuery(opts: ServiceUsageOpts) {
 	return from(ServiceUsage)
@@ -272,7 +577,6 @@ export interface ServiceUsageWithPreviousOutput extends ServiceUsageOutput {
  * delta chips consume.
  */
 export function serviceUsageWithPreviousQuery(opts: ServiceUsageOpts) {
-	const hourFloor = (p: string) => CH.toStartOfHour(CH.toDateTime(param.dateTime(p)))
 	const inCurrent = ($: ColumnAccessor<typeof ServiceUsage.columns>) =>
 		$.Hour.gte(hourFloor("startTime")).and($.Hour.lte(hourFloor("endTime")))
 	const inPrevious = ($: ColumnAccessor<typeof ServiceUsage.columns>) =>
@@ -329,11 +633,7 @@ export function serviceUsageWithPreviousQuery(opts: ServiceUsageOpts) {
 // Services facets (UNION ALL — environment + commit_sha facets)
 // ---------------------------------------------------------------------------
 
-export interface ServicesFacetsOutput {
-	readonly name: string
-	readonly count: number
-	readonly facetType: string
-}
+export type ServicesFacetsOutput = FacetOutput
 
 // NOTE: kept as a 4-way UNION ALL on purpose. A single-scan rewrite (ARRAY JOIN
 // of (facetType, value) pairs, or GROUP BY GROUPING SETS) reads ~3× fewer rows
@@ -342,54 +642,46 @@ export interface ServicesFacetsOutput {
 // whereas the array/tuple/lambda CPU + row replication of the single-scan forms
 // dominates. The I/O saving doesn't translate to latency here.
 export function servicesFacetsQuery(): CHUnionQuery<ServicesFacetsOutput> {
-	const baseWhere = (
-		$: ColumnAccessor<typeof ServiceOverviewSpans.columns>,
-	): Array<CH.Condition | undefined> => [
-		$.OrgId.eq(param.string("orgId")),
-		$.Timestamp.gte(param.dateTime("startTime")),
-		$.Timestamp.lte(param.dateTime("endTime")),
-	]
-
-	const envQuery = from(ServiceOverviewSpans)
+	const envQuery = serviceOverviewWindows({})
 		.select(($) => ({
-			name: $.DeploymentEnv,
-			count: CH.count(),
+			name: $.bEnvironment,
+			count: CH.sum($.bSpanCount),
 			facetType: CH.lit("environment"),
 		}))
-		.where(($) => [...baseWhere($), $.DeploymentEnv.neq("")])
+		.where(($) => [$.bEnvironment.neq("")])
 		.groupBy("name")
 		.orderBy(["count", "desc"])
 		.limit(50)
 
-	const namespaceQuery = from(ServiceOverviewSpans)
+	const namespaceQuery = serviceOverviewWindows({})
 		.select(($) => ({
-			name: $.ServiceNamespace,
-			count: CH.count(),
+			name: $.bServiceNamespace,
+			count: CH.sum($.bSpanCount),
 			facetType: CH.lit("namespace"),
 		}))
-		.where(($) => [...baseWhere($), $.ServiceNamespace.neq("")])
+		.where(($) => [$.bServiceNamespace.neq("")])
 		.groupBy("name")
 		.orderBy(["count", "desc"])
 		.limit(50)
 
-	const commitQuery = from(ServiceOverviewSpans)
+	const commitQuery = serviceOverviewWindows({})
 		.select(($) => ({
-			name: $.CommitSha,
-			count: CH.count(),
+			name: $.bCommitSha,
+			count: CH.sum($.bSpanCount),
 			facetType: CH.lit("commit_sha"),
 		}))
-		.where(($) => [...baseWhere($), $.CommitSha.neq("")])
+		.where(($) => [$.bCommitSha.neq("")])
 		.groupBy("name")
 		.orderBy(["count", "desc"])
 		.limit(50)
 
-	const serviceQuery = from(ServiceOverviewSpans)
+	const serviceQuery = serviceOverviewWindows({})
 		.select(($) => ({
-			name: $.ServiceName,
-			count: CH.count(),
+			name: $.bServiceName,
+			count: CH.sum($.bSpanCount),
 			facetType: CH.lit("service"),
 		}))
-		.where(($) => [...baseWhere($), $.ServiceName.neq("")])
+		.where(($) => [$.bServiceName.neq("")])
 		.groupBy("name")
 		.orderBy(["count", "desc"])
 		.limit(50)

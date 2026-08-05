@@ -5,12 +5,12 @@ import {
 	requiredStringParam,
 	type McpToolRegistrar,
 } from "./types"
-import { formatTable, truncate } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatTable, truncate } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { AlertsService } from "@/services/AlertsService"
+import { AlertsService } from "@/services/alerts/AlertsService"
 import { AlertRuleId } from "@maple/domain/http"
 
 const decodeRuleId = Schema.decodeUnknownSync(AlertRuleId)
@@ -22,7 +22,7 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 		Schema.Struct({
 			rule_id: requiredStringParam("ID of the alert rule to inspect"),
 			group_key: optionalStringParam("Filter by a specific group key"),
-			status: optionalStringParam("Filter by check status: breached, healthy, skipped"),
+			status: optionalStringParam("Filter by check status: breached, healthy, skipped, error"),
 			since: optionalStringParam("ISO8601 timestamp — only return checks at or after this time"),
 			until: optionalStringParam("ISO8601 timestamp — only return checks at or before this time"),
 			limit: optionalNumberParam("Max checks to return (default 100, max 2000)"),
@@ -36,7 +36,7 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 				catch: (cause) =>
 					new McpQueryError({
 						message: `Invalid rule_id: ${rule_id}`,
-						pipe: "list_alert_checks",
+						pipeName: "list_alert_checks",
 						cause,
 					}),
 			})
@@ -53,7 +53,7 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 						(error) =>
 							new McpQueryError({
 								message: error.message,
-								pipe: "list_alert_checks",
+								pipeName: "list_alert_checks",
 								cause: error,
 							}),
 					),
@@ -67,19 +67,20 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 			const breached = checks.filter((c) => c.status === "breached").length
 			const healthy = checks.filter((c) => c.status === "healthy").length
 			const skipped = checks.filter((c) => c.status === "skipped").length
+			const errored = checks.filter((c) => c.status === "error").length
 			const transitions = checks.filter((c) => c.incidentTransition !== "none").length
 
 			yield* Effect.annotateCurrentSpan({
 				orgId: tenant.orgId,
 				ruleId: rule_id,
 				status: status ?? "all",
-				resultCount: checks.length,
+				"result.rowCount": checks.length,
 			})
 
 			const lines: string[] = [
 				`## Alert Checks`,
 				`Rule: ${rule_id}`,
-				`Total: ${checks.length} (${breached} breached · ${healthy} healthy · ${skipped} skipped · ${transitions} incident transitions)`,
+				`Total: ${checks.length} (${breached} breached · ${healthy} healthy · ${skipped} skipped · ${errored} errored · ${transitions} incident transitions)`,
 				``,
 			]
 
@@ -101,7 +102,11 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 					.map((c) => [
 						c.timestamp.slice(0, 19),
 						c.status,
-						c.observedValue != null ? String(c.observedValue) : "—",
+						c.status === "error" && c.errorMessage != null
+							? truncate(c.errorMessage, 40)
+							: c.observedValue != null
+								? String(c.observedValue)
+								: "—",
 						String(c.threshold),
 						String(c.sampleCount),
 						truncate(c.groupKey || "all", 20),
@@ -115,6 +120,11 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 			}
 
 			const nextSteps: string[] = []
+			if (errored > 0) {
+				nextSteps.push(
+					"Evaluations are failing — check `get_alert_rule` lastEvaluationError and fix the rule's query",
+				)
+			}
 			if (transitions > 0) {
 				nextSteps.push("`list_alert_incidents` — follow up on the triggered incidents")
 			}
@@ -137,6 +147,7 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 						breached,
 						healthy,
 						skipped,
+						errored,
 						transitions,
 						checks: checks.map((c) => ({
 							timestamp: c.timestamp,
@@ -153,6 +164,8 @@ export function registerListAlertChecksTool(server: McpToolRegistrar) {
 							incidentId: c.incidentId,
 							incidentTransition: c.incidentTransition,
 							evaluationDurationMs: c.evaluationDurationMs,
+							errorMessage: c.errorMessage,
+							errorCategory: c.errorCategory,
 						})),
 					},
 				}),

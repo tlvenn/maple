@@ -1,15 +1,15 @@
 import { optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
-import { toMcpQueryError } from "../lib/map-warehouse-error"
-import { resolveTenant } from "../lib/query-warehouse"
-import { queryWarehouse } from "../lib/query-warehouse"
-import { resolveTimeRange, formatClampNote } from "../lib/time"
-import { clampLimit } from "../lib/limits"
-import { formatNumber, formatTable } from "../lib/format"
+import { toMcpQueryError } from "@/mcp/lib/map-warehouse-error"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { queryWarehouse } from "@/mcp/lib/query-warehouse"
+import { resolveTimeRange, rangeExceededResult, MCP_DISCOVERY_MAX_HOURS } from "@/mcp/lib/time"
+import { clampLimit } from "@/mcp/lib/limits"
+import { formatNumber, formatTable } from "@/mcp/lib/format"
 import { Array as Arr, Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { formatNextSteps } from "../lib/next-steps"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { exploreAttributeKeys, exploreAttributeValues } from "@maple/query-engine/observability"
-import { makeWarehouseExecutorFromTenant } from "@/lib/WarehouseQueryService"
+import { makeWarehouseExecutorFromTenant } from "@/services/warehouse/WarehouseQueryService"
 
 export function registerExploreAttributesTool(server: McpToolRegistrar) {
 	server.tool(
@@ -35,8 +35,11 @@ export function registerExploreAttributesTool(server: McpToolRegistrar) {
 			limit: optionalNumberParam("Max results (default 50)"),
 		}),
 		Effect.fn("McpTool.exploreAttributes")(function* (params) {
-			const range = resolveTimeRange(params.start_time, params.end_time, { maxHours: 24 * 30 })
+			const range = resolveTimeRange(params.start_time, params.end_time, {
+				maxHours: MCP_DISCOVERY_MAX_HOURS,
+			})
 			const { st, et } = range
+			if (range.exceeded) return rangeExceededResult(range, "explore_attributes")
 			const lim = clampLimit(params.limit, { defaultValue: 50, max: 500 })
 			const scope = (params.scope ?? "span") as "span" | "resource"
 			const tenant = yield* resolveTenant
@@ -58,10 +61,12 @@ export function registerExploreAttributesTool(server: McpToolRegistrar) {
 					Effect.mapError(mapError),
 				)
 
+				// Metric labels are their own scope; span/resource scoping only applies to traces.
+				const sourceLabel = params.source === "metrics" ? "metrics" : `${params.source} (${scope})`
 				const lines: string[] = [
 					`## Attribute Values: ${params.key}`,
-					`Source: ${params.source} (${scope})`,
-					`Time range: ${st} — ${et}${formatClampNote(range)}`,
+					`Source: ${sourceLabel}`,
+					`Time range: ${st} — ${et}`,
 					``,
 				]
 
@@ -77,9 +82,15 @@ export function registerExploreAttributesTool(server: McpToolRegistrar) {
 				}
 
 				lines.push(
-					formatNextSteps([
-						`\`query_data source="traces" kind="timeseries" attribute_key="${params.key}" attribute_value="<value>"\` — chart traces filtered by this attribute`,
-					]),
+					formatNextSteps(
+						params.source === "metrics"
+							? [
+									`\`query_data source="metrics" kind="breakdown" group_by="attribute" attribute_key="${params.key}"\` — break a metric down by this label`,
+								]
+							: [
+									`\`query_data source="traces" kind="timeseries" attribute_key="${params.key}" attribute_value="<value>"\` — chart traces filtered by this attribute`,
+								],
+					),
 				)
 
 				return {
@@ -109,7 +120,7 @@ export function registerExploreAttributesTool(server: McpToolRegistrar) {
 
 				const lines: string[] = [
 					`## Available Environments & Deployments`,
-					`Time range: ${st} — ${et}${formatClampNote(range)}`,
+					`Time range: ${st} — ${et}`,
 					``,
 				]
 
@@ -171,7 +182,7 @@ export function registerExploreAttributesTool(server: McpToolRegistrar) {
 			const lines: string[] = [
 				`## Attribute Keys`,
 				`Source: ${params.source} (${scope})`,
-				`Time range: ${st} — ${et}${formatClampNote(range)}`,
+				`Time range: ${st} — ${et}`,
 				``,
 			]
 

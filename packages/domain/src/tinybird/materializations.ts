@@ -8,6 +8,7 @@ import {
 	serviceExternalEdgesHourly,
 	servicePlatformsHourly,
 	serviceOverviewSpans,
+	serviceOverviewHourly,
 	errorSpans,
 	errorEvents,
 	errorEventsByTime,
@@ -19,13 +20,17 @@ import {
 	logsAggregatesHourly,
 	metricCatalog,
 	spanMetricsCallsHourly,
+	serviceOperationsMinutely,
+	serviceOperationsHourly,
 } from "./datasources"
 import {
+	DB_NAMESPACE_ATTR_SQL,
 	DB_QUERY_KEY_SQL,
 	DB_QUERY_LABEL_SQL,
 	DB_STATEMENT_SQL,
 	DB_SYSTEM_ATTR_SQL,
 } from "./db-query-shape-sql"
+import { NORMALIZED_SPAN_NAME_SQL } from "./span-display-name"
 
 /**
  * Materialized view to aggregate log usage statistics per service per hour
@@ -295,6 +300,42 @@ export const serviceOverviewSpansMv = defineMaterializedView("service_overview_s
 })
 
 /**
+ * Durable service-level rollup for one-year overview and catalog queries.
+ * Entry-point semantics intentionally match service_overview_spans_mv.
+ */
+export const serviceOverviewHourlyMv = defineMaterializedView("service_overview_hourly_mv", {
+	description:
+		"Pre-aggregates service entry-point spans hourly by environment, namespace, and commit for one-year service history.",
+	datasource: serviceOverviewHourly,
+	nodes: [
+		node({
+			name: "service_overview_hourly_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(toDateTime(Timestamp)) AS Hour,
+          ServiceName,
+          ResourceAttributes['deployment.environment'] AS DeploymentEnv,
+          ResourceAttributes['service.namespace'] AS ServiceNamespace,
+          ResourceAttributes['deployment.commit_sha'] AS CommitSha,
+          count() AS SpanCount,
+          sum(SampleRate) AS EstimatedSpanCount,
+          countIf(StatusCode = 'Error') AS ErrorCount,
+          sumIf(SampleRate, StatusCode = 'Error') AS EstimatedErrorCount,
+          sum(toFloat64(Duration)) AS DurationSum,
+          quantilesTDigestState(0.5, 0.95, 0.99)(Duration) AS DurationQuantiles,
+          min(toDateTime(Timestamp)) AS FirstSeen,
+          countIf(StatusCode != 'Error' AND Duration < 500000000) AS ApdexSatisfiedCount,
+          countIf(StatusCode != 'Error' AND Duration >= 500000000 AND Duration < 2000000000) AS ApdexToleratingCount
+        FROM traces
+        WHERE SpanKind IN ('Server', 'Consumer') OR ParentSpanId = ''
+        GROUP BY OrgId, Hour, ServiceName, DeploymentEnv, ServiceNamespace, CommitSha
+      `,
+		}),
+	],
+})
+
+/**
  * Materialized view populating trace_list_mv from root spans.
  * Pre-extracts HTTP attributes from SpanAttributes and normalizes span names
  * so the trace list query avoids scanning heavy Map columns and GROUP BY.
@@ -349,9 +390,16 @@ export const serviceMapChildrenMv = defineMaterializedView("service_map_children
 
 /**
  * Materialized view pre-aggregating service-to-database edges per hour.
- * Aggregates Client/Producer spans with `db.system.name` set into hourly
+ * Aggregates Client/Producer spans with a database system set into hourly
  * buckets at write time so the database-node query reads pre-aggregated rows
  * instead of scanning raw span attributes.
+ *
+ * `DbSystem` uses the `db.system.name` → `db.system` coalesce (`DB_SYSTEM_ATTR_SQL`),
+ * matching `service_map_db_query_shapes_hourly_mv`, so spans that emit only the
+ * legacy `db.system` attribute are captured here too. `DbNamespace`
+ * (`DB_NAMESPACE_ATTR_SQL`: `db.namespace` → `db.name` → `server.address` →
+ * `net.peer.name`) splits distinct databases of the same system into distinct
+ * service-map nodes; '' when the instrumentation identifies none.
  */
 export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_edges_hourly_mv", {
 	description:
@@ -365,7 +413,8 @@ export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_
           OrgId,
           toStartOfHour(toDateTime(Timestamp)) AS Hour,
           ServiceName,
-          SpanAttributes['db.system.name'] AS DbSystem,
+          ${DB_SYSTEM_ATTR_SQL} AS DbSystem,
+          ${DB_NAMESPACE_ATTR_SQL} AS DbNamespace,
           ResourceAttributes['deployment.environment'] AS DeploymentEnv,
           count() AS CallCount,
           countIf(StatusCode = 'Error') AS ErrorCount,
@@ -376,9 +425,9 @@ export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_
           sum(SampleRate) AS SampleRateSum
         FROM traces
         WHERE SpanKind IN ('Client', 'Producer')
-          AND SpanAttributes['db.system.name'] != ''
+          AND ${DB_SYSTEM_ATTR_SQL} != ''
           AND ServiceName != ''
-        GROUP BY OrgId, Hour, ServiceName, DbSystem, DeploymentEnv
+        GROUP BY OrgId, Hour, ServiceName, DbSystem, DbNamespace, DeploymentEnv
       `,
 		}),
 	],
@@ -392,9 +441,8 @@ export const serviceMapDbEdgesHourlyMv = defineMaterializedView("service_map_db_
  * and rolls up call/error/sample counts plus a sample-weighted t-digest of
  * duration.
  *
- * NOTE: `DbSystem` uses the `db.system.name` → `db.system` coalesce (unlike the
- * older `service_map_db_edges_hourly_mv`, which keys on `db.system.name` only
- * and silently misses spans that set just the legacy `db.system`).
+ * NOTE: `DbSystem` uses the `db.system.name` → `db.system` coalesce
+ * (`DB_SYSTEM_ATTR_SQL`), the same as `service_map_db_edges_hourly_mv`.
  */
 export const serviceMapDbQueryShapesHourlyMv = defineMaterializedView(
 	"service_map_db_query_shapes_hourly_mv",
@@ -411,6 +459,7 @@ export const serviceMapDbQueryShapesHourlyMv = defineMaterializedView(
           toStartOfHour(toDateTime(Timestamp)) AS Hour,
           ServiceName,
           ${DB_SYSTEM_ATTR_SQL} AS DbSystem,
+          ${DB_NAMESPACE_ATTR_SQL} AS DbNamespace,
           ResourceAttributes['deployment.environment'] AS DeploymentEnv,
           ${DB_QUERY_KEY_SQL} AS QueryKey,
           any(substring(${DB_QUERY_LABEL_SQL}, 1, 220)) AS QueryLabel,
@@ -425,7 +474,7 @@ export const serviceMapDbQueryShapesHourlyMv = defineMaterializedView(
         WHERE SpanKind IN ('Client', 'Producer')
           AND ${DB_SYSTEM_ATTR_SQL} != ''
           AND ServiceName != ''
-        GROUP BY OrgId, Hour, ServiceName, DbSystem, DeploymentEnv, QueryKey
+        GROUP BY OrgId, Hour, ServiceName, DbSystem, DbNamespace, DeploymentEnv, QueryKey
       `,
 			}),
 		],
@@ -447,16 +496,14 @@ export const serviceMapDbQueryShapesHourlyMv = defineMaterializedView(
  * `server.address` → `http.host` → `url.authority` — modern OTel SDKs emit
  * `server.address`; legacy ones still emit `http.host`; some emit `url.authority`.
  */
-export const serviceExternalEdgesHourlyMv = defineMaterializedView(
-	"service_external_edges_hourly_mv",
-	{
-		description:
-			"Pre-aggregates Client/Producer spans without db.system.name into hourly service-to-external-target edges (http / messaging / rpc) for the service-detail Dependencies tab.",
-		datasource: serviceExternalEdgesHourly,
-		nodes: [
-			node({
-				name: "service_external_edges_hourly_mv_node",
-				sql: `
+export const serviceExternalEdgesHourlyMv = defineMaterializedView("service_external_edges_hourly_mv", {
+	description:
+		"Pre-aggregates Client/Producer spans without db.system.name into hourly service-to-external-target edges (http / messaging / rpc) for the service-detail Dependencies tab.",
+	datasource: serviceExternalEdgesHourly,
+	nodes: [
+		node({
+			name: "service_external_edges_hourly_mv_node",
+			sql: `
         SELECT
           OrgId,
           toStartOfHour(toDateTime(Timestamp)) AS Hour,
@@ -504,10 +551,9 @@ export const serviceExternalEdgesHourlyMv = defineMaterializedView(
         GROUP BY OrgId, Hour, ServiceName, TargetType, TargetSystem, TargetName, DeploymentEnv
         HAVING TargetName != ''
       `,
-			}),
-		],
-	},
-)
+		}),
+	],
+})
 
 /**
  * Materialized view pre-aggregating per-service hosting-platform attributes per hour.
@@ -1172,6 +1218,69 @@ export const tracesAggregatesHourlyMv = defineMaterializedView("traces_aggregate
           max(Duration) AS DurationMax
         FROM traces
         GROUP BY OrgId, Hour, ServiceName, SpanName, SpanKind, StatusCode, IsEntryPoint, DeploymentEnv
+      `,
+		}),
+	],
+})
+
+/**
+ * Precomputes the operation display name and minute-grain aggregates used by
+ * the service detail page. All spans are included: internal operations are a
+ * deliberate part of the ranking, matching the previous raw query.
+ */
+export const serviceOperationsMinutelyMv = defineMaterializedView("service_operations_minutely_mv", {
+	description:
+		"Pre-aggregates every span by service operation and minute with normalized HTTP names, exact/estimated counts, errors, duration sum, and unweighted t-digest state.",
+	datasource: serviceOperationsMinutely,
+	nodes: [
+		node({
+			name: "service_operations_minutely_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfMinute(toDateTime(Timestamp)) AS Minute,
+          ServiceName,
+          ResourceAttributes['deployment.environment'] AS DeploymentEnv,
+          ${NORMALIZED_SPAN_NAME_SQL} AS SpanName,
+          count() AS SpanCount,
+          sum(SampleRate) AS EstimatedSpanCount,
+          countIf(StatusCode = 'Error') AS ErrorCount,
+          sumIf(SampleRate, StatusCode = 'Error') AS EstimatedErrorCount,
+          sum(toFloat64(Duration)) AS DurationSum,
+          quantilesTDigestState(0.5, 0.95)(Duration) AS DurationQuantiles
+        FROM traces
+        GROUP BY OrgId, Minute, ServiceName, DeploymentEnv, SpanName
+      `,
+		}),
+	],
+})
+
+/**
+ * Cascading hourly rollup. It consumes the already-normalized minutely insert
+ * stream, so HTTP route normalization happens once and the t-digest state is
+ * merged rather than finalized and rebuilt.
+ */
+export const serviceOperationsHourlyMv = defineMaterializedView("service_operations_hourly_mv", {
+	description: "Merges minutely service-operation aggregates into an hour-grain one-year rollup.",
+	datasource: serviceOperationsHourly,
+	nodes: [
+		node({
+			name: "service_operations_hourly_mv_node",
+			sql: `
+        SELECT
+          OrgId,
+          toStartOfHour(Minute) AS Hour,
+          ServiceName,
+          DeploymentEnv,
+          SpanName,
+          sum(SpanCount) AS SpanCount,
+          sum(EstimatedSpanCount) AS EstimatedSpanCount,
+          sum(ErrorCount) AS ErrorCount,
+          sum(EstimatedErrorCount) AS EstimatedErrorCount,
+          sum(DurationSum) AS DurationSum,
+          quantilesTDigestMergeState(0.5, 0.95)(DurationQuantiles) AS DurationQuantiles
+        FROM service_operations_minutely
+        GROUP BY OrgId, Hour, ServiceName, DeploymentEnv, SpanName
       `,
 		}),
 	],

@@ -1,6 +1,5 @@
 import type { ReactNode } from "react"
 import { Spinner } from "@maple/ui/components/ui/spinner"
-import { Separator } from "@maple/ui/components/ui/separator"
 import {
 	ClockIcon,
 	CircleWarningIcon,
@@ -15,20 +14,27 @@ import type { SessionReplaysListOutput } from "@maple/query-engine/ch"
 import { useLocalSessions, useLocalSessionFacets } from "../hooks/use-local-sessions"
 import { useQueryParams } from "../lib/router"
 import { DEFAULT_RANGE, formatRelativeTime } from "../lib/time"
-import { gradientFor, hostFromUrl, isMobileDevice, formatSessionDuration } from "../lib/replay-format"
+import { formatSessionDuration, gradientFor, hostFromUrl, isMobileDevice } from "@maple/ui/lib/replay-format"
 import {
 	FilterSection,
 	SearchableFilterSection,
 	SingleCheckboxFilter,
 	type FilterOption,
-} from "../components/filter-section"
+} from "@maple/ui/components/filters/filter-section"
 import {
 	FilterSidebarBody,
 	FilterSidebarFrame,
 	FilterSidebarHeader,
-} from "../components/filter-sidebar"
+} from "@maple/ui/components/filters/filter-sidebar"
 import { PageShell } from "../components/page-shell"
-import { Toolbar, ToolbarSearch, ToolbarStat, TimeRangeSelect } from "../components/toolbar"
+import {
+	Toolbar,
+	ToolbarSearch,
+	ToolbarStat,
+	ToolbarStats,
+	TimeRangeSelect,
+	RefreshButton,
+} from "../components/toolbar"
 import { EmptyState, ErrorState, ListSkeleton } from "../components/view-states"
 
 interface SessionsListViewProps {
@@ -62,7 +68,7 @@ export function SessionsListView({ onSelectSession }: SessionsListViewProps) {
 	const facetData = facets.data
 
 	const sidebar = (
-		<FilterSidebarFrame waiting={facets.isFetching}>
+		<FilterSidebarFrame className="w-56 shrink-0 px-4" waiting={facets.isFetching}>
 			<FilterSidebarHeader
 				canClear={hasActiveFilters}
 				onClear={() => setParams({ service: null, browser: null, device: null, errors: null })}
@@ -74,65 +80,47 @@ export function SessionsListView({ onSelectSession }: SessionsListViewProps) {
 					onChange={(checked) => setParams({ errors: checked ? "1" : null })}
 					count={facetData?.errorCount}
 				/>
-				{facetData && facetData.service.length > 0 && (
-					<>
-						<Separator className="my-2" />
-						<SearchableFilterSection
-							title="Service"
-							options={withSelected(facetData.service, service)}
-							selected={service ? [service] : []}
-							onChange={(vals) => setSingle("service", vals)}
-						/>
-					</>
-				)}
-				{facetData && facetData.browser.length > 0 && (
-					<>
-						<Separator className="my-2" />
-						<SearchableFilterSection
-							title="Browser"
-							options={withSelected(facetData.browser, browser)}
-							selected={browser ? [browser] : []}
-							onChange={(vals) => setSingle("browser", vals)}
-						/>
-					</>
-				)}
-				{facetData && facetData.device.length > 0 && (
-					<>
-						<Separator className="my-2" />
-						<FilterSection
-							title="Device"
-							options={withSelected(facetData.device, device)}
-							selected={device ? [device] : []}
-							onChange={(vals) => setSingle("device", vals)}
-						/>
-					</>
-				)}
+				<SearchableFilterSection
+					title="Service"
+					options={facetData ? withSelected(facetData.service, service) : []}
+					selected={service ? [service] : []}
+					onChange={(vals) => setSingle("service", vals)}
+				/>
+				<SearchableFilterSection
+					title="Browser"
+					options={facetData ? withSelected(facetData.browser, browser) : []}
+					selected={browser ? [browser] : []}
+					onChange={(vals) => setSingle("browser", vals)}
+				/>
+				<FilterSection
+					title="Device"
+					options={facetData ? withSelected(facetData.device, device) : []}
+					selected={device ? [device] : []}
+					onChange={(vals) => setSingle("device", vals)}
+				/>
 			</FilterSidebarBody>
 		</FilterSidebarFrame>
 	)
 
 	const toolbar = (
-		<Toolbar
-			search={
-				<ToolbarSearch
-					query={search ?? ""}
-					onSearch={(value) => setParams({ q: value ?? null })}
-					placeholder="Search by URL…"
+		<Toolbar>
+			<ToolbarSearch
+				query={search ?? ""}
+				onSearch={(value) => setParams({ q: value ?? null })}
+				placeholder="Search by URL…"
+			/>
+			<ToolbarStats>
+				<ToolbarStat value={sessions.length} label={hasNextPage ? "sessions+" : "sessions"} />
+				<ToolbarStat
+					value={sessions.filter((s) => s.status === "active").length}
+					label="active"
+					dot
 				/>
-			}
-			stats={
-				<>
-					<ToolbarStat value={sessions.length} label={hasNextPage ? "sessions+" : "sessions"} />
-					<ToolbarStat
-						value={sessions.filter((s) => s.status === "active").length}
-						label="active"
-						dot
-					/>
-					<ToolbarStat value={facetData?.errorCount ?? 0} label="with errors" danger />
-					<TimeRangeSelect value={range} onChange={(next) => setParams({ range: next })} />
-				</>
-			}
-		/>
+				<ToolbarStat value={facetData?.errorCount ?? 0} label="with errors" danger />
+				<RefreshButton />
+				<TimeRangeSelect value={range} onChange={(next) => setParams({ range: next })} />
+			</ToolbarStats>
+		</Toolbar>
 	)
 
 	return (
@@ -192,13 +180,7 @@ export function SessionsListView({ onSelectSession }: SessionsListViewProps) {
 	)
 }
 
-function SessionCard({
-	session,
-	onSelect,
-}: {
-	session: SessionReplaysListOutput
-	onSelect: () => void
-}) {
+function SessionCard({ session, onSelect }: { session: SessionReplaysListOutput; onSelect: () => void }) {
 	const label = session.userId || "Anonymous"
 	const initial = (label[0] ?? "?").toUpperCase()
 	const isActive = session.status === "active"

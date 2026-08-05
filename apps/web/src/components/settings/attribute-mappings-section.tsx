@@ -1,17 +1,13 @@
 import { Result, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
-import {
-	CreateIngestAttributeMappingRequest,
-	UpdateIngestAttributeMappingRequest,
-} from "@maple/domain/http"
 import type {
-	IngestAttributeMapping,
 	IngestAttributeMappingId,
 	IngestMappingOperation,
 	IngestMappingSourceContext,
 } from "@maple/domain/http"
+import type { V2AttributeMapping } from "@maple/domain/http/v2"
 import { useState } from "react"
 import { Exit } from "effect"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
 import {
 	AlertDialog,
@@ -25,14 +21,6 @@ import {
 } from "@maple/ui/components/ui/alert-dialog"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Button } from "@maple/ui/components/ui/button"
-import {
-	Card,
-	CardAction,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@maple/ui/components/ui/card"
 import {
 	Dialog,
 	DialogContent,
@@ -63,8 +51,8 @@ import {
 	PlusIcon,
 	TrashIcon,
 } from "@/components/icons"
-import { formatRelativeTime } from "@/lib/format"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
 import {
 	ingestAttributeMappingsListAtom,
 	recommendationIssuesListAtom,
@@ -72,6 +60,7 @@ import {
 import { AttributeKeyAutocomplete } from "./attribute-key-autocomplete"
 
 const MONO = "font-mono text-[0.92em] text-muted-foreground"
+const COL_HEADER = "text-muted-foreground/70 font-mono text-[10px] uppercase tracking-[0.12em]"
 
 const SOURCE_CONTEXT_LABELS: Record<IngestMappingSourceContext, string> = {
 	span: "Span attribute",
@@ -101,9 +90,9 @@ export function AttributeMappingsSection() {
 	const [dialogOpen, setDialogOpen] = useState(false)
 	const [isSaving, setIsSaving] = useState(false)
 	const [togglingId, setTogglingId] = useState<IngestAttributeMappingId | null>(null)
-	const [deleteConfirm, setDeleteConfirm] = useState<IngestAttributeMapping | null>(null)
+	const [deleteConfirm, setDeleteConfirm] = useState<V2AttributeMapping | null>(null)
 
-	const [editing, setEditing] = useState<IngestAttributeMapping | null>(null)
+	const [editing, setEditing] = useState<V2AttributeMapping | null>(null)
 	const [formName, setFormName] = useState("")
 	const [formSourceContext, setFormSourceContext] = useState<IngestMappingSourceContext>("span")
 	const [formSourceKey, setFormSourceKey] = useState("")
@@ -115,19 +104,19 @@ export function AttributeMappingsSection() {
 	// Mappings reconcile the recommendation list server-side, so refresh both after a change.
 	const refreshRecommendations = useAtomRefresh(recommendationIssuesListAtom)
 
-	const createMutation = useAtomSet(MapleApiAtomClient.mutation("ingestAttributeMappings", "create"), {
+	const createMutation = useAtomSet(MapleApiV2AtomClient.mutation("attributeMappings", "create"), {
 		mode: "promiseExit",
 	})
-	const updateMutation = useAtomSet(MapleApiAtomClient.mutation("ingestAttributeMappings", "update"), {
+	const updateMutation = useAtomSet(MapleApiV2AtomClient.mutation("attributeMappings", "update"), {
 		mode: "promiseExit",
 	})
-	const deleteMutation = useAtomSet(MapleApiAtomClient.mutation("ingestAttributeMappings", "delete"), {
+	const deleteMutation = useAtomSet(MapleApiV2AtomClient.mutation("attributeMappings", "delete"), {
 		mode: "promiseExit",
 	})
 
 	const mappings = Result.builder(listResult)
-		.onSuccess((response) => [...response.mappings])
-		.orElse(() => [] as IngestAttributeMapping[])
+		.onSuccess((response) => [...response.data])
+		.orElse(() => [] as V2AttributeMapping[])
 
 	function openAddDialog() {
 		setEditing(null)
@@ -139,59 +128,59 @@ export function AttributeMappingsSection() {
 		setDialogOpen(true)
 	}
 
-	function openEditDialog(mapping: IngestAttributeMapping) {
+	function openEditDialog(mapping: V2AttributeMapping) {
 		setEditing(mapping)
 		setFormName(mapping.name)
-		setFormSourceContext(mapping.sourceContext)
-		setFormSourceKey(mapping.sourceKey)
-		setFormTargetKey(mapping.targetKey)
+		setFormSourceContext(mapping.source_context)
+		setFormSourceKey(mapping.source_key)
+		setFormTargetKey(mapping.target_key)
 		setFormOperation(mapping.operation)
 		setDialogOpen(true)
 	}
 
 	async function handleSave() {
 		if (!formName.trim() || !formSourceKey.trim() || !formTargetKey.trim()) {
-			toast.error("Name, source key, and target key are required")
+			toastManager.add({ title: "Name, source key, and target key are required", type: "error" })
 			return
 		}
 
 		setIsSaving(true)
 		if (editing) {
 			const result = await updateMutation({
-				params: { mappingId: editing.id },
-				payload: new UpdateIngestAttributeMappingRequest({
+				params: { id: editing.id },
+				payload: {
 					name: formName.trim(),
-					sourceContext: formSourceContext,
-					sourceKey: formSourceKey.trim(),
-					targetKey: formTargetKey.trim(),
+					source_context: formSourceContext,
+					source_key: formSourceKey.trim(),
+					target_key: formTargetKey.trim(),
 					operation: formOperation,
-				}),
+				},
 			})
 			if (Exit.isSuccess(result)) {
-				toast.success("Attribute mapping updated")
+				toastManager.add({ title: "Attribute mapping updated", type: "success" })
 				setDialogOpen(false)
 				refreshMappings()
 				refreshRecommendations()
 			} else {
-				toast.error("Failed to update attribute mapping")
+				toastManager.add({ title: "Failed to update attribute mapping", type: "error" })
 			}
 		} else {
 			const result = await createMutation({
-				payload: new CreateIngestAttributeMappingRequest({
+				payload: {
 					name: formName.trim(),
-					sourceContext: formSourceContext,
-					sourceKey: formSourceKey.trim(),
-					targetKey: formTargetKey.trim(),
+					source_context: formSourceContext,
+					source_key: formSourceKey.trim(),
+					target_key: formTargetKey.trim(),
 					operation: formOperation,
-				}),
+				},
 			})
 			if (Exit.isSuccess(result)) {
-				toast.success("Attribute mapping created")
+				toastManager.add({ title: "Attribute mapping created", type: "success" })
 				setDialogOpen(false)
 				refreshMappings()
 				refreshRecommendations()
 			} else {
-				toast.error("Failed to create attribute mapping")
+				toastManager.add({ title: "Failed to create attribute mapping", type: "error" })
 			}
 		}
 		setIsSaving(false)
@@ -199,28 +188,28 @@ export function AttributeMappingsSection() {
 
 	async function handleDelete(mappingId: IngestAttributeMappingId) {
 		setDeleteConfirm(null)
-		const result = await deleteMutation({ params: { mappingId } })
+		const result = await deleteMutation({ params: { id: mappingId } })
 		if (Exit.isSuccess(result)) {
-			toast.success("Attribute mapping deleted")
+			toastManager.add({ title: "Attribute mapping deleted", type: "success" })
 			refreshMappings()
 			refreshRecommendations()
 		} else {
-			toast.error("Failed to delete attribute mapping")
+			toastManager.add({ title: "Failed to delete attribute mapping", type: "error" })
 		}
 	}
 
-	async function handleToggleEnabled(mapping: IngestAttributeMapping) {
+	async function handleToggleEnabled(mapping: V2AttributeMapping) {
 		setTogglingId(mapping.id)
 		const result = await updateMutation({
-			params: { mappingId: mapping.id },
-			payload: new UpdateIngestAttributeMappingRequest({
+			params: { id: mapping.id },
+			payload: {
 				enabled: !mapping.enabled,
-			}),
+			},
 		})
 		if (Exit.isSuccess(result)) {
 			refreshMappings()
 		} else {
-			toast.error("Failed to update attribute mapping")
+			toastManager.add({ title: "Failed to update attribute mapping", type: "error" })
 		}
 		setTogglingId(null)
 	}
@@ -232,30 +221,32 @@ export function AttributeMappingsSection() {
 
 	return (
 		<>
-			<Card>
-				<CardHeader>
-					<CardTitle className="flex items-center gap-2">
-						Attribute Mappings
-						{mappingCount !== null && mappingCount > 0 && (
-							<Badge variant="secondary" className="font-normal tabular-nums">
-								{mappingCount}
-							</Badge>
-						)}
-					</CardTitle>
-					<CardDescription>
-						Rename or promote span attribute keys at ingest so telemetry from different SDKs
-						stays consistent. Applied only to spans received after a rule is saved.
-					</CardDescription>
-					<CardAction>
-						<Button size="sm" onClick={openAddDialog}>
-							<PlusIcon size={14} />
-							Add Mapping
-						</Button>
-					</CardAction>
-				</CardHeader>
-				<CardContent>
+			<div className="bg-card flex flex-col rounded-lg border">
+				<div className="flex items-start gap-3 px-4 pt-4 pb-3">
+					<div className="flex flex-col gap-1">
+						<h3 className="text-sm font-medium">
+							Attribute mappings
+							{mappingCount !== null && mappingCount > 0 && (
+								<span className="text-muted-foreground font-normal tabular-nums">
+									{" "}
+									· {mappingCount}
+								</span>
+							)}
+						</h3>
+						<p className="text-muted-foreground text-xs">
+							Rename or promote span attribute keys at ingest. Applied only to spans received
+							after a rule is saved.
+						</p>
+					</div>
+					<div className="grow" />
+					<Button variant="outline" size="sm" className="shrink-0" onClick={openAddDialog}>
+						<PlusIcon size={14} />
+						Add mapping
+					</Button>
+				</div>
+				<div className="border-t">
 					{Result.isInitial(listResult) ? (
-						<div className="space-y-px">
+						<div className="space-y-px px-4">
 							{[0, 1].map((i) => (
 								<div key={i} className="flex items-center gap-4 py-3">
 									<div className="flex-1 space-y-2">
@@ -296,96 +287,97 @@ export function AttributeMappingsSection() {
 							</EmptyHeader>
 							<Button size="sm" onClick={openAddDialog}>
 								<PlusIcon size={14} />
-								Add Mapping
+								Add mapping
 							</Button>
 						</Empty>
 					) : (
 						<div>
 							{/* column header */}
-							<div className="text-muted-foreground border-border/60 -mx-6 flex items-center gap-4 border-b px-6 pt-1 pb-2 text-xs">
-								<div className="w-44 shrink-0">Name</div>
-								<div className="flex-1">Mapping</div>
-								<div className="w-24 shrink-0">Operation</div>
-								<div className="w-40 shrink-0 text-right">Added</div>
+							<div className="flex items-center gap-3 px-4 py-1.5">
+								<div className={cn(COL_HEADER, "w-44 shrink-0")}>Name</div>
+								<div className={cn(COL_HEADER, "flex-1")}>Rule</div>
+								<div className={cn(COL_HEADER, "hidden w-24 shrink-0 md:block")}>
+									Operation
+								</div>
+								<div className={cn(COL_HEADER, "hidden w-20 shrink-0 md:block")}>Context</div>
+								<div className="w-28 shrink-0" />
 							</div>
 
 							{mappings.map((mapping) => {
 								const operation = OPERATION_BADGE[mapping.operation]
-								const OperationIcon = operation.icon
 								return (
-								<div
-									key={mapping.id}
-									className={cn(
-										"group border-border/60 hover:bg-muted/40 -mx-6 flex items-center gap-4 border-b px-6 py-2.5 transition-colors last:border-b-0",
-										!mapping.enabled && "opacity-55",
-									)}
-								>
-									<span className="w-44 shrink-0 truncate text-sm font-medium" title={mapping.name}>
-										{mapping.name}
-									</span>
-
-									<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-sm">
-										<code className={MONO}>{mapping.sourceKey}</code>
-										<ArrowRightIcon size={12} className="text-muted-foreground shrink-0" />
-										<code className="font-mono text-[0.92em] text-foreground">
-											{mapping.targetKey}
-										</code>
-										{mapping.sourceContext === "resource" && (
-											<span className="text-muted-foreground text-xs">
-												· from {SOURCE_CONTEXT_LABELS.resource.toLowerCase()}
-											</span>
+									<div
+										key={mapping.id}
+										className={cn(
+											"group hover:bg-muted/20 flex items-center gap-3 border-t px-4 py-2.5 transition-colors",
+											!mapping.enabled && "opacity-55",
 										)}
-									</div>
-
-									<div className="w-24 shrink-0">
-										<Badge variant={operation.variant} className="gap-1">
-											<OperationIcon size={11} />
-											{OPERATION_LABELS[mapping.operation]}
-										</Badge>
-									</div>
-
-									<div className="relative flex w-40 shrink-0 items-center justify-end gap-3">
-										<Switch
-											checked={mapping.enabled}
-											onCheckedChange={() => handleToggleEnabled(mapping)}
-											disabled={togglingId === mapping.id}
-										/>
-										<span
-											className="text-muted-foreground w-20 text-right text-xs whitespace-nowrap tabular-nums transition-opacity group-hover:opacity-0"
-											title={new Date(mapping.createdAt).toLocaleString()}
-										>
-											{formatRelativeTime(mapping.createdAt)}
+									>
+										<span className="w-44 shrink-0 truncate text-sm" title={mapping.name}>
+											{mapping.name}
 										</span>
-										<div className="absolute right-0 flex items-center gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-											<Button
-												variant="ghost"
-												size="icon-sm"
-												className="text-muted-foreground hover:text-foreground"
-												onClick={() => openEditDialog(mapping)}
-												aria-label="Edit mapping"
-												title="Edit"
-											>
-												<PencilIcon size={14} />
-											</Button>
-											<Button
-												variant="ghost"
-												size="icon-sm"
-												className="text-muted-foreground hover:text-destructive"
-												onClick={() => setDeleteConfirm(mapping)}
-												aria-label="Delete mapping"
-												title="Delete"
-											>
-												<TrashIcon size={14} />
-											</Button>
+
+										<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-sm">
+											<code className={MONO}>{mapping.source_key}</code>
+											<ArrowRightIcon
+												size={12}
+												className="text-muted-foreground shrink-0"
+											/>
+											<code className="font-mono text-[0.92em] text-foreground">
+												{mapping.target_key}
+											</code>
+										</div>
+
+										<span
+											className={cn(
+												"hidden w-24 shrink-0 font-mono text-[10px] font-medium uppercase tracking-[0.12em] md:block",
+												operation.tone,
+											)}
+										>
+											{OPERATION_LABELS[mapping.operation]}
+										</span>
+
+										<span className="text-muted-foreground hidden w-20 shrink-0 text-xs md:block">
+											{mapping.source_context === "resource" ? "Resource" : "Spans"}
+										</span>
+
+										<div className="flex w-28 shrink-0 items-center justify-end gap-1.5">
+											<div className="flex items-center gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+												<Button
+													variant="ghost"
+													size="icon-sm"
+													className="text-muted-foreground hover:text-foreground"
+													onClick={() => openEditDialog(mapping)}
+													aria-label="Edit mapping"
+													title="Edit"
+												>
+													<PencilIcon size={14} />
+												</Button>
+												<Button
+													variant="ghost"
+													size="icon-sm"
+													className="text-muted-foreground hover:text-destructive"
+													onClick={() => setDeleteConfirm(mapping)}
+													aria-label="Delete mapping"
+													title="Delete"
+												>
+													<TrashIcon size={14} />
+												</Button>
+											</div>
+											<Switch
+												checked={mapping.enabled}
+												onCheckedChange={() => handleToggleEnabled(mapping)}
+												disabled={togglingId === mapping.id}
+												title={`Added ${formatRelativeTime(mapping.created_at)}`}
+											/>
 										</div>
 									</div>
-								</div>
 								)
 							})}
 						</div>
 					)}
-				</CardContent>
-			</Card>
+				</div>
+			</div>
 
 			{/* Add / Edit Dialog */}
 			<Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -394,7 +386,9 @@ export function AttributeMappingsSection() {
 						<div className="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-lg">
 							<ArrowUpDownIcon size={18} />
 						</div>
-						<DialogTitle>{editing ? "Edit Attribute Mapping" : "Add Attribute Mapping"}</DialogTitle>
+						<DialogTitle>
+							{editing ? "Edit Attribute Mapping" : "Add Attribute Mapping"}
+						</DialogTitle>
 						<DialogDescription>
 							The value at the source key is written to the target span attribute. An existing
 							target key is never overwritten.
@@ -423,7 +417,8 @@ export function AttributeMappingsSection() {
 									<SelectValue placeholder="Select source context">
 										{(value: string | null) => {
 											const ctx =
-												(value as IngestMappingSourceContext | null) ?? formSourceContext
+												(value as IngestMappingSourceContext | null) ??
+												formSourceContext
 											const Icon = SOURCE_CONTEXT_ICON[ctx]
 											return (
 												<span className="flex items-center gap-2">
@@ -482,7 +477,8 @@ export function AttributeMappingsSection() {
 								<SelectTrigger className="w-full">
 									<SelectValue placeholder="Select operation">
 										{(value: string | null) => {
-											const op = (value as IngestMappingOperation | null) ?? formOperation
+											const op =
+												(value as IngestMappingOperation | null) ?? formOperation
 											const meta = OPERATION_BADGE[op]
 											const Icon = meta.icon
 											return (
@@ -499,7 +495,10 @@ export function AttributeMappingsSection() {
 										<span className="flex items-center gap-2">
 											<CopyIcon className="text-info" />
 											<span>
-												Copy <span className="text-muted-foreground">— keep source key</span>
+												Copy{" "}
+												<span className="text-muted-foreground">
+													— keep source key
+												</span>
 											</span>
 										</span>
 									</SelectItem>
@@ -508,7 +507,9 @@ export function AttributeMappingsSection() {
 											<ArrowRightFromLineIcon className="text-warning" />
 											<span>
 												Move{" "}
-												<span className="text-muted-foreground">— remove source key</span>
+												<span className="text-muted-foreground">
+													— remove source key
+												</span>
 											</span>
 										</span>
 									</SelectItem>

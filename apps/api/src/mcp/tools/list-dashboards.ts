@@ -1,10 +1,10 @@
 import { McpQueryError, optionalStringParam, type McpToolRegistrar } from "./types"
-import { formatTable } from "../lib/format"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatTable } from "@/mcp/lib/format"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
+import { DashboardPersistenceService } from "@/services/dashboards/DashboardPersistenceService"
 
 export function registerListDashboardsTool(server: McpToolRegistrar) {
 	server.tool(
@@ -22,7 +22,7 @@ export function registerListDashboardsTool(server: McpToolRegistrar) {
 					(error) =>
 						new McpQueryError({
 							message: error.message,
-							pipe: "list_dashboards",
+							pipeName: "list_dashboards",
 							cause: error,
 						}),
 				),
@@ -38,7 +38,7 @@ export function registerListDashboardsTool(server: McpToolRegistrar) {
 			yield* Effect.annotateCurrentSpan({
 				orgId: tenant.orgId,
 				search: search ?? "none",
-				resultCount: dashboards.length,
+				"result.rowCount": dashboards.length,
 			})
 
 			const lines: string[] = [

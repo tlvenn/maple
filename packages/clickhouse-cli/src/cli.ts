@@ -22,9 +22,16 @@
  *   MAPLE_CH_URL, MAPLE_CH_USER, MAPLE_CH_PASSWORD, MAPLE_CH_DATABASE
  */
 
-import { applyMigrations, bundledMigrations, dryRun, listApplied, pendingMigrations } from "./apply"
+import {
+	applyMigrations,
+	bundledMigrations,
+	dryRun,
+	listApplied,
+	pendingMigrations,
+	pendingSchemaFeatures,
+} from "./apply"
 import { ClickHouseError, ping, type ClickHouseConfig } from "./client"
-import { clickHouseProjectRevision } from "@maple/domain/clickhouse"
+import { clickHouseProjectRevision, clickHouseSchemaVersion } from "@maple/domain/clickhouse"
 
 const HELP = `@maple/clickhouse-cli — apply Maple's ClickHouse schema
 
@@ -59,7 +66,13 @@ async function main(argv: ReadonlyArray<string>): Promise<number> {
 
 	if (command === "version") {
 		process.stdout.write(
-			`bundled migrations: ${bundledMigrations.length}\nproject revision:   ${clickHouseProjectRevision}\n`,
+			`bundled migrations: ${bundledMigrations.length}\n` +
+				`schema version:     ${clickHouseSchemaVersion}\n` +
+				`project revision:   ${clickHouseProjectRevision}\n` +
+				`\nNote: this CLI applies the ClickHouse schema but does NOT mark the org\n` +
+				`ready in Maple (it never writes Maple's D1). After applying, open\n` +
+				`Settings → BYO Backend → ClickHouse (or call the schemaDiff endpoint) so\n` +
+				`Maple records schema version ${clickHouseSchemaVersion} and the ingest gateway routes here.\n`,
 		)
 		return 0
 	}
@@ -97,16 +110,28 @@ async function runApply(config: ClickHouseConfig): Promise<number> {
 		// Connectivity smoke-test up front so credential errors surface
 		// before any DDL hits the wire.
 		const version = await ping(config)
-		process.stdout.write(`connected to ClickHouse ${version} as ${config.user}@${config.url}/${config.database}\n`)
+		process.stdout.write(
+			`connected to ClickHouse ${version} as ${config.user}@${config.url}/${config.database}\n`,
+		)
 
 		const result = await applyMigrations(config)
 		for (const m of result.skipped) {
-			process.stdout.write(`  skip   ${m.version}  ${m.description}\n`)
+			process.stdout.write(
+				`  skip   ${m.version}  ${m.description}${m.reason ? ` (${m.reason})` : ""}\n`,
+			)
 		}
 		for (const m of result.applied) {
 			process.stdout.write(`  apply  ${m.version}  ${m.description}\n`)
 		}
-		process.stdout.write(`\n${result.applied.length} applied, ${result.skipped.length} already present.\n`)
+		for (const feature of result.skippedFeatures) {
+			process.stdout.write(`  skip   feature:${feature.id}  ${feature.reason}\n`)
+		}
+		for (const feature of result.appliedFeatures) {
+			process.stdout.write(`  apply  feature:${feature.id}  ${feature.description}\n`)
+		}
+		process.stdout.write(
+			`\n${result.applied.length} migrations and ${result.appliedFeatures.length} features applied.\n`,
+		)
 		return 0
 	} catch (err) {
 		return reportError(err)
@@ -117,6 +142,7 @@ async function runStatus(config: ClickHouseConfig): Promise<number> {
 	try {
 		const applied = await listApplied(config)
 		const pending = await pendingMigrations(config)
+		const features = await pendingSchemaFeatures(config)
 		process.stdout.write("applied:\n")
 		if (applied.length === 0) process.stdout.write("  (none)\n")
 		for (const r of applied) {
@@ -127,6 +153,13 @@ async function runStatus(config: ClickHouseConfig): Promise<number> {
 		for (const m of pending) {
 			process.stdout.write(`  ${m.version}  ${m.description}\n`)
 		}
+		process.stdout.write("\nfeatures:\n")
+		if (features.length === 0) process.stdout.write("  (all reconciled)\n")
+		for (const feature of features) {
+			process.stdout.write(
+				`  ${feature.state.padEnd(11)} feature:${feature.id}  ${feature.reason ?? feature.description}\n`,
+			)
+		}
 		return 0
 	} catch (err) {
 		return reportError(err)
@@ -136,7 +169,10 @@ async function runStatus(config: ClickHouseConfig): Promise<number> {
 async function runDryRun(config: ClickHouseConfig): Promise<number> {
 	try {
 		const plan = await dryRun(config)
-		if (plan.length === 0) {
+		const features = (await pendingSchemaFeatures(config)).filter(
+			(feature) => feature.state === "pending",
+		)
+		if (plan.length === 0 && features.length === 0) {
 			process.stdout.write("nothing to apply — schema is up to date.\n")
 			return 0
 		}
@@ -144,6 +180,16 @@ async function runDryRun(config: ClickHouseConfig): Promise<number> {
 			process.stdout.write(`-- migration ${m.version}\n`)
 			for (const stmt of m.statements) {
 				process.stdout.write(stmt)
+				process.stdout.write(";\n")
+			}
+		}
+		for (const feature of features) {
+			process.stdout.write(`-- feature ${feature.id}: ${feature.description}\n`)
+			if (feature.statements.length === 0) {
+				process.stdout.write(`-- ${feature.reason ?? "bookkeeping only"}\n`)
+			}
+			for (const statement of feature.statements) {
+				process.stdout.write(statement)
 				process.stdout.write(";\n")
 			}
 		}
@@ -200,7 +246,9 @@ function parseFlags(args: ReadonlyArray<string>): Flags {
 main(process.argv.slice(2)).then(
 	(code) => process.exit(code),
 	(err) => {
-		process.stderr.write(`unexpected: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`)
+		process.stderr.write(
+			`unexpected: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+		)
 		process.exit(1)
 	},
 )

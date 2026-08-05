@@ -1,14 +1,17 @@
 import { useEffect, useRef } from "react"
 import { Result, useAtomValue } from "@/lib/effect-atom"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
-import { cn } from "@maple/ui/utils"
+import { cn } from "@maple/ui/lib/utils"
 import { getSeverityColor } from "@maple/ui/lib/severity"
 import type { Log, LogsResponse } from "@/api/warehouse/logs"
 import type { SpanHierarchyResponse } from "@/api/warehouse/traces"
 import { listLogsResultAtom, getSpanHierarchyResultAtom } from "@/lib/services/atoms/warehouse-query-atoms"
 import { disabledResultAtom } from "@/lib/services/atoms/disabled-result-atom"
+import { computeTraceTimeWindow } from "@/lib/trace-time-window"
+import { ServiceDot } from "@maple/ui/components/service-dot"
 
-function formatRelativeMs(ms: number): string {
+/** Span offset within the trace (`+123ms`) — not a relative-time label. */
+function formatTimelineOffset(ms: number): string {
 	if (ms < 1) return "+0ms"
 	if (ms < 1000) return `+${Math.round(ms)}ms`
 	if (ms < 10000) return `+${(ms / 1000).toFixed(1)}s`
@@ -34,9 +37,13 @@ interface LogTraceTimelineProps {
  * `/logs/$logId` page alike.
  */
 export function LogTraceTimeline({ currentLog, onLogSelect }: LogTraceTimelineProps) {
+	// Bound the trace's logs to a window around this log so ClickHouse can prune
+	// partitions (and so logs older than the default 24h window still resolve),
+	// mirroring the span-hierarchy query below.
+	const window = computeTraceTimeWindow(currentLog.timestamp)
 	const logsResult = useAtomValue(
 		currentLog.traceId
-			? listLogsResultAtom({ data: { traceId: currentLog.traceId, limit: 200 } })
+			? listLogsResultAtom({ data: { traceId: currentLog.traceId, limit: 200, ...window } })
 			: disabledResultAtom<LogsResponse>(),
 	)
 	const spansResult = useAtomValue(
@@ -146,11 +153,15 @@ export function LogTraceTimeline({ currentLog, onLogSelect }: LogTraceTimelinePr
 												}}
 											>
 												<span className="text-[10px] text-muted-foreground tabular-nums shrink-0 w-[52px] text-right">
-													{formatRelativeMs(relativeMs)}
+													{formatTimelineOffset(relativeMs)}
 												</span>
 												{log.serviceName !== currentLog.serviceName && (
-													<span className="text-[10px] text-muted-foreground/60 truncate max-w-[72px] shrink-0">
-														{log.serviceName}
+													<span className="flex max-w-[72px] shrink-0 items-center gap-1 truncate text-[10px] text-muted-foreground/60">
+														<ServiceDot
+															serviceName={log.serviceName}
+															className="size-1.5"
+														/>
+														<span className="truncate">{log.serviceName}</span>
 													</span>
 												)}
 												<span

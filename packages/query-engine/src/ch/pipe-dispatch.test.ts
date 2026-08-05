@@ -40,6 +40,7 @@ describe("compilePipeQuery", () => {
 			"metric_attribute_keys",
 			"span_attribute_values",
 			"resource_attribute_values",
+			"metric_attribute_values",
 			"custom_traces_timeseries",
 			"custom_traces_breakdown",
 			"top_operations",
@@ -59,7 +60,6 @@ describe("compilePipeQuery", () => {
 				})
 				expect(result).toBeDefined()
 				expect(result!.sql).toContain("test-org")
-				expect(typeof result!.castRows).toBe("function")
 				expect(typeof result!.decodeRows).toBe("function")
 			})
 		}
@@ -68,6 +68,53 @@ describe("compilePipeQuery", () => {
 	it("returns undefined for unknown pipes", () => {
 		const result = compilePipeQuery("nonexistent_pipe", baseParams())
 		expect(result).toBeUndefined()
+	})
+
+	it("metric_attribute_values reads metric-scoped values for the given key", () => {
+		const result = compilePipeQuery("metric_attribute_values", {
+			...baseParams(),
+			attribute_key: "group",
+			limit: 50,
+		})
+		expect(result).toBeDefined()
+		expect(result!.sql).toContain("attribute_values_hourly")
+		expect(result!.sql).toContain("'metric'")
+		expect(result!.sql).toContain("group")
+	})
+
+	it("metric_attribute_keys routes to the raw table when metric_name + metric_type are set", () => {
+		const result = compilePipeQuery("metric_attribute_keys", {
+			...baseParams(),
+			metric_name: "http.server.duration",
+			metric_type: "gauge",
+		})
+		expect(result).toBeDefined()
+		expect(result!.sql).toContain("metrics_gauge")
+		expect(result!.sql).toContain("arrayJoin(mapKeys(Attributes))")
+		expect(result!.sql).toContain("MetricName = 'http.server.duration'")
+	})
+
+	it("metric_attribute_keys ignores an invalid metric_type and stays on the rollup", () => {
+		const result = compilePipeQuery("metric_attribute_keys", {
+			...baseParams(),
+			metric_name: "http.server.duration",
+			metric_type: "not-a-type",
+		})
+		expect(result).toBeDefined()
+		expect(result!.sql).toContain("attribute_keys_hourly")
+	})
+
+	it("metric_attribute_values routes to the raw table when metric_name + metric_type are set", () => {
+		const result = compilePipeQuery("metric_attribute_values", {
+			...baseParams(),
+			attribute_key: "group",
+			metric_name: "http.server.duration",
+			metric_type: "sum",
+		})
+		expect(result).toBeDefined()
+		expect(result!.sql).toContain("metrics_sum")
+		expect(result!.sql).toContain("Attributes['group']")
+		expect(result!.sql).toContain("MetricName = 'http.server.duration'")
 	})
 
 	describe("logs free-text search param", () => {
@@ -97,12 +144,6 @@ describe("compilePipeQuery", () => {
 		const result = compilePipeQuery("list_traces", baseParams())
 		expect(result!.sql).toContain("2024-01-01 00:00:00")
 		expect(result!.sql).toContain("2024-01-02 00:00:00")
-	})
-
-	it("castRows passes through rows", () => {
-		const result = compilePipeQuery("list_traces", baseParams())
-		const rows = [{ traceId: "abc" }]
-		expect(result!.castRows(rows)).toEqual(rows)
 	})
 
 	it.effect("decodeRows passes through rows for DSL-backed pipes without row schemas", () =>

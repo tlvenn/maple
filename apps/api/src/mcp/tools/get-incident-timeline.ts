@@ -1,9 +1,9 @@
 import { McpQueryError, optionalNumberParam, optionalStringParam, type McpToolRegistrar } from "./types"
-import { formatNextSteps } from "../lib/next-steps"
+import { formatNextSteps } from "@/mcp/lib/next-steps"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
+import { createDualContent } from "@/mcp/lib/structured-output"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { AlertsService } from "@/services/AlertsService"
+import { AlertsService } from "@/services/alerts/AlertsService"
 
 const comparatorLabel: Record<string, string> = {
 	gt: ">",
@@ -49,7 +49,7 @@ export function registerGetIncidentTimelineTool(server: McpToolRegistrar) {
 					(error) =>
 						new McpQueryError({
 							message: error.message,
-							pipe: "get_incident_timeline",
+							pipeName: "get_incident_timeline",
 							cause: error,
 						}),
 				),

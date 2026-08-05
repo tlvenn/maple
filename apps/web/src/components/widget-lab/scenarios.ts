@@ -1,10 +1,13 @@
 import type { WidgetDataState, WidgetDisplayConfig } from "@/components/dashboard-builder/types"
 import { chartRegistry } from "@maple/ui/components/charts/registry"
+import { HEATMAP_COLOR_SCALES } from "@maple/domain/http"
 
 export interface WidgetScenario {
 	label: string
 	dataState: WidgetDataState
 	display: WidgetDisplayConfig
+	/** Configured row cap, for the table widget's truncation footer. */
+	rowLimit?: number
 }
 
 export interface ChartScenario extends WidgetScenario {
@@ -32,6 +35,14 @@ const decodeErrorState: WidgetDataState = {
 	title: "Schema mismatch",
 	message: "Expected field 'errorRate' but got 'error_rate' from the query result.",
 	kind: "decode",
+}
+
+const rangeErrorState: WidgetDataState = {
+	status: "error",
+	title: "Range too wide for this list",
+	message:
+		"Lists show individual records, so they cover at most 7 days. Charts on this dashboard are unaffected.",
+	kind: "range",
 }
 
 const ready = <T>(data: T): WidgetDataState => ({ status: "ready", data })
@@ -221,6 +232,34 @@ export const gaugeScenarios: WidgetScenario[] = [
 		},
 	},
 	{
+		// The SLO shape: thresholds crowded into the top few percent of the range,
+		// so 95/99/100 all land within ~13° of the arc's end. Only the bounds get
+		// labels; 95 and 99 keep their ticks.
+		label: "Crowded thresholds (SLO)",
+		dataState: ready(99.4),
+		display: {
+			title: "Today's health",
+			unit: "percent_100",
+			gauge: { min: 0, max: 100 },
+			thresholds: [
+				{ value: 0, color: "var(--color-red-500)" },
+				{ value: 95, color: "var(--color-amber-500)" },
+				{ value: 99, color: "var(--color-emerald-500)" },
+			],
+		},
+	},
+	{
+		// Widest labels the dial can produce — checks nothing clips at the arc ends.
+		label: "Wide labels at the arc ends",
+		dataState: ready(720),
+		display: {
+			title: "p99 latency",
+			unit: "duration_ms",
+			gauge: { min: 0, max: 1000 },
+			thresholds: [{ value: 250, color: "var(--color-amber-500)" }],
+		},
+	},
+	{
 		label: "Loading",
 		dataState: loadingState,
 		display: { title: "Error rate", unit: "percent", gauge: { min: 0, max: 10 } },
@@ -344,7 +383,7 @@ export const chartScenarios: ChartScenario[] = [
 	{
 		label: "Line + thresholds",
 		chartId: "query-builder-line",
-		chartName: "Query Builder Line",
+		chartName: "Line",
 		category: "line",
 		dataState: ready(sampleFor("query-builder-line")),
 		display: {
@@ -357,7 +396,7 @@ export const chartScenarios: ChartScenario[] = [
 	{
 		label: "Area + thresholds",
 		chartId: "query-builder-area",
-		chartName: "Query Builder Area",
+		chartName: "Area",
 		category: "area",
 		dataState: ready(sampleFor("query-builder-area")),
 		display: {
@@ -370,7 +409,7 @@ export const chartScenarios: ChartScenario[] = [
 	{
 		label: "Bar + thresholds",
 		chartId: "query-builder-bar",
-		chartName: "Query Builder Bar",
+		chartName: "Bar",
 		category: "bar",
 		dataState: ready(sampleFor("query-builder-bar")),
 		display: {
@@ -383,7 +422,7 @@ export const chartScenarios: ChartScenario[] = [
 	{
 		label: "Legend — right (stats table)",
 		chartId: "query-builder-line",
-		chartName: "Query Builder Line",
+		chartName: "Line",
 		category: "line",
 		dataState: ready(sampleFor("query-builder-line")),
 		display: {
@@ -416,6 +455,360 @@ export const chartScenarios: ChartScenario[] = [
 		category: "area",
 		dataState: runtimeErrorState,
 		display: { title: "Gradient Area", chartId: "gradient-area" },
+	},
+]
+
+// ---------------------------------------------------------------------------
+// Stress / edge cases — high cardinality, long names, null/zero data.
+// These exercise the palette (distinct colors past series 5), legend overflow,
+// and the pie/bar "Other" bucketing.
+// ---------------------------------------------------------------------------
+
+/** N synthetic timeseries with smooth, deterministic, distinct shapes. */
+function makeManySeries(seriesCount: number, points = 14, namePrefix = "service"): Record<string, unknown>[] {
+	const base = new Date("2026-01-01T00:00:00Z").getTime()
+	return Array.from({ length: points }, (_, p) => {
+		const row: Record<string, unknown> = {
+			bucket: new Date(base + p * 3_600_000).toISOString(),
+		}
+		for (let s = 0; s < seriesCount; s++) {
+			const phase = (s * 0.7) % (Math.PI * 2)
+			const amp = 20 + (s % 7) * 8
+			row[`${namePrefix}-${s + 1}`] = Math.max(
+				0,
+				Math.round(amp + amp * Math.sin(p / 2 + phase) + (s % 5) * 3),
+			)
+		}
+		return row
+	})
+}
+
+/** A long-tail (Zipf-ish) categorical distribution for pie stress tests. */
+function makePieSlices(count: number, namePrefix = "service"): { name: string; value: number }[] {
+	return Array.from({ length: count }, (_, i) => ({
+		name: `${namePrefix}-${i + 1}`,
+		value: Math.round(120 + 6000 / (i + 1)),
+	}))
+}
+
+const longNameSeries: Record<string, unknown>[] = makeManySeries(3, 12).map((row, i) => {
+	const base = new Date("2026-01-01T00:00:00Z").getTime()
+	return {
+		bucket: new Date(base + i * 3_600_000).toISOString(),
+		"checkout-service @ us-east-1 (primary cluster, canary v2)": row["service-1"],
+		"notification-worker @ eu-west-1 (overflow pool, spot instances)": row["service-2"],
+		"analytics-ingest @ ap-southeast-2 (batch tier, reserved capacity)": row["service-3"],
+	}
+})
+
+// Mixed null / NaN / numbers — verifies asFiniteNumber coercion (renders, no crash).
+const nullySeries: Record<string, unknown>[] = [
+	{ bucket: "2026-01-01T00:00:00Z", a: 12, b: null, c: 5 },
+	{ bucket: "2026-01-01T01:00:00Z", a: null, b: 8, c: Number.NaN },
+	{ bucket: "2026-01-01T02:00:00Z", a: 18, b: 11, c: 7 },
+	{ bucket: "2026-01-01T03:00:00Z", a: 9, b: null, c: 4 },
+	{ bucket: "2026-01-01T04:00:00Z", a: 14, b: 6, c: null },
+]
+
+// All-zero series — verifies flat-line handling and pie "No data".
+const allZeroSeries: Record<string, unknown>[] = [
+	{ bucket: "2026-01-01T00:00:00Z", a: 0, b: 0 },
+	{ bucket: "2026-01-01T01:00:00Z", a: 0, b: 0 },
+	{ bucket: "2026-01-01T02:00:00Z", a: 0, b: 0 },
+	{ bucket: "2026-01-01T03:00:00Z", a: 0, b: 0 },
+]
+
+// Sparse rate-like series — 24 zero-filled buckets with a handful of isolated
+// non-zero points at 0.02-0.08 (the MAP-49 screenshot shape: low-volume demo
+// data bucketed at 30m over 12h). Isolated points must render as visible dots,
+// not invisible zero-width triangles.
+const sparseRateSeries: Record<string, unknown>[] = Array.from({ length: 24 }, (_, i) => {
+	const base = new Date("2026-01-01T00:00:00Z").getTime()
+	const row: Record<string, unknown> = {
+		bucket: new Date(base + i * 1_800_000).toISOString(),
+		"demo-api": 0,
+		"demo-frontend": 0,
+		"demo-worker": 0,
+	}
+	if (i === 4) row["demo-api"] = 0.05
+	if (i === 9) row["demo-frontend"] = 0.04
+	if (i === 10) row["demo-frontend"] = 0.07
+	if (i === 15) row["demo-worker"] = 0.07
+	if (i === 20) row["demo-api"] = 0.02
+	if (i === 21) row["demo-frontend"] = 0.045
+	return row
+})
+
+// Single-point series — one bucket only.
+const singlePointSeries: Record<string, unknown>[] = [
+	{ bucket: "2026-01-01T00:00:00Z", "demo-api": 42, "demo-worker": 17 },
+]
+
+/**
+ * A healthy series whose final bucket is the current, still-filling interval.
+ *
+ * Buckets are anchored to wall-clock "now" because that is how the widget
+ * actually detects the in-progress bucket — `query-builder-timeseries` sends no
+ * `partial` flag, so `markIncompleteSegments` falls back to comparing each
+ * bucket's end against the clock. A fixed 2026-01-01 timestamp is entirely in
+ * the past and would exercise nothing.
+ */
+function makeTrailingBucketSeries(lastBucket: { api: number; worker: number } | null) {
+	const hour = 3_600_000
+	const currentBucketStart = Math.floor(Date.now() / hour) * hour
+	return Array.from({ length: 13 }, (_, i) => {
+		const isCurrent = i === 12
+		return {
+			bucket: new Date(currentBucketStart - (12 - i) * hour).toISOString(),
+			"demo-api": isCurrent ? (lastBucket?.api ?? 0) : 900 + Math.round(180 * Math.sin(i / 2)),
+			"demo-worker": isCurrent ? (lastBucket?.worker ?? 0) : 420 + Math.round(90 * Math.cos(i / 3)),
+		}
+	})
+}
+
+/** The current bucket came back with nothing — drawn as-is it cliffs to zero. */
+const trailingEmptyBucketSeries: Record<string, unknown>[] = makeTrailingBucketSeries(null)
+
+/** Same shape, but the current bucket did report — it stays, dashed. */
+const trailingPartialBucketSeries: Record<string, unknown>[] = makeTrailingBucketSeries({
+	api: 240,
+	worker: 110,
+})
+
+export const stressScenarios: ChartScenario[] = [
+	{
+		label: "Area — trailing empty bucket (no cliff)",
+		chartId: "query-builder-area",
+		chartName: "Area",
+		category: "area",
+		dataState: ready(trailingEmptyBucketSeries),
+		display: {
+			title: "Span throughput (current bucket empty)",
+			chartId: "query-builder-area",
+			unit: "number",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Area — trailing partial bucket (dashed)",
+		chartId: "query-builder-area",
+		chartName: "Area",
+		category: "area",
+		dataState: ready(trailingPartialBucketSeries),
+		display: {
+			title: "Span throughput (current bucket reporting)",
+			chartId: "query-builder-area",
+			unit: "number",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Line — 25 series (compact legend)",
+		chartId: "query-builder-line",
+		chartName: "Line",
+		category: "line",
+		dataState: ready(makeManySeries(25)),
+		display: {
+			title: "Latency by service (25)",
+			chartId: "query-builder-line",
+			unit: "duration_ms",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Line — 50 series (stats legend)",
+		chartId: "query-builder-line",
+		chartName: "Line",
+		category: "line",
+		dataState: ready(makeManySeries(50)),
+		display: {
+			title: "Latency by service (50)",
+			chartId: "query-builder-line",
+			unit: "duration_ms",
+			chartPresentation: { legend: "visible", seriesStats: true },
+		},
+	},
+	{
+		label: "Area — 25 series (stacked)",
+		chartId: "query-builder-area",
+		chartName: "Area",
+		category: "area",
+		dataState: ready(makeManySeries(25)),
+		display: {
+			title: "Throughput by service (25)",
+			chartId: "query-builder-area",
+			stacked: true,
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Bar — 25 series → Other (stacked)",
+		chartId: "query-builder-bar",
+		chartName: "Bar",
+		category: "bar",
+		dataState: ready(makeManySeries(25)),
+		display: {
+			title: "Requests by service (25 → Other)",
+			chartId: "query-builder-bar",
+			stacked: true,
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Bar — 50 series → Other (right legend)",
+		chartId: "query-builder-bar",
+		chartName: "Bar",
+		category: "bar",
+		dataState: ready(makeManySeries(50)),
+		display: {
+			title: "Requests by service (50 → Other)",
+			chartId: "query-builder-bar",
+			stacked: true,
+			chartPresentation: { legend: "right", seriesStats: false },
+		},
+	},
+	{
+		// Line keeps every series (no "Other" bucketing), so the right legend is
+		// genuinely tall — confirms it scrolls within the card instead of overflowing.
+		label: "Line — 50 series (right legend, scrolls)",
+		chartId: "query-builder-line",
+		chartName: "Line",
+		category: "line",
+		dataState: ready(makeManySeries(50)),
+		display: {
+			title: "Latency by service (50, right legend)",
+			chartId: "query-builder-line",
+			unit: "duration_ms",
+			chartPresentation: { legend: "right", seriesStats: true },
+		},
+	},
+	{
+		label: "Pie — 20 slices → Other",
+		chartId: "query-builder-pie",
+		chartName: "Pie",
+		category: "pie",
+		dataState: ready(makePieSlices(20)),
+		display: { title: "Traffic by service (20 → Other)", chartId: "query-builder-pie", pie: {} },
+	},
+	{
+		label: "Pie — 50 slices → Other",
+		chartId: "query-builder-pie",
+		chartName: "Pie",
+		category: "pie",
+		dataState: ready(makePieSlices(50)),
+		display: {
+			title: "Traffic by service (50 → Other)",
+			chartId: "query-builder-pie",
+			pie: {},
+		},
+	},
+	{
+		label: "Line — long series names",
+		chartId: "query-builder-line",
+		chartName: "Line",
+		category: "line",
+		dataState: ready(longNameSeries),
+		display: {
+			title: "Latency (long names)",
+			chartId: "query-builder-line",
+			unit: "duration_ms",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Line — null / NaN values",
+		chartId: "query-builder-line",
+		chartName: "Line",
+		category: "line",
+		dataState: ready(nullySeries),
+		display: {
+			title: "Sparse series (null/NaN)",
+			chartId: "query-builder-line",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Area — all-zero series",
+		chartId: "query-builder-area",
+		chartName: "Area",
+		category: "area",
+		dataState: ready(allZeroSeries),
+		display: {
+			title: "Flat at zero",
+			chartId: "query-builder-area",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Pie — all-zero (No data)",
+		chartId: "query-builder-pie",
+		chartName: "Pie",
+		category: "pie",
+		dataState: ready([
+			{ name: "a", value: 0 },
+			{ name: "b", value: 0 },
+		]),
+		display: { title: "Empty distribution", chartId: "query-builder-pie", pie: {} },
+	},
+	{
+		label: "Area — sparse rate (isolated points)",
+		chartId: "query-builder-area",
+		chartName: "Area",
+		category: "area",
+		dataState: ready(sparseRateSeries),
+		display: {
+			title: "Error rate by service (sparse)",
+			chartId: "query-builder-area",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Bar — sparse rate (isolated points)",
+		chartId: "query-builder-bar",
+		chartName: "Bar",
+		category: "bar",
+		dataState: ready(sparseRateSeries),
+		display: {
+			title: "Error rate by service (sparse)",
+			chartId: "query-builder-bar",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Line — sparse rate (isolated points)",
+		chartId: "query-builder-line",
+		chartName: "Line",
+		category: "line",
+		dataState: ready(sparseRateSeries),
+		display: {
+			title: "Error rate by service (sparse)",
+			chartId: "query-builder-line",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Area — single point",
+		chartId: "query-builder-area",
+		chartName: "Area",
+		category: "area",
+		dataState: ready(singlePointSeries),
+		display: {
+			title: "Single bucket",
+			chartId: "query-builder-area",
+			chartPresentation: { legend: "visible", seriesStats: false },
+		},
+	},
+	{
+		label: "Bar — all-zero series",
+		chartId: "query-builder-bar",
+		chartName: "Bar",
+		category: "bar",
+		dataState: ready(allZeroSeries),
+		display: {
+			title: "Flat at zero (bar)",
+			chartId: "query-builder-bar",
+			chartPresentation: { legend: "visible", seriesStats: true },
+		},
 	},
 ]
 
@@ -518,12 +911,33 @@ export const tableScenarios: WidgetScenario[] = [
 		display: { title: "Auto columns" },
 	},
 	{
+		// Sort QA: `calls` arrives as a string, the way 64-bit counts do from
+		// BYO-ClickHouse — sorting it must be numeric, not lexicographic. Row
+		// count equals `rowLimit`, so the truncation footer shows.
+		label: "Sortable — truncated, string counts",
+		dataState: ready([
+			{ service: "api-gateway", calls: "1820", p99: 245 },
+			{ service: "billing-service", calls: "240", p99: 412 },
+			{ service: "auth-service", calls: "2104", p99: 89 },
+			{ service: "order-service", calls: "642", p99: 318 },
+			{ service: "user-service", calls: "98", p99: 132 },
+		]),
+		rowLimit: 5,
+		display: {
+			title: "Top services",
+			columns: [
+				{ field: "service", header: "Service" },
+				{ field: "calls", header: "Calls", align: "right" },
+				{ field: "p99", header: "p99", unit: "duration_ms", align: "right" },
+			],
+		},
+	},
+	{
 		label: "Long string values",
 		dataState: ready([
 			{
 				name: "billing-service @ us-east-1 with a very long descriptor",
-				detail:
-					"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore.",
+				detail: "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore.",
 			},
 			{
 				name: "auth-service",
@@ -642,6 +1056,20 @@ const logRows = [
 
 export const listScenarios: WidgetScenario[] = [
 	{
+		// Muted rather than destructive: the dashboard's charts render the full
+		// window fine, only this tile's query kind can't span it.
+		label: "Range too wide",
+		dataState: rangeErrorState,
+		display: {
+			title: "Recent traces",
+			listDataSource: "traces",
+			columns: [
+				{ field: "traceId", header: "Trace" },
+				{ field: "spanName", header: "Operation" },
+			],
+		},
+	},
+	{
 		label: "Recent traces",
 		dataState: ready(traceRows),
 		display: {
@@ -728,6 +1156,24 @@ export const pieScenarios: WidgetScenario[] = [
 		},
 	},
 	{
+		label: "Table legend (Value + %)",
+		dataState: ready(pieMany),
+		display: {
+			title: "Traffic by service",
+			chartPresentation: { legend: "right" },
+			pie: {},
+		},
+	},
+	{
+		label: "Table legend — long tail (+N others)",
+		dataState: ready(makePieSlices(50)),
+		display: {
+			title: "Traffic by service (50 groups)",
+			chartPresentation: { legend: "right" },
+			pie: { donut: true },
+		},
+	},
+	{
 		label: "Single slice (100%)",
 		dataState: ready([{ name: "api-gateway", value: 4820 }]),
 		display: { title: "Only one source", pie: { showPercent: true } },
@@ -780,6 +1226,18 @@ export const funnelScenarios: WidgetScenario[] = [
 		},
 	},
 	{
+		// `false` suppresses BOTH percentage labels — it used to leave the
+		// "% of first" one on screen, so a widget that asked for no percentages
+		// still showed them.
+		label: "Percentages off",
+		dataState: ready(funnelStages),
+		display: {
+			title: "Signup conversion",
+			unit: "number",
+			funnel: { showStepPercent: false },
+		},
+	},
+	{
 		label: "6 stages",
 		dataState: ready(funnelManyStages),
 		display: {
@@ -794,6 +1252,42 @@ export const funnelScenarios: WidgetScenario[] = [
 		display: { title: "Single stage", unit: "number", funnel: {} },
 	},
 	{
+		// MAP-49: more stages than fit in the card — must cap rows inside the
+		// card (+N more), never spill above/below it.
+		label: "30 stages (overflow cap)",
+		dataState: ready(
+			Array.from({ length: 30 }, (_, i) => ({
+				name: `stage-${i + 1}`,
+				value: Math.max(0, Math.round(12840 / (i + 1))),
+			})),
+		),
+		display: { title: "Deep funnel", unit: "number", funnel: { showStepPercent: true } },
+	},
+	{
+		// MAP-49: mis-wired funnel receiving timeseries rows ({bucket, A}) — must
+		// aggregate per series instead of one "—" row per bucket.
+		label: "Timeseries-shaped input",
+		dataState: ready(
+			Array.from({ length: 12 }, (_, i) => ({
+				bucket: new Date(new Date("2026-01-01T00:00:00Z").getTime() + i * 3_600_000).toISOString(),
+				A: 125,
+			})),
+		),
+		display: { title: "Traces by service", unit: "number", funnel: { showStepPercent: true } },
+	},
+	{
+		// MAP-49: zero-value stages + missing labels — no "0 · 0% ↓ 0%" noise rows.
+		label: "Zero stages + missing labels",
+		dataState: ready([
+			{ name: "Visited", value: 4820 },
+			{ name: undefined, value: 940 },
+			{ name: "Converted", value: 0 },
+			{ name: "Ghost A", value: 0 },
+			{ name: "Ghost B", value: 0 },
+		]),
+		display: { title: "Noisy funnel", unit: "number", funnel: { showStepPercent: true } },
+	},
+	{
 		label: "Loading",
 		dataState: loadingState,
 		display: { title: "Signup conversion" },
@@ -802,6 +1296,113 @@ export const funnelScenarios: WidgetScenario[] = [
 		label: "Empty",
 		dataState: emptyState,
 		display: { title: "Signup conversion" },
+	},
+]
+
+// ---------------------------------------------------------------------------
+// Horizontal bar (ranked)
+// ---------------------------------------------------------------------------
+
+/**
+ * The case that motivated the panel: the top rows are near-identical, which a
+ * funnel labels "100% / 100% / 100% / 100%". As shares of the total they read
+ * 24% / 24% / 24% / 11%.
+ */
+const hbarTopOperations = [
+	{ name: "RedisClient.beginMutation", value: 87_200_000 },
+	{ name: "UserAttributesCache.beginMutation", value: 86_400_000 },
+	{ name: "RedisClient.endMutation", value: 85_900_000 },
+	{ name: "ArtifactCache.get", value: 39_000_000 },
+	{ name: "SessionStore.load", value: 14_600_000 },
+]
+
+export const hbarScenarios: WidgetScenario[] = [
+	{
+		label: "Top operations (% of total)",
+		dataState: ready(hbarTopOperations),
+		display: { title: "Busiest Operations", unit: "number" },
+	},
+	{
+		label: "Unsorted input (chart ranks it)",
+		dataState: ready([
+			{ name: "checkout", value: 120 },
+			{ name: "search", value: 940 },
+			{ name: "cart", value: 410 },
+		]),
+		display: { title: "Requests by route", unit: "number" },
+	},
+	{
+		label: "Long labels + long tail",
+		dataState: ready([
+			{ name: "com.acme.platform.identity.SessionRefreshHandler.handle", value: 9_400_000 },
+			{ name: "com.acme.platform.billing.UsageAggregator.flushWindow", value: 610_000 },
+			{ name: "com.acme.platform.search.QueryPlanner.plan", value: 4_200 },
+			{ name: "com.acme.platform.audit.EventWriter.append", value: 90 },
+		]),
+		display: { title: "Spans by operation", unit: "number" },
+	},
+	{
+		label: "Duration unit",
+		dataState: ready([
+			{ name: "POST /checkout", value: 1_284 },
+			{ name: "GET /search", value: 612 },
+			{ name: "GET /cart", value: 240 },
+		]),
+		display: { title: "P95 by route", unit: "duration_ms" },
+	},
+	{
+		// Rows must cap inside the card with "+N more", never spill (MAP-49).
+		label: "30 rows (overflow cap)",
+		dataState: ready(
+			Array.from({ length: 30 }, (_, i) => ({
+				name: `operation-${i + 1}`,
+				value: Math.round(12_840 / (i + 1)),
+			})),
+		),
+		display: { title: "Busiest Operations", unit: "number" },
+	},
+	{
+		// A single dominant row makes every other share round to 0% — "<0.1%"
+		// has to read as "tiny", not as "no data".
+		label: "One dominant row",
+		dataState: ready([
+			{ name: "cache.get", value: 9_800_000 },
+			{ name: "cache.set", value: 4_000 },
+			{ name: "cache.evict", value: 60 },
+		]),
+		display: { title: "Cache operations", unit: "number" },
+	},
+	{
+		label: "Zero rows + missing labels",
+		dataState: ready([
+			{ name: "api", value: 4820 },
+			{ name: undefined, value: 940 },
+			{ name: "worker", value: 0 },
+		]),
+		display: { title: "Spans by service", unit: "number" },
+	},
+	{
+		// A mis-wired hbar fed timeseries rows must aggregate per series, not
+		// draw one "—" row per bucket.
+		label: "Timeseries-shaped input",
+		dataState: ready(
+			Array.from({ length: 12 }, (_, i) => ({
+				bucket: new Date(new Date("2026-01-01T00:00:00Z").getTime() + i * 3_600_000).toISOString(),
+				A: 125,
+				B: 40,
+			})),
+		),
+		display: { title: "Spans by service", unit: "number" },
+	},
+	{
+		label: "Loading",
+		dataState: loadingState,
+		display: { title: "Busiest Operations" },
+	},
+	{
+		label: "Empty",
+		dataState: emptyState,
+		display: { title: "Busiest Operations" },
 	},
 ]
 
@@ -862,6 +1463,34 @@ export const histogramScenarios: WidgetScenario[] = [
 		display: { title: "Fine-grained" },
 	},
 	{
+		// MAP-49: long range labels must not overlap on the x axis.
+		label: "Long range labels (duration)",
+		dataState: ready(
+			Array.from({ length: 30 }, (_, i) => ({
+				name: `${(i * 1.2).toFixed(1)}ms-${((i + 1) * 1.2).toFixed(1)}ms`,
+				value: Math.round(Math.exp(-((i - 12) ** 2) / 40) * 180) + 2,
+			})),
+		),
+		display: { title: "Duration distribution", unit: "duration_ms" },
+	},
+	{
+		// MAP-49: raw numeric rows (trace-list durationMs) — chart must bucketize
+		// client-side into a real distribution.
+		label: "Raw durations (auto-bucketed)",
+		dataState: ready(
+			Array.from({ length: 200 }, (_, i) => ({
+				durationMs: Math.round(
+					30 + Math.abs((Math.sin(i * 12.9898) * 43758.5453) % 1) * 400 + (i % 17 === 0 ? 900 : 0),
+				),
+			})),
+		),
+		display: {
+			title: "Trace duration distribution",
+			unit: "duration_ms",
+			histogram: { bucketCount: 30 },
+		},
+	},
+	{
 		label: "Loading",
 		dataState: loadingState,
 		display: { title: "Trace duration" },
@@ -890,16 +1519,15 @@ const denseHeatmap = hours.flatMap((h, hi) =>
 
 const sparseHeatmap = denseHeatmap.filter((_, i) => i % 3 === 0)
 
-const colorScales: Array<"viridis" | "magma" | "cividis" | "blues" | "reds"> = [
-	"viridis",
-	"magma",
-	"cividis",
-	"blues",
-	"reds",
-]
-
 export const heatmapScenarios: WidgetScenario[] = [
-	...colorScales.map(
+	{
+		// No `heatmap` config at all — exercises the amber default that an
+		// unconfigured widget lands on.
+		label: "Dense — default (no config)",
+		dataState: ready(denseHeatmap),
+		display: { title: "Latency × hour" },
+	},
+	...HEATMAP_COLOR_SCALES.map(
 		(scale): WidgetScenario => ({
 			label: `Dense — ${scale}`,
 			dataState: ready(denseHeatmap),
@@ -918,6 +1546,51 @@ export const heatmapScenarios: WidgetScenario[] = [
 			title: "Log scale",
 			heatmap: { colorScale: "viridis", scaleType: "log" },
 		},
+	},
+	{
+		// MAP-49: many time rows on the y axis — labels must thin out without
+		// the last two colliding.
+		label: "24 time rows (y-label stride)",
+		dataState: ready(
+			Array.from({ length: 24 }, (_, hi) => hi).flatMap((hi) =>
+				["Errors", "OK"].map((x, xi) => ({
+					x,
+					y: `2026-01-01T${String(hi).padStart(2, "0")}:30:00Z`,
+					value: xi === 0 ? (hi % 7 === 0 ? 12 : 0) : 90 + Math.round(Math.sin(hi / 3) * 30),
+				})),
+			),
+		),
+		display: { title: "Errors vs OK over time", heatmap: { colorScale: "blues" } },
+	},
+	{
+		// The shape real service grids arrive in: a handful of services carry
+		// everything, several report nothing at all, and one bucket is an ingest
+		// gap. Exercises axis pruning + the hidden-count footnote.
+		label: "Long tail + dead rows/cols",
+		dataState: ready(
+			[
+				"admin-api",
+				"artifact-scan",
+				"kafka-consumers",
+				"mail-dispatch",
+				"query-gateway",
+				"webhook-fanout",
+			].flatMap((service, si) =>
+				hours.map((h, hi) => ({
+					x: service,
+					y: `${h}:00`,
+					// artifact-scan / mail-dispatch / webhook-fanout are silent, and
+					// the 09:00 bucket is empty for everyone.
+					value:
+						si === 1 || si === 3 || si === 5 || h === "09"
+							? 0
+							: si === 0 || si === 4
+								? 18000 + hi * 900
+								: 40 + hi * 12,
+				})),
+			),
+		),
+		display: { title: "Spans by service", heatmap: { scaleType: "log" } },
 	},
 	{
 		label: "Loading",

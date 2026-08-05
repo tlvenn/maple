@@ -3,35 +3,41 @@
 	"private": true,
 	"type": "module",
 	"exports": {
-		"./utils": "./src/lib/utils.ts",
-		"./colors": "./src/lib/colors.ts",
-		"./types": "./src/lib/types.ts",
-		"./format": "./src/lib/format.ts",
+		"./styles/tokens.css": "./src/styles/tokens.css",
+		"./lib/cloud-platforms": "./src/lib/cloud-platforms/index.ts",
 		"./*": "./src/*"
 	},
 	"scripts": {
+		"test": "vitest run",
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
 		"@base-ui/react": "catalog:ui",
 		"@maple/domain": "workspace:*",
-		"@tanstack/react-virtual": "^3.13.23",
+		"@maple/query-engine": "workspace:*",
+		"@shadcn/react": "^0.2.1",
+		"@tanstack/react-virtual": "^3.14.3",
 		"@xyflow/react": "catalog:ui",
 		"class-variance-authority": "catalog:ui",
 		"clsx": "catalog:ui",
 		"effect": "catalog:effect",
 		"embla-carousel-react": "^8.6.0",
-		"input-otp": "^1.4.2",
 		"react-day-picker": "^10.0.1",
 		"react-resizable-panels": "^4.9.0",
 		"recharts": "catalog:ui",
-		"sonner": "^2.0.7",
 		"tailwind-merge": "catalog:tailwind"
 	},
 	"devDependencies": {
+		"@testing-library/dom": "^10.4.1",
+		"@testing-library/react": "^16.3.2",
 		"@types/react": "catalog:react",
 		"@types/react-dom": "catalog:react",
-		"typescript": "catalog:tooling"
+		"jsdom": "^29.1.1",
+		"react": "catalog:react",
+		"react-dom": "catalog:react",
+		"typescript": "catalog:tooling",
+		"vite": "catalog:",
+		"vitest": "catalog:"
 	},
 	"peerDependencies": {
 		"react": "^19.0.0",

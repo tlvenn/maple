@@ -70,12 +70,7 @@ const EXPECTED_TOPLEVEL_KEYS = {
 		"links_trace_state",
 		"links_attributes",
 	]),
-	metrics_sum: new Set([
-		...metricCommonKeys(),
-		"value",
-		"aggregation_temporality",
-		"is_monotonic",
-	]),
+	metrics_sum: new Set([...metricCommonKeys(), "value", "aggregation_temporality", "is_monotonic"]),
 	metrics_gauge: new Set([...metricCommonKeys(), "value"]),
 	metrics_histogram: new Set([
 		...metricCommonKeys(),
@@ -131,17 +126,23 @@ function topLevelKey(jsonPath: string): string | null {
 	// `$.foo` / `$.foo[:]` / `$.foo.bar.baz`  ->  `foo`
 	if (!jsonPath.startsWith("$.")) return null
 	const tail = jsonPath.slice(2)
-	const head = tail.split(/[.\[]/, 1)[0]
+	const head = tail.split(/[.[]/, 1)[0]
 	return head || null
 }
 
-function emittedTopLevelKeys(
-	datasource: DatasourceDefinition,
-): Set<string> {
+function emittedTopLevelKeys(datasource: DatasourceDefinition): Set<string> {
 	const keys = new Set<string>()
 	for (const column of Object.values(datasource.options.schema)) {
+		const defaultExpression = (
+			column as {
+				readonly type?: {
+					readonly modifiers?: { readonly defaultExpression?: string }
+				}
+			}
+		).type?.modifiers?.defaultExpression
+		if (defaultExpression !== undefined) continue
 		const path = getColumnJsonPath(column)
-		if (!path) continue // defaultExpr-only columns (SampleRate, IsEntryPoint) are computed in CH, not ingested
+		if (!path) continue
 		const top = topLevelKey(path)
 		if (top) keys.add(top)
 	}

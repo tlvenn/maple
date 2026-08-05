@@ -1,8 +1,9 @@
 import { Effect, Layer } from "effect"
+import { HttpClient } from "effect/unstable/http"
 import {
 	WarehouseExecutor,
 	type WarehouseExecutorShape,
-	type ExecutorQueryOptions,
+	type SqlQueryOptions,
 } from "@maple/query-engine/observability"
 import { WarehouseConfigError } from "@maple/domain/http/warehouse-errors"
 import type { WarehouseQueryName } from "@maple/domain/warehouse-queries"
@@ -29,25 +30,27 @@ export const WarehouseExecutorFromMode = Layer.effect(
 	WarehouseExecutor,
 	Effect.gen(function* () {
 		const mode = yield* Mode
+		const client = yield* HttpClient.HttpClient
 		const getShape = yield* Effect.cached(
 			mode.resolve.pipe(
-				Effect.map((m): WarehouseExecutorShape =>
-					m._tag === "local"
-						? makeLocalWarehouseExecutorShape(m.baseUrl)
-						: makeRemoteWarehouseExecutorShape(m.apiUrl, m.token, m.orgId ?? ""),
+				Effect.map(
+					(m): WarehouseExecutorShape =>
+						m._tag === "local"
+							? makeLocalWarehouseExecutorShape(m.baseUrl)
+							: makeRemoteWarehouseExecutorShape(client, m.apiUrl, m.token, m.orgId ?? ""),
 				),
-				Effect.mapError((e) => new WarehouseConfigError({ message: e.message, pipe: "mode" })),
+				Effect.mapError((e) => new WarehouseConfigError({ message: e.message, pipeName: "mode" })),
 			),
 		)
 		return WarehouseExecutor.of({
 			orgId: "",
-			query: <T>(pipe: string, params: Record<string, unknown>, options?: ExecutorQueryOptions) =>
-				getShape.pipe(Effect.flatMap((shape) => shape.query<T>(pipe as WarehouseQueryName, params, options))),
-			sqlQuery: <T = Record<string, unknown>>(sql: string, options?: ExecutorQueryOptions) =>
-				getShape.pipe(Effect.flatMap((shape) => shape.sqlQuery<T>(sql, options))),
-			compiledQuery: (compiled, options?: ExecutorQueryOptions) =>
+			query: <T>(pipe: string, params: Record<string, unknown>, options?: SqlQueryOptions) =>
+				getShape.pipe(
+					Effect.flatMap((shape) => shape.query<T>(pipe as WarehouseQueryName, params, options)),
+				),
+			compiledQuery: (compiled, options?: SqlQueryOptions) =>
 				getShape.pipe(Effect.flatMap((shape) => shape.compiledQuery(compiled, options))),
-			compiledQueryFirst: (compiled, options?: ExecutorQueryOptions) =>
+			compiledQueryFirst: (compiled, options?: SqlQueryOptions) =>
 				getShape.pipe(Effect.flatMap((shape) => shape.compiledQueryFirst(compiled, options))),
 		})
 	}),

@@ -42,13 +42,13 @@ you can confirm parity with a deployed Maple build.
 
 ## Exit codes
 
-| Code | Meaning |
-|---:|---|
-| 0 | Success. |
-| 1 | Unexpected error (network, parse, etc). |
-| 2 | Bad usage / missing flags. |
-| 3 | ClickHouse rejected (bad creds, bad DDL). |
-| 4 | ClickHouse upstream error (5xx). |
+| Code | Meaning                                   |
+| ---: | ----------------------------------------- |
+|    0 | Success.                                  |
+|    1 | Unexpected error (network, parse, etc).   |
+|    2 | Bad usage / missing flags.                |
+|    3 | ClickHouse rejected (bad creds, bad DDL). |
+|    4 | ClickHouse upstream error (5xx).          |
 
 ## Permissions on the user
 
@@ -57,17 +57,24 @@ The user passed via `--user` needs DDL privileges (`CREATE TABLE`,
 `system.columns` for status checks. After the schema is in place, the
 collector / app user only needs `SELECT` + `INSERT` on the Maple tables.
 
+Performance features are best-effort. The CLI records a feature only after all
+of its DDL succeeds; an unsupported or failed optional index is reported in the
+summary without rolling back correctness migrations. Search indexes apply to
+newly written parts. Maple deliberately does not run cluster-wide
+`MATERIALIZE INDEX` or `SELECT *` projection backfills automatically; existing
+30-day telemetry ages into full coverage through TTL turnover.
+
 ## CI usage
 
 ```yaml
 # .github/workflows/clickhouse-schema-drift.yml
 - name: Check pending migrations
   run: |
-    bunx @maple/clickhouse-cli@latest status \
-      --url=${{ vars.MAPLE_CH_URL }} \
-      --user=${{ vars.MAPLE_CH_USER }} \
-      --password=${{ secrets.MAPLE_CH_PASSWORD }} \
-      --database=${{ vars.MAPLE_CH_DATABASE }} \
-      | tee status.txt
-    grep -q "pending:\n  (none)" status.txt
+      bunx @maple/clickhouse-cli@latest status \
+        --url=${{ vars.MAPLE_CH_URL }} \
+        --user=${{ vars.MAPLE_CH_USER }} \
+        --password=${{ secrets.MAPLE_CH_PASSWORD }} \
+        --database=${{ vars.MAPLE_CH_DATABASE }} \
+        | tee status.txt
+      grep -q "pending:\n  (none)" status.txt
 ```

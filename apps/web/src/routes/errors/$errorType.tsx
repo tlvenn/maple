@@ -1,12 +1,11 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
-import { Result } from "@/lib/effect-atom"
-import { effectRoute } from "@effect-router/core"
+import { Result, useAtomRefresh } from "@/lib/effect-atom"
 import { Schema } from "effect"
-import { toast } from "sonner"
 import { formatDistanceToNow, format } from "date-fns"
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
+import { ErrorState } from "@/components/common/error-state"
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@maple/ui/components/ui/table"
@@ -17,15 +16,16 @@ import {
 	type ChartConfig,
 } from "@maple/ui/components/ui/chart"
 import {
+	formatBucketLabel,
 	formatDuration,
 	formatNumber,
-	formatBucketLabel,
 	inferBucketSeconds,
 	inferRangeMs,
-} from "@/lib/format"
+} from "@maple/ui/lib/format"
+import { useCopy } from "@maple/ui/hooks/use-copy"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
 import { useRefreshableAtomValue } from "@/hooks/use-refreshable-atom-value"
-import { applyTimeRangeSearch } from "@/components/time-range-picker/search"
+import { TimeRangeSearchFields, applyTimeRangeSearch } from "@/components/time-range-picker/search"
 import { PageRefreshProvider } from "@/components/time-range-picker/page-refresh-context"
 import { TimeRangeHeaderControls } from "@/components/time-range-picker/time-range-header-controls"
 import { HttpSpanLabel } from "@maple/ui/components/traces/http-span-label"
@@ -36,18 +36,17 @@ import {
 } from "@/lib/services/atoms/warehouse-query-atoms"
 import { computeBucketSeconds, toIsoBucket } from "@/api/warehouse/timeseries-utils"
 import { OptionalStringArrayParam } from "@/lib/search-params"
+import { formatAgentDebugPrompt } from "@/components/errors/agent-debug-prompt"
 import type { ErrorByType, ErrorDetailTrace, ErrorsTimeseriesItem } from "@/api/warehouse/errors"
 
 const errorDetailSearchSchema = Schema.Struct({
-	startTime: Schema.optional(Schema.String),
-	endTime: Schema.optional(Schema.String),
-	timePreset: Schema.optional(Schema.String),
 	services: OptionalStringArrayParam,
 	// Human-readable label carried from the list so the header isn't a raw hash.
 	label: Schema.optional(Schema.String),
+	...TimeRangeSearchFields,
 })
 
-export const Route = effectRoute(createFileRoute("/errors/$errorType"))({
+export const Route = createFileRoute("/errors/$errorType")({
 	component: ErrorDetailPage,
 	validateSearch: Schema.toStandardSchemaV1(errorDetailSearchSchema),
 })
@@ -74,6 +73,11 @@ function ErrorDetailContent() {
 	// Prefer the human label passed from the list; fall back to the hash.
 	const displayLabel = search.label ?? fingerprintHash
 	const navigate = useNavigate({ from: Route.fullPath })
+	const messageCopy = useCopy({ label: "Error message" })
+	const promptCopy = useCopy({
+		label: "Agent prompt",
+		successMessage: "Agent prompt copied — paste it into your MCP agent",
+	})
 	const { startTime: effectiveStartTime, endTime: effectiveEndTime } = useEffectiveTimeRange(
 		search.startTime,
 		search.endTime,
@@ -96,40 +100,40 @@ function ErrorDetailContent() {
 
 	const bucketSeconds = computeBucketSeconds(effectiveStartTime, effectiveEndTime)
 
-	const errorResult = useRefreshableAtomValue(
-		getErrorsByTypeResultAtom({
-			data: {
-				startTime: effectiveStartTime,
-				endTime: effectiveEndTime,
-				services: search.services,
-				fingerprintHashes: [fingerprintHash],
-			},
-		}),
-	)
+	const errorAtom = getErrorsByTypeResultAtom({
+		data: {
+			startTime: effectiveStartTime,
+			endTime: effectiveEndTime,
+			services: search.services,
+			fingerprintHashes: [fingerprintHash],
+		},
+	})
+	const errorResult = useRefreshableAtomValue(errorAtom)
+	const refreshError = useAtomRefresh(errorAtom)
 
-	const tracesResult = useRefreshableAtomValue(
-		getErrorDetailTracesResultAtom({
-			data: {
-				fingerprintHash,
-				startTime: effectiveStartTime,
-				endTime: effectiveEndTime,
-				services: search.services,
-				limit: 20,
-			},
-		}),
-	)
+	const tracesAtom = getErrorDetailTracesResultAtom({
+		data: {
+			fingerprintHash,
+			startTime: effectiveStartTime,
+			endTime: effectiveEndTime,
+			services: search.services,
+			limit: 20,
+		},
+	})
+	const tracesResult = useRefreshableAtomValue(tracesAtom)
+	const refreshTraces = useAtomRefresh(tracesAtom)
 
-	const timeseriesResult = useRefreshableAtomValue(
-		getErrorsTimeseriesResultAtom({
-			data: {
-				fingerprintHash,
-				startTime: effectiveStartTime,
-				endTime: effectiveEndTime,
-				services: search.services,
-				bucketSeconds,
-			},
-		}),
-	)
+	const timeseriesAtom = getErrorsTimeseriesResultAtom({
+		data: {
+			fingerprintHash,
+			startTime: effectiveStartTime,
+			endTime: effectiveEndTime,
+			services: search.services,
+			bucketSeconds,
+		},
+	})
+	const timeseriesResult = useRefreshableAtomValue(timeseriesAtom)
+	const refreshTimeseries = useAtomRefresh(timeseriesAtom)
 
 	const statsSection = Result.builder(errorResult)
 		.onInitial(() => (
@@ -143,7 +147,14 @@ function ErrorDetailContent() {
 				))}
 			</div>
 		))
-		.onError(() => null)
+		.onError((error) => (
+			<ErrorState
+				variant="inline"
+				error={error}
+				title="Failed to load error details"
+				onRetry={refreshError}
+			/>
+		))
 		.onSuccess((data: { data: ErrorByType[] }) => {
 			const error = data.data[0]
 			if (!error) return null
@@ -176,6 +187,8 @@ function ErrorDetailContent() {
 				<Skeleton className="h-20 w-full" />
 			</div>
 		))
+		// Same query as the stats section — its failure already renders there,
+		// so don't repeat the error for this section.
 		.onError(() => null)
 		.onSuccess((data: { data: ErrorByType[] }) => {
 			const error = data.data[0]
@@ -188,16 +201,36 @@ function ErrorDetailContent() {
 						<pre className="text-sm font-mono whitespace-pre-wrap break-all">
 							{error.sampleMessage}
 						</pre>
-						<button
-							type="button"
-							className="mt-2 text-xs text-primary hover:underline"
-							onClick={() => {
-								navigator.clipboard.writeText(error.sampleMessage)
-								toast.success("Error message copied to clipboard")
-							}}
-						>
-							Copy error message
-						</button>
+						<div className="mt-2 flex items-center gap-4">
+							<button
+								type="button"
+								className="text-xs text-primary hover:underline"
+								onClick={() => void messageCopy.copy(error.sampleMessage)}
+							>
+								Copy error message
+							</button>
+							<button
+								type="button"
+								className="text-xs text-primary hover:underline"
+								onClick={() =>
+									void promptCopy.copy(
+										formatAgentDebugPrompt({
+											fingerprintHash,
+											label: displayLabel,
+											serviceName:
+												search.services?.length === 1 ? search.services[0] : null,
+											message: error.sampleMessage,
+											occurrenceCount: error.count,
+											affectedServicesCount: error.affectedServicesCount,
+											firstSeen: error.firstSeen.toISOString(),
+											lastSeen: error.lastSeen.toISOString(),
+										}),
+									)
+								}
+							>
+								Copy agent prompt
+							</button>
+						</div>
 					</div>
 				</div>
 			)
@@ -211,7 +244,12 @@ function ErrorDetailContent() {
 				<Skeleton className="h-[160px] w-full" />
 			</div>
 		))
-		.onError(() => null)
+		.onError((error) => (
+			<div className="space-y-2">
+				<h3 className="text-sm font-semibold">Error Frequency</h3>
+				<ErrorState variant="inline" error={error} onRetry={refreshTimeseries} />
+			</div>
+		))
 		.onSuccess((data: { data: ErrorsTimeseriesItem[] }) => {
 			const chartData = data.data.map((item) => ({
 				bucket: toIsoBucket(item.bucket),
@@ -296,9 +334,10 @@ function ErrorDetailContent() {
 				</div>
 			</div>
 		))
-		.onError(() => (
-			<div className="rounded-md border border-destructive/50 bg-destructive/10 p-4">
-				<p className="text-sm text-destructive">Failed to load sample traces</p>
+		.onError((error) => (
+			<div className="space-y-2">
+				<h3 className="text-sm font-semibold">Sample Traces</h3>
+				<ErrorState variant="inline" error={error} onRetry={refreshTraces} />
 			</div>
 		))
 		.onSuccess((data: { data: ErrorDetailTrace[] }) => {
@@ -378,25 +417,34 @@ function ErrorDetailContent() {
 		.render()
 
 	return (
-		<DashboardLayout
-			breadcrumbs={[{ label: "Errors", href: "/errors" }, { label: truncateErrorType(displayLabel, 50) }]}
-			title={displayLabel}
-			headerActions={
-				<TimeRangeHeaderControls
-					startTime={search.startTime}
-					endTime={search.endTime}
-					presetValue={search.timePreset ?? "24h"}
-					onTimeChange={handleTimeChange}
-				/>
-			}
-		>
-			<div className="space-y-6">
-				{statsSection}
-				{messageSection}
-				{chartSection}
-				{tracesSection}
-			</div>
-		</DashboardLayout>
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[{ label: "Errors", href: "/errors" }, { label: truncateErrorType(displayLabel, 50) }]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header title={displayLabel}>
+							<TimeRangeHeaderControls
+								startTime={search.startTime}
+								endTime={search.endTime}
+								presetValue={search.timePreset ?? (search.startTime ? undefined : "24h")}
+								defaultPreset="24h"
+								onTimeChange={handleTimeChange}
+							/>
+						</DashboardLayout.Header>
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>
+						<div className="space-y-6">
+							{statsSection}
+							{messageSection}
+							{chartSection}
+							{tracesSection}
+						</div>
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
 	)
 }
 

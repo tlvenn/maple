@@ -5,23 +5,27 @@ export type MapleStage =
 	| { kind: "dev"; name: string }
 
 const PR_STAGE_RE = /^pr-(\d+)$/
-const DEV_STAGE_RE = /^[a-z0-9][a-z0-9-]*$/
+// Underscores allowed so alchemy's default `dev_${USER}` stage parses as a dev stage.
+const DEV_STAGE_RE = /^[a-z0-9][a-z0-9_-]*$/
 
 export interface MapleDomains {
 	web?: string
 	landing?: string
 	api?: string
 	ingest?: string
-	chat?: string
+	/** Standalone ElectricSQL shape-proxy worker (`apps/electric-sync`). */
+	sync?: string
 	/** Auto-updating local-mode dashboard SPA (the `maple` binary points users here by default). */
 	local?: string
 }
+
+export const CLOUDFLARE_WORKER_PLACEMENT = { region: "aws:us-east-1" } as const
 
 const PRD_DOMAINS: MapleDomains = {
 	web: "app.maple.dev",
 	api: "api.maple.dev",
 	ingest: "ingest.maple.dev",
-	chat: "chat.maple.dev",
+	sync: "sync.maple.dev",
 	landing: "maple.dev",
 	local: "local.maple.dev",
 }
@@ -30,7 +34,7 @@ const STG_DOMAINS: MapleDomains = {
 	web: "staging.maple.dev",
 	api: "api-staging.maple.dev",
 	ingest: "ingest-staging.maple.dev",
-	chat: "chat-staging.maple.dev",
+	sync: "sync-staging.maple.dev",
 	landing: "staging-landing.maple.dev",
 	local: "local-staging.maple.dev",
 }
@@ -55,11 +59,14 @@ export function parseMapleStage(stage: string): MapleStage {
 	}
 
 	if (DEV_STAGE_RE.test(normalized)) {
-		return { kind: "dev", name: normalized }
+		// Underscores are accepted (alchemy's default stage is `dev_${USER}`) but
+		// normalized to hyphens: `name` flows into Cloudflare worker/Hyperdrive
+		// names, which only allow [a-z0-9-].
+		return { kind: "dev", name: normalized.replaceAll("_", "-") }
 	}
 
 	throw new Error(
-		`Unsupported deployment stage "${stage}". Expected prd, stg, pr-<number>, or a dev stage name matching [a-z0-9-]+.`,
+		`Unsupported deployment stage "${stage}". Expected prd, stg, pr-<number>, or a dev stage name matching [a-z0-9][a-z0-9_-]*.`,
 	)
 }
 
@@ -96,22 +103,113 @@ export function resolveMapleDomains(stage: MapleStage): MapleDomains {
 		case "stg":
 			return STG_DOMAINS
 		case "pr":
-			return {}
+			// Give PR previews stable, secret-free URLs. The default workers.dev URL
+			// embeds the Cloudflare account subdomain, which Infisical masks as a
+			// secret — GitHub then refuses to set the environment URL. Custom domains
+			// under the `maple.dev` zone have no secret in them. They also keep every
+			// inter-app URL a plain string at deploy time, which alchemy v2 requires:
+			// resource attributes like `worker.url` are lazy Outputs that cannot be
+			// string-interpolated into another worker's env. local-ui has no pr
+			// domain (nothing links to it from previews); landing gets one so
+			// marketing-page changes are reviewable on a stable URL.
+			return {
+				web: `app-pr-${stage.prNumber}.maple.dev`,
+				api: `api-pr-${stage.prNumber}.maple.dev`,
+				sync: `sync-pr-${stage.prNumber}.maple.dev`,
+				landing: `landing-pr-${stage.prNumber}.maple.dev`,
+			}
 		case "dev":
 			return {}
 	}
 }
 
-export function resolveD1Name(stage: MapleStage): string {
+export type MapleDatabaseMode = "ref" | "managed" | "none"
+
+/**
+ * How a stage reaches the application database.
+ *
+ * - `"ref"` — bind a dashboard-managed Hyperdrive config by ID (stg/prd).
+ * - `"managed"` — alchemy creates a Hyperdrive whose origin is pushed from
+ *   `MAPLE_PG_URL` (dev stages, against the docker-compose Postgres).
+ * - `"none"` — no `MAPLE_DB` binding at all. `DatabasePgLive` then fails every
+ *   query with a `DatabaseError`, so DB-backed routes 500 while the rest of the
+ *   stack serves normally.
+ *
+ * PR previews are deliberately `"none"` (owner decision, 2026-08): the
+ * per-PR PlanetScale branches billed continuously for time used and consumed
+ * the account's Hyperdrive config cap. To reverse, return `"managed"` for `pr`
+ * and restore the PlanetScale/Electric steps in
+ * `.github/workflows/deploy-pr-preview.yml` (the scripts are kept, dormant).
+ */
+export function resolveDatabaseMode(stage: MapleStage): MapleDatabaseMode {
 	switch (stage.kind) {
 		case "prd":
-			return "maple-api"
 		case "stg":
-			return "maple-api-stg"
+			return "ref"
 		case "pr":
-			return `maple-api-pr-${stage.prNumber}`
+			return "none"
 		case "dev":
-			return `maple-api-dev-${stage.name}`
+			return "managed"
+	}
+}
+
+/**
+ * Dashboard-managed Hyperdrive configs, bound by ID (v1's `HyperdriveRef`).
+ * The origin/credentials are managed in the Cloudflare dashboard — deploys
+ * never see or rewrite the database connection. Stages returning undefined get
+ * an alchemy-managed Hyperdrive pushed from MAPLE_PG_URL, or no database at
+ * all — `resolveDatabaseMode` is the authority on which. Config IDs are not
+ * secrets.
+ */
+export function resolveHyperdriveRefId(stage: MapleStage): string | undefined {
+	switch (stage.kind) {
+		case "prd":
+			// `maple-prd` — origin: PlanetScale `main` branch.
+			return "ad4c487838594b89810b23e5fb14e129"
+		case "stg":
+			// TEMPORARY: staging shares prod's `maple-prd` config (owner decision,
+			// 2026-07-14) — stg workers therefore read/write the PRODUCTION
+			// database and the stg alerting crons overlap prod's. Replace with a
+			// dedicated `maple-stg` config (PlanetScale `stg` branch) ASAP.
+			return "ad4c487838594b89810b23e5fb14e129"
+		case "pr":
+		case "dev":
+			return undefined
+	}
+}
+
+export function resolveHyperdriveName(stage: MapleStage): string {
+	switch (stage.kind) {
+		case "prd":
+			// Pre-configured in the Cloudflare dashboard (origin/credentials managed
+			// there); the prod deploy references it by this name. See alchemy.run.ts.
+			return "maple-prd"
+		case "stg":
+			return "maple-db-stg"
+		case "pr":
+			return `maple-db-pr-${stage.prNumber}`
+		case "dev":
+			return `maple-db-dev-${stage.name}`
+	}
+}
+
+/**
+ * PlanetScale Postgres branch backing a stage. One database (`maple-api`)
+ * with a fully-isolated branch per stage. Dev stages have no managed branch —
+ * local dev runs against the docker-compose Postgres — and PR previews no
+ * longer provision one either (see `resolveDatabaseMode`), so the `pr` case
+ * here only documents the mapping the reverse path would restore.
+ */
+export function resolvePlanetScaleBranch(stage: MapleStage): string | undefined {
+	switch (stage.kind) {
+		case "prd":
+			return "main"
+		case "stg":
+			return "stg"
+		case "pr":
+			return `pr-${stage.prNumber}`
+		case "dev":
+			return undefined
 	}
 }
 

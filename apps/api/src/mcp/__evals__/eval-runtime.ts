@@ -1,20 +1,19 @@
 import { ConfigProvider, Effect, Layer, ManagedRuntime, Schema } from "effect"
-import { HttpServerRequest } from "effect/unstable/http"
+import { OrgId, UserId } from "@maple/domain/http"
 import { MainLive } from "@/app"
-import { Env } from "@/lib/Env"
-import { DatabaseLibsqlLive } from "@/lib/DatabaseLibsqlLive"
-import { WorkerEnvironment } from "@/lib/WorkerEnvironment"
-import { cleanupTempDirs, createTempDbUrl } from "@/lib/test-sqlite"
+import { Env } from "@/platform/Env"
+import { WorkerEnvironment } from "@/platform/WorkerEnvironment"
+import { createTestDb } from "@/platform/test-pglite"
 import { mapleToolDefinitions } from "@/mcp/tools/registry"
+import { CurrentMcpTenant } from "@/mcp/lib/query-warehouse"
 import { FIXTURES } from "./utils"
 
 const INTERNAL_TOKEN = "eval-internal-token"
 
-const testEnv = (dbUrl: string): Record<string, string> => ({
+const testEnv = (): Record<string, string> => ({
 	PORT: "3472",
 	TINYBIRD_HOST: "https://maple-eval.tinybird.co",
 	TINYBIRD_TOKEN: "eval-token",
-	MAPLE_DB_URL: dbUrl,
 	MAPLE_AUTH_MODE: "self_hosted",
 	MAPLE_ROOT_PASSWORD: "eval-root-password",
 	MAPLE_DEFAULT_ORG_ID: FIXTURES.orgId,
@@ -34,21 +33,20 @@ export interface EvalRuntime {
 }
 
 /**
- * Build a node runtime for the app services backed by a temp libsql DB + test
- * config (mirrors apps/api `getMapleAgentSetup`/buildSetup, swapping D1→libsql).
+ * Build a node runtime for the app services backed by an in-memory PGlite DB +
+ * test config (mirrors apps/api `getMapleAgentSetup`/buildSetup, swapping Hyperdrive→PGlite).
  * The warehouse client must be faked separately via `installFakeWarehouse` —
  * this runtime uses the REAL WarehouseQueryService. The returned `requestLayer`
- * carries an internal-service-token request so tool handlers resolve the tenant
- * without exercising Clerk/API-key auth.
+ * carries the already-resolved MCP tenant, matching the post-auth dispatcher
+ * context shared by HTTP and RPC.
  */
 export const makeEvalRuntime = (): EvalRuntime => {
-	const tempDirs: string[] = []
-	const { url } = createTempDbUrl("maple-eval-", tempDirs)
-	const env = testEnv(url)
+	const testDb = createTestDb()
+	const env = testEnv()
 
 	const configLive = ConfigProvider.layer(ConfigProvider.fromUnknown(env))
 	const envLive = Env.layer.pipe(Layer.provide(configLive))
-	const databaseLive = DatabaseLibsqlLive.pipe(Layer.provide(envLive))
+	const databaseLive = testDb.layer
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const workerEnvLive = Layer.succeed(WorkerEnvironment, env as Record<string, any>)
 
@@ -60,24 +58,19 @@ export const makeEvalRuntime = (): EvalRuntime => {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const runtime = ManagedRuntime.make(layer as any) as ManagedRuntime.ManagedRuntime<any, never>
 
-	const requestLayer = Layer.succeed(
-		HttpServerRequest.HttpServerRequest,
-		HttpServerRequest.fromWeb(
-			new Request("https://maple.eval/mcp", {
-				headers: {
-					Authorization: `Bearer maple_svc_${INTERNAL_TOKEN}`,
-					"X-Org-Id": FIXTURES.orgId,
-				},
-			}),
-		),
-	)
+	const requestLayer = Layer.succeed(CurrentMcpTenant, {
+		orgId: Schema.decodeUnknownSync(OrgId)(FIXTURES.orgId),
+		userId: Schema.decodeUnknownSync(UserId)("internal-service"),
+		roles: [],
+		authMode: "self_hosted",
+	})
 
 	return {
 		runtime,
 		requestLayer,
 		dispose: async () => {
 			await runtime.dispose()
-			cleanupTempDirs(tempDirs)
+			await testDb.close()
 		},
 	}
 }

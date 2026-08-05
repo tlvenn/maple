@@ -1,7 +1,7 @@
 import { McpQueryError, requiredStringParam, type McpToolRegistrar } from "./types"
 import { Effect, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { withDashboardMutation } from "../lib/dashboard-mutations"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { withDashboardMutation } from "@/mcp/lib/dashboard-mutations"
 
 const TOOL = "remove_dashboard_widget"
 
@@ -24,7 +24,7 @@ export function registerRemoveDashboardWidgetTool(server: McpToolRegistrar) {
 						return yield* Effect.fail(
 							new McpQueryError({
 								message: `Widget not found: ${widget_id}. Use get_dashboard to see existing widget ids.`,
-								pipe: TOOL,
+								pipeName: TOOL,
 							}),
 						)
 					}

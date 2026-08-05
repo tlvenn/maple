@@ -1,9 +1,8 @@
-import { toast } from "sonner"
 import { Link } from "@tanstack/react-router"
-import { ClockIcon, CopyIcon, ExternalLinkIcon, LinkIcon, PulseIcon } from "@/components/icons"
+import { ClockIcon, ExternalLinkIcon, LinkIcon, PulseIcon } from "@/components/icons"
 
-import { useClipboard } from "@maple/ui/hooks/use-clipboard"
 import { CopyableValue } from "@/components/attributes"
+import { CopyButton } from "@maple/ui/components/ui/copy-button"
 import { formatTimestampInTimezone } from "@/lib/timezone-format"
 import { encodeLogKey } from "@/lib/log-key"
 import { buildLogJsonPayload } from "./log-raw-panel"
@@ -20,8 +19,6 @@ interface LogMetaStripProps {
 }
 
 export function LogMetaStrip({ log, timeZone, showOpenFullPage = true }: LogMetaStripProps) {
-	const clipboard = useClipboard()
-
 	return (
 		<div className="flex items-center gap-2 overflow-x-auto border-b px-4 py-1.5 text-xs shrink-0 whitespace-nowrap">
 			<div className="flex items-center gap-1.5 shrink-0">
@@ -69,31 +66,15 @@ export function LogMetaStrip({ log, timeZone, showOpenFullPage = true }: LogMeta
 					</Link>
 				)}
 
-				<button
-					type="button"
-					onClick={() => {
-						clipboard.copy(`${window.location.origin}/logs/${encodeLogKey(log)}`)
-						toast.success("Log link copied to clipboard")
-					}}
-					className="flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
-					title="Copy a shareable link to this log"
-					aria-label="Copy shareable link"
-				>
-					<LinkIcon size={13} />
-				</button>
+				<CopyButton
+					value={() => `${window.location.origin}/logs/${encodeLogKey(log)}`}
+					label="Shareable link"
+					idleIcon={LinkIcon}
+					iconSize={13}
+					tooltip
+				/>
 
-				<button
-					type="button"
-					onClick={() => {
-						clipboard.copy(buildLogJsonPayload(log))
-						toast.success("Copied log as JSON")
-					}}
-					className="flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
-					title="Copy entire log as JSON"
-					aria-label="Copy log as JSON"
-				>
-					<CopyIcon size={13} />
-				</button>
+				<CopyButton value={() => buildLogJsonPayload(log)} label="Log JSON" iconSize={13} tooltip />
 			</div>
 		</div>
 	)

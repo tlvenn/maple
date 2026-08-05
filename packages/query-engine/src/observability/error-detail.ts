@@ -1,10 +1,8 @@
 import { Array as Arr, Effect, pipe } from "effect"
 import type { ErrorDetailTracesOutput, ErrorsTimeseriesOutput, ListLogsOutput } from "@maple/domain/tinybird"
-import { parseWarehouseDateTime } from "../datetime"
+import { parseWarehouseDateTime, formatWarehouseDateTime } from "../datetime"
 import { WarehouseExecutor } from "./WarehouseExecutor"
 import type { TimeRange } from "./types"
-
-const tinybirdDateTime = (d: Date): string => d.toISOString().replace("T", " ").slice(0, 19)
 
 const LOG_WINDOW_HALF_WIDTH_MS = 60 * 60 * 1000
 
@@ -14,14 +12,12 @@ const LOG_WINDOW_HALF_WIDTH_MS = 60 * 60 * 1000
  * pipe-dispatch falls back to an all-time sentinel window (2023→2099) and the
  * lookup scans full retention (mined at p95 ~5s on busy orgs).
  */
-const logRangeAround = (
-	traceStartTime: string,
-): { start_time: string; end_time: string } | undefined => {
+const logRangeAround = (traceStartTime: string): { start_time: string; end_time: string } | undefined => {
 	const ms = parseWarehouseDateTime(traceStartTime)
 	if (Number.isNaN(ms)) return undefined
 	return {
-		start_time: tinybirdDateTime(new Date(ms - LOG_WINDOW_HALF_WIDTH_MS)),
-		end_time: tinybirdDateTime(new Date(ms + LOG_WINDOW_HALF_WIDTH_MS)),
+		start_time: formatWarehouseDateTime(ms - LOG_WINDOW_HALF_WIDTH_MS),
+		end_time: formatWarehouseDateTime(ms + LOG_WINDOW_HALF_WIDTH_MS),
 	}
 }
 

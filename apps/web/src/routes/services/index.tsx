@@ -1,33 +1,33 @@
 import { useNavigate, createFileRoute } from "@tanstack/react-router"
-import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 
 import { OptionalStringArrayParam } from "@/lib/search-params"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { ServicesTable } from "@/components/services/services-table"
 import { ServicesFilterSidebar } from "@/components/services/services-filter-sidebar"
-import { applyTimeRangeSearch } from "@/components/time-range-picker/search"
+import { TimeRangeSearchFields, applyTimeRangeSearch } from "@/components/time-range-picker/search"
 import { PageRefreshProvider } from "@/components/time-range-picker/page-refresh-context"
 import { TimeRangeHeaderControls } from "@/components/time-range-picker/time-range-header-controls"
 import { useEffectiveTimeRange } from "@/hooks/use-effective-time-range"
+import { LONG_RANGE_PRESET_OPTIONS } from "@/lib/time-utils"
+
+const ONE_YEAR_SECONDS = 365 * 24 * 60 * 60
 
 const servicesSearchSchema = Schema.Struct({
 	environments: OptionalStringArrayParam,
 	commitShas: OptionalStringArrayParam,
 	health: Schema.optional(Schema.Literals(["healthy", "degraded", "unhealthy"])),
-	startTime: Schema.optional(Schema.String),
-	endTime: Schema.optional(Schema.String),
-	timePreset: Schema.optional(Schema.String),
+	...TimeRangeSearchFields,
 })
 
 export type ServicesSearchParams = Schema.Schema.Type<typeof servicesSearchSchema>
 
-export const Route = effectRoute(createFileRoute("/services/"))({
+export const Route = createFileRoute("/services/")({
 	component: ServicesPage,
 	validateSearch: Schema.toStandardSchemaV1(servicesSearchSchema),
 })
 
-export function ServicesPage() {
+function ServicesPage() {
 	const search = Route.useSearch()
 	const navigate = useNavigate({ from: Route.fullPath })
 	const { startTime: effectiveStartTime, endTime: effectiveEndTime } = useEffectiveTimeRange(
@@ -52,22 +52,34 @@ export function ServicesPage() {
 
 	return (
 		<PageRefreshProvider timePreset={search.timePreset ?? "12h"}>
-			<DashboardLayout
-				breadcrumbs={[{ label: "Services" }]}
-				title="Services"
-				description="Overview of all services with key metrics."
-				filterSidebar={<ServicesFilterSidebar />}
-				headerActions={
-					<TimeRangeHeaderControls
-						startTime={search.startTime ?? effectiveStartTime}
-						endTime={search.endTime ?? effectiveEndTime}
-						presetValue={search.timePreset ?? "12h"}
-						onTimeChange={handleTimeChange}
-					/>
-				}
-			>
-				<ServicesTable filters={search} />
-			</DashboardLayout>
+			<DashboardLayout.Root>
+				<DashboardLayout.Breadcrumbs items={[{ label: "Services" }]} />
+				<DashboardLayout.Body>
+					<DashboardLayout.Filters>
+						<ServicesFilterSidebar />
+					</DashboardLayout.Filters>
+					<DashboardLayout.Content>
+						<DashboardLayout.Sticky>
+							<DashboardLayout.Header
+								title="Services"
+								description="Overview of all services with key metrics."
+							>
+								<TimeRangeHeaderControls
+									startTime={search.startTime ?? effectiveStartTime}
+									endTime={search.endTime ?? effectiveEndTime}
+									presetValue={search.timePreset ?? (search.startTime ? undefined : "12h")}
+									presets={LONG_RANGE_PRESET_OPTIONS}
+									maxRangeSeconds={ONE_YEAR_SECONDS}
+									onTimeChange={handleTimeChange}
+								/>
+							</DashboardLayout.Header>
+						</DashboardLayout.Sticky>
+						<DashboardLayout.Scroll>
+							<ServicesTable filters={search} />
+						</DashboardLayout.Scroll>
+					</DashboardLayout.Content>
+				</DashboardLayout.Body>
+			</DashboardLayout.Root>
 		</PageRefreshProvider>
 	)
 }

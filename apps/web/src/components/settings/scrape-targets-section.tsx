@@ -1,21 +1,16 @@
 import { Result, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
-import {
-	CreateScrapeTargetRequest,
-	ScrapeIntervalSeconds,
-	UpdateScrapeTargetRequest,
-} from "@maple/domain/http"
-import type {
-	ScrapeAuthType,
-	ScrapeTargetCheckResponse,
-	ScrapeTargetChecksListResponse,
-	ScrapeTargetId,
-	ScrapeTargetResponse,
-	ScrapeTargetType,
-} from "@maple/domain/http"
+import { ScrapeIntervalSeconds } from "@maple/domain/http"
+import type { ScrapeAuthType, ScrapeTargetId } from "@maple/domain/http"
+import type { V2ScrapeTarget, V2ScrapeTargetCheck } from "@maple/domain/http/v2"
 import { useState, type KeyboardEvent, type ReactNode } from "react"
 import { Exit, Schema } from "effect"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
+import { useIntervalRefresh } from "@/hooks/use-interval-refresh"
+import { type ScrapeTargetChecksResponse, useScrapeTargetChecks } from "@/hooks/use-scrape-target-checks"
+import { scrapeTargetsListAtom } from "@/lib/services/atoms/scrape-target-atoms"
+
+import { Alert, AlertDescription, AlertTitle } from "@maple/ui/components/ui/alert"
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -43,17 +38,18 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@maple/ui/components/ui/dropdown-menu"
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@maple/ui/components/ui/empty"
 import { Input } from "@maple/ui/components/ui/input"
 import { Label } from "@maple/ui/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
 import { Switch } from "@maple/ui/components/ui/switch"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@maple/ui/components/ui/tooltip"
 import { cn } from "@maple/ui/lib/utils"
 import {
 	BoltIcon,
 	CircleCheckIcon,
 	CircleInfoIcon,
+	CircleWarningIcon,
 	CircleXmarkIcon,
 	DotsVerticalIcon,
 	ExternalLinkIcon,
@@ -61,23 +57,36 @@ import {
 	HistoryIcon,
 	LoaderIcon,
 	PencilIcon,
-	PlanetScaleIcon,
 	PlusIcon,
 	PulseIcon,
 	TrashIcon,
 } from "@/components/icons"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
-import { formatDuration, formatNumber, formatRelativeTime } from "@/lib/format"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
+import { formatDuration, formatNumber } from "@maple/ui/lib/format"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
+import { diagnoseScrapeError } from "@/lib/scrape-error-diagnosis"
+import { scheduledStatusFromChecks, scheduledStatusFromRollup } from "@/lib/scrape-target-status"
+import { catalogEntry } from "../integrations/integration-catalog"
+import {
+	IntegrationEmpty,
+	IntegrationEmptyCard,
+	IntegrationEmptyFeature,
+	IntegrationEmptyFeatures,
+	IntegrationEmptyFooter,
+	IntegrationEmptyHint,
+	IntegrationEmptyMedia,
+} from "../integrations/integration-empty-state"
 
-type ScrapeTarget = ScrapeTargetResponse
-type ScrapeTargetCheck = ScrapeTargetCheckResponse
-type ScrapeTargetChecksResult = Result.Result<ScrapeTargetChecksListResponse, unknown>
+type ScrapeTarget = V2ScrapeTarget
+type ScrapeTargetCheck = V2ScrapeTargetCheck
+type ScrapeTargetChecksResult = Result.Result<ScrapeTargetChecksResponse, unknown>
 
 const AUTH_TYPE_LABELS: Record<ScrapeAuthType, string> = {
 	none: "None",
 	bearer: "Bearer Token",
 	basic: "Basic Auth",
 	token: "Service Token",
+	planetscale_oauth: "PlanetScale OAuth",
 }
 
 const asScrapeIntervalSeconds = Schema.decodeUnknownSync(ScrapeIntervalSeconds)
@@ -129,85 +138,38 @@ function checksFromResult(result: ScrapeTargetChecksResult): ScrapeTargetCheck[]
 		.orElse(() => [])
 }
 
-function scheduledStatus(
-	target: ScrapeTarget,
-	latestCheck: ScrapeTargetCheck | null,
-	isLoading: boolean,
-) {
-	if (!target.enabled) {
-		return {
-			label: "Disabled",
-			detail: "Collector skips this target",
-			dotClass: "bg-muted-foreground/30",
-			badgeVariant: "outline" as const,
-		}
-	}
-	if (isLoading) {
-		return {
-			label: "Checking",
-			detail: "Loading scheduled history",
-			dotClass: "bg-muted-foreground/40",
-			badgeVariant: "outline" as const,
-		}
-	}
-	if (!latestCheck) {
-		return {
-			label: "No checks",
-			detail: "No scheduled scrape observed",
-			dotClass: "bg-severity-warn",
-			badgeVariant: "warning" as const,
-		}
-	}
-	if (latestCheck.success) {
-		return {
-			label: "Up",
-			detail: `Scheduled ${formatRelativeTime(latestCheck.timestamp)}`,
-			dotClass: "bg-severity-info",
-			badgeVariant: "success" as const,
-		}
-	}
-	return {
-		label: "Down",
-		detail: `Scheduled ${formatRelativeTime(latestCheck.timestamp)}`,
-		dotClass: "bg-destructive",
-		badgeVariant: "error" as const,
-	}
-}
+const COPY = {
+	description: "Scrape Prometheus exporters and inspect scheduled scrape health.",
+	emptyHint: "Targets you add will appear here with per-run scrape health.",
+	emptyFooter: "Any Prometheus-compatible endpoint · scraped on your schedule",
+	features: [
+		{
+			label: "Metrics explorer",
+			title: "Scraped metrics, ready to chart",
+			description: "Scraped metrics land alongside your OTel metrics in the explorer.",
+		},
+		{
+			label: "Dashboards & alerts",
+			title: "Widgets and thresholds",
+			description: "Build dashboard widgets and threshold alerts on any scraped metric.",
+		},
+		{
+			label: "Scrape health",
+			title: "Every run checked",
+			description: "Scheduled probes with per-target history and error diagnosis.",
+		},
+	],
+} as const
 
-interface SourceCopy {
-	readonly description: string
-	readonly emptyTitle: string
-	readonly emptyDescription: string
-}
-
-const SOURCE_COPY: Record<"all" | ScrapeTargetType, SourceCopy> = {
-	all: {
-		description: "Scrape Prometheus exporters and inspect scheduled scrape health.",
-		emptyTitle: "No scrape targets",
-		emptyDescription: "Add a Prometheus exporter endpoint to start scraping metrics.",
-	},
-	prometheus: {
-		description: "Scrape Prometheus exporters and inspect scheduled scrape health.",
-		emptyTitle: "No scrape targets",
-		emptyDescription: "Add a Prometheus exporter endpoint to start scraping metrics.",
-	},
-	planetscale: {
-		description:
-			"Connect PlanetScale organizations — Maple discovers and scrapes every database branch automatically.",
-		emptyTitle: "No PlanetScale organizations",
-		emptyDescription:
-			"Connect an organization with a service token to start scraping branch metrics.",
-	},
-}
-
+/**
+ * Prometheus scrape-target manager. PlanetScale metrics collection is fully
+ * managed by its integration and never surfaces here — this section only
+ * lists and edits user-created prometheus targets.
+ */
 export function ScrapeTargetsSection({
-	sourceFilter,
+	sourceFilter = "prometheus",
 }: {
-	/**
-	 * Scope this section to one target type (Integrations hub drill-ins):
-	 * filters the list, presets the add dialog, and hides the source selector.
-	 */
-	sourceFilter?: ScrapeTargetType
+	sourceFilter?: "prometheus"
 } = {}) {
 	const [dialogOpen, setDialogOpen] = useState(false)
 	const [isSaving, setIsSaving] = useState(false)
@@ -217,70 +179,71 @@ export function ScrapeTargetsSection({
 	const [selectedTargetId, setSelectedTargetId] = useState<ScrapeTargetId | null>(null)
 
 	const [editingTarget, setEditingTarget] = useState<ScrapeTarget | null>(null)
-	const [formTargetType, setFormTargetType] = useState<ScrapeTargetType>("prometheus")
 	const [formName, setFormName] = useState("")
 	const [formServiceName, setFormServiceName] = useState("")
 	const [formUrl, setFormUrl] = useState("")
-	const [formOrganization, setFormOrganization] = useState("")
-	const [formTokenId, setFormTokenId] = useState("")
-	const [formTokenSecret, setFormTokenSecret] = useState("")
 	const [formInterval, setFormInterval] = useState("15")
 	const [formAuthType, setFormAuthType] = useState<ScrapeAuthType>("none")
 	const [formAuthToken, setFormAuthToken] = useState("")
 	const [formAuthUsername, setFormAuthUsername] = useState("")
 	const [formAuthPassword, setFormAuthPassword] = useState("")
 
-	const listQueryAtom = MapleApiAtomClient.query("scrapeTargets", "list", {})
+	const listQueryAtom = scrapeTargetsListAtom
 	const listResult = useAtomValue(listQueryAtom)
 	const refreshTargets = useAtomRefresh(listQueryAtom)
+	useIntervalRefresh(refreshTargets, { intervalMs: 30_000, enabled: true })
 
-	const createMutation = useAtomSet(MapleApiAtomClient.mutation("scrapeTargets", "create"), {
+	const createMutation = useAtomSet(MapleApiV2AtomClient.mutation("scrapeTargets", "create"), {
 		mode: "promiseExit",
 	})
-	const updateMutation = useAtomSet(MapleApiAtomClient.mutation("scrapeTargets", "update"), {
+	const updateMutation = useAtomSet(MapleApiV2AtomClient.mutation("scrapeTargets", "update"), {
 		mode: "promiseExit",
 	})
-	const deleteMutation = useAtomSet(MapleApiAtomClient.mutation("scrapeTargets", "delete"), {
+	const deleteMutation = useAtomSet(MapleApiV2AtomClient.mutation("scrapeTargets", "delete"), {
 		mode: "promiseExit",
 	})
-	const probeMutation = useAtomSet(MapleApiAtomClient.mutation("scrapeTargets", "probe"), {
+	const probeMutation = useAtomSet(MapleApiV2AtomClient.mutation("scrapeTargets", "probe"), {
 		mode: "promiseExit",
 	})
 
 	const targets = Result.builder(listResult)
-		.onSuccess((response) => [...response.targets] as ScrapeTarget[])
-		.orElse(() => [])
-		.filter((target) => !sourceFilter || target.targetType === sourceFilter)
+		.onSuccess((response) => [...response.data])
+		.orElse(() => [] as ScrapeTarget[])
+		.filter((target) => target.target_type === sourceFilter)
 	const selectedTarget = targets.find((target) => target.id === selectedTargetId) ?? null
-	const copy = SOURCE_COPY[sourceFilter ?? "all"]
+	const copy = COPY
+	// When empty, the centered empty state owns the primary action — hide the toolbar row.
+	const isEmpty = Result.isSuccess(listResult) && targets.length === 0
+	const emptyEntry = catalogEntry(sourceFilter)
 
 	async function handleProbe(target: ScrapeTarget) {
 		setProbingId(target.id)
-		const result = await probeMutation({ params: { targetId: target.id } })
+		const result = await probeMutation({
+			params: { id: target.id },
+			reactivityKeys: ["scrapeTargets"],
+		})
 		if (Exit.isSuccess(result)) {
 			refreshTargets()
 			if (result.value.success) {
-				toast.success("Connection successful")
+				toastManager.add({ title: "Connection successful", type: "success" })
 			} else {
-				toast.error(`Connection failed: ${result.value.lastScrapeError}`)
+				toastManager.add({
+					title: `Connection failed: ${result.value.last_scrape_error}`,
+					type: "error",
+				})
 			}
 		} else {
-			toast.error("Failed to test connection")
+			toastManager.add({ title: "Failed to test connection", type: "error" })
 		}
 		setProbingId(null)
 	}
 
 	function openAddDialog() {
-		const targetType = sourceFilter ?? "prometheus"
 		setEditingTarget(null)
-		setFormTargetType(targetType)
 		setFormName("")
 		setFormServiceName("")
 		setFormUrl("")
-		setFormOrganization("")
-		setFormTokenId("")
-		setFormTokenSecret("")
-		setFormInterval(targetType === "planetscale" ? "30" : "15")
+		setFormInterval("15")
 		setFormAuthType("none")
 		setFormAuthToken("")
 		setFormAuthUsername("")
@@ -290,34 +253,18 @@ export function ScrapeTargetsSection({
 
 	function openEditDialog(target: ScrapeTarget) {
 		setEditingTarget(target)
-		setFormTargetType(target.targetType)
 		setFormName(target.name)
-		setFormServiceName(target.serviceName ?? "")
+		setFormServiceName(target.service_name ?? "")
 		setFormUrl(target.url)
-		setFormOrganization(target.organization ?? "")
-		setFormTokenId("")
-		setFormTokenSecret("")
-		setFormInterval(String(target.scrapeIntervalSeconds))
-		setFormAuthType(target.authType)
+		setFormInterval(String(target.scrape_interval_seconds))
+		setFormAuthType(target.auth_type)
 		setFormAuthToken("")
 		setFormAuthUsername("")
 		setFormAuthPassword("")
 		setDialogOpen(true)
 	}
 
-	function selectTargetType(type: ScrapeTargetType) {
-		setFormTargetType(type)
-		setFormInterval(type === "planetscale" ? "30" : "15")
-	}
-
 	function buildAuthCredentials(): string | null {
-		if (formTargetType === "planetscale") {
-			if (!formTokenId.trim() || !formTokenSecret.trim()) return null
-			return JSON.stringify({
-				tokenId: formTokenId.trim(),
-				tokenSecret: formTokenSecret.trim(),
-			})
-		}
 		if (formAuthType === "bearer") {
 			if (!formAuthToken.trim()) return null
 			return JSON.stringify({ token: formAuthToken.trim() })
@@ -333,82 +280,65 @@ export function ScrapeTargetsSection({
 	}
 
 	async function handleSave() {
-		const isPlanetScale = formTargetType === "planetscale"
-		if (!formName.trim() || (isPlanetScale ? !formOrganization.trim() : !formUrl.trim())) {
-			toast.error(isPlanetScale ? "Name and organization are required" : "Name and URL are required")
+		if (!formName.trim() || !formUrl.trim()) {
+			toastManager.add({ title: "Name and URL are required", type: "error" })
 			return
 		}
 
 		let parsedInterval: ScrapeIntervalSeconds
 		try {
-			parsedInterval = asScrapeIntervalSeconds(
-				Number.parseInt(formInterval, 10) || (isPlanetScale ? 30 : 15),
-			)
+			parsedInterval = asScrapeIntervalSeconds(Number.parseInt(formInterval, 10) || 15)
 		} catch {
-			toast.error("Scrape interval must be an integer from 5 to 300 seconds")
+			toastManager.add({
+				title: "Scrape interval must be an integer from 5 to 300 seconds",
+				type: "error",
+			})
 			return
 		}
 
 		const authCredentials = buildAuthCredentials()
-		if (isPlanetScale && !editingTarget && authCredentials === null) {
-			toast.error("Service token ID and secret are required")
-			return
-		}
 
 		setIsSaving(true)
 
 		if (editingTarget) {
 			const result = await updateMutation({
-				params: { targetId: editingTarget.id },
-				payload: new UpdateScrapeTargetRequest({
+				params: { id: editingTarget.id },
+				payload: {
 					name: formName.trim(),
-					scrapeIntervalSeconds: parsedInterval,
-					serviceName: formServiceName.trim() || null,
-					...(isPlanetScale
-						? {
-								organization: formOrganization.trim(),
-								authType: "token" as const,
-							}
-						: {
-								url: formUrl.trim(),
-								authType: formAuthType,
-							}),
-					...(authCredentials !== null ? { authCredentials } : {}),
-				}),
+					scrape_interval_seconds: parsedInterval,
+					service_name: formServiceName.trim() || null,
+					url: formUrl.trim(),
+					auth_type: formAuthType,
+					...(authCredentials !== null ? { auth_credentials: authCredentials } : {}),
+				},
+				reactivityKeys: ["scrapeTargets"],
 			})
 			if (Exit.isSuccess(result)) {
-				toast.success("Scrape target updated")
-				setDialogOpen(false)
 				refreshTargets()
+				toastManager.add({ title: "Scrape target updated", type: "success" })
+				setDialogOpen(false)
 			} else {
-				toast.error("Failed to update scrape target")
+				toastManager.add({ title: "Failed to update scrape target", type: "error" })
 			}
 		} else {
 			const result = await createMutation({
-				payload: new CreateScrapeTargetRequest({
+				payload: {
 					name: formName.trim(),
-					scrapeIntervalSeconds: parsedInterval,
-					serviceName: formServiceName.trim() || null,
-					...(isPlanetScale
-						? {
-								targetType: "planetscale" as const,
-								organization: formOrganization.trim(),
-								authType: "token" as const,
-							}
-						: {
-								url: formUrl.trim(),
-								authType: formAuthType,
-							}),
-					...(authCredentials !== null ? { authCredentials } : {}),
-				}),
+					scrape_interval_seconds: parsedInterval,
+					service_name: formServiceName.trim() || null,
+					url: formUrl.trim(),
+					auth_type: formAuthType,
+					...(authCredentials !== null ? { auth_credentials: authCredentials } : {}),
+				},
+				reactivityKeys: ["scrapeTargets"],
 			})
 			if (Exit.isSuccess(result)) {
-				toast.success("Scrape target created")
+				refreshTargets()
+				toastManager.add({ title: "Scrape target created", type: "success" })
 				setDialogOpen(false)
 				setSelectedTargetId(result.value.id)
-				refreshTargets()
 			} else {
-				toast.error("Failed to create scrape target")
+				toastManager.add({ title: "Failed to create scrape target", type: "error" })
 			}
 		}
 		setIsSaving(false)
@@ -416,28 +346,32 @@ export function ScrapeTargetsSection({
 
 	async function handleDelete(targetId: ScrapeTargetId) {
 		setDeleteConfirmTarget(null)
-		const result = await deleteMutation({ params: { targetId } })
+		const result = await deleteMutation({
+			params: { id: targetId },
+			reactivityKeys: ["scrapeTargets"],
+		})
 		if (Exit.isSuccess(result)) {
-			toast.success("Scrape target deleted")
-			if (selectedTargetId === targetId) setSelectedTargetId(null)
 			refreshTargets()
+			toastManager.add({ title: "Scrape target deleted", type: "success" })
+			if (selectedTargetId === targetId) setSelectedTargetId(null)
 		} else {
-			toast.error("Failed to delete scrape target")
+			toastManager.add({ title: "Failed to delete scrape target", type: "error" })
 		}
 	}
 
 	async function handleToggleEnabled(target: ScrapeTarget) {
 		setTogglingId(target.id)
 		const result = await updateMutation({
-			params: { targetId: target.id },
-			payload: new UpdateScrapeTargetRequest({
+			params: { id: target.id },
+			payload: {
 				enabled: !target.enabled,
-			}),
+			},
+			reactivityKeys: ["scrapeTargets"],
 		})
-		if (Exit.isSuccess(result)) {
-			refreshTargets()
+		if (!Exit.isSuccess(result)) {
+			toastManager.add({ title: "Failed to update scrape target", type: "error" })
 		} else {
-			toast.error("Failed to update scrape target")
+			refreshTargets()
 		}
 		setTogglingId(null)
 	}
@@ -445,13 +379,15 @@ export function ScrapeTargetsSection({
 	return (
 		<>
 			<div className="space-y-4">
-				<div className="flex items-center justify-between gap-3">
-					<p className="text-muted-foreground text-sm">{copy.description}</p>
-					<Button size="sm" className="shrink-0" onClick={openAddDialog}>
-						<PlusIcon size={14} />
-						Add Target
-					</Button>
-				</div>
+				{!isEmpty && (
+					<div className="flex items-center justify-between gap-3">
+						<p className="text-muted-foreground text-sm">{copy.description}</p>
+						<Button size="sm" className="shrink-0" onClick={openAddDialog}>
+							<PlusIcon size={14} />
+							Add Target
+						</Button>
+					</div>
+				)}
 
 				{Result.isInitial(listResult) ? (
 					<div className="space-y-2">
@@ -460,30 +396,36 @@ export function ScrapeTargetsSection({
 						<Skeleton className="h-[60px] w-full" />
 					</div>
 				) : !Result.isSuccess(listResult) ? (
-					<div className="text-muted-foreground py-8 text-center text-sm">
+					<div className="text-muted-foreground flex flex-col items-center gap-3 py-8 text-center text-sm">
 						Failed to load scrape targets.
+						<Button variant="outline" size="sm" onClick={() => refreshTargets()}>
+							Try again
+						</Button>
 					</div>
 				) : targets.length === 0 ? (
-					<Empty className="py-12">
-						<EmptyHeader>
-							<EmptyMedia variant="icon">
-								{sourceFilter === "planetscale" ? (
-									<PlanetScaleIcon size={16} />
-								) : (
-									<FireIcon size={16} />
-								)}
-							</EmptyMedia>
-							<EmptyTitle>{copy.emptyTitle}</EmptyTitle>
-							<EmptyDescription>{copy.emptyDescription}</EmptyDescription>
-						</EmptyHeader>
-						<Button size="sm" onClick={openAddDialog}>
-							<PlusIcon size={14} />
-							Add Target
-						</Button>
-					</Empty>
+					<IntegrationEmpty
+						icon={emptyEntry?.icon ?? FireIcon}
+						accent={emptyEntry?.accent ?? "#E6522C"}
+						iconClassName={emptyEntry?.iconClassName}
+					>
+						<IntegrationEmptyFeatures>
+							{copy.features.map((feature) => (
+								<IntegrationEmptyFeature key={feature.label} {...feature} />
+							))}
+						</IntegrationEmptyFeatures>
+						<IntegrationEmptyCard>
+							<IntegrationEmptyMedia />
+							<IntegrationEmptyHint>{copy.emptyHint}</IntegrationEmptyHint>
+							<Button onClick={openAddDialog}>
+								<PlusIcon size={16} />
+								Add Target
+							</Button>
+							<IntegrationEmptyFooter>{copy.emptyFooter}</IntegrationEmptyFooter>
+						</IntegrationEmptyCard>
+					</IntegrationEmpty>
 				) : (
 					<div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
-						<div className="divide-y overflow-hidden rounded-lg border bg-card/40">
+						<div className="divide-y overflow-hidden rounded-lg border bg-card">
 							{targets.map((target) => (
 								<ScrapeTargetRow
 									key={target.id}
@@ -491,7 +433,6 @@ export function ScrapeTargetsSection({
 									selected={target.id === selectedTarget?.id}
 									toggling={togglingId === target.id}
 									probing={probingId === target.id}
-									hideTypeBadge={sourceFilter === "planetscale"}
 									onSelect={setSelectedTargetId}
 									onProbe={handleProbe}
 									onToggle={handleToggleEnabled}
@@ -511,7 +452,7 @@ export function ScrapeTargetsSection({
 								onDelete={setDeleteConfirmTarget}
 							/>
 						) : (
-							<div className="hidden rounded-lg border bg-card/40 p-4 lg:block">
+							<div className="hidden rounded-lg border bg-card p-4 lg:block">
 								<div className="text-muted-foreground flex h-full min-h-[260px] flex-col items-center justify-center gap-2 text-center text-xs">
 									<CircleInfoIcon size={18} />
 									<span>Click a target to inspect scheduled checks.</span>
@@ -531,32 +472,10 @@ export function ScrapeTargetsSection({
 						<DialogDescription>
 							{editingTarget
 								? "Update the scrape target configuration."
-								: formTargetType === "planetscale"
-									? "Connect a PlanetScale organization. Maple discovers every database branch's metrics endpoint and scrapes them automatically."
-									: "Enter the URL of a Prometheus exporter endpoint. Maple will periodically scrape this endpoint for metrics."}
+								: "Enter the URL of a Prometheus exporter endpoint. Maple will periodically scrape this endpoint for metrics."}
 						</DialogDescription>
 					</DialogHeader>
 					<div className="space-y-4 px-6 py-2">
-						{!editingTarget && !sourceFilter && (
-							<div className="space-y-2">
-								<Label>Source</Label>
-								<Select
-									items={{ prometheus: "Prometheus endpoint", planetscale: "PlanetScale" }}
-									value={formTargetType}
-									onValueChange={(val: string | null) =>
-										selectTargetType((val as ScrapeTargetType | null) ?? "prometheus")
-									}
-								>
-									<SelectTrigger className="w-full">
-										<SelectValue placeholder="Select source" />
-									</SelectTrigger>
-									<SelectContent>
-										<SelectItem value="prometheus">Prometheus endpoint</SelectItem>
-										<SelectItem value="planetscale">PlanetScale</SelectItem>
-									</SelectContent>
-								</Select>
-							</div>
-						)}
 						<div className="space-y-2">
 							<Label htmlFor="scrape-name">Name</Label>
 							<Input
@@ -579,64 +498,15 @@ export function ScrapeTargetsSection({
 								empty.
 							</p>
 						</div>
-						{formTargetType === "prometheus" ? (
-							<div className="space-y-2">
-								<Label htmlFor="scrape-url">URL</Label>
-								<Input
-									id="scrape-url"
-									placeholder="e.g. https://myapp.com:9090/metrics"
-									value={formUrl}
-									onChange={(e) => setFormUrl(e.target.value)}
-								/>
-							</div>
-						) : (
-							<>
-								<div className="space-y-2">
-									<Label htmlFor="scrape-org">Organization</Label>
-									<Input
-										id="scrape-org"
-										placeholder="e.g. my-planetscale-org"
-										value={formOrganization}
-										onChange={(e) => setFormOrganization(e.target.value)}
-									/>
-									<p className="text-muted-foreground text-xs">
-										Your PlanetScale organization name as it appears in the dashboard URL.
-									</p>
-								</div>
-								<div className="space-y-2">
-									<Label htmlFor="scrape-token-id">Service Token ID</Label>
-									<Input
-										id="scrape-token-id"
-										placeholder={
-											editingTarget?.hasCredentials
-												? "Leave blank to keep existing"
-												: "Enter service token ID"
-										}
-										value={formTokenId}
-										onChange={(e) => setFormTokenId(e.target.value)}
-									/>
-								</div>
-								<div className="space-y-2">
-									<Label htmlFor="scrape-token-secret">Service Token Secret</Label>
-									<Input
-										id="scrape-token-secret"
-										type="password"
-										placeholder={
-											editingTarget?.hasCredentials
-												? "Leave blank to keep existing"
-												: "Enter service token secret"
-										}
-										value={formTokenSecret}
-										onChange={(e) => setFormTokenSecret(e.target.value)}
-									/>
-									<p className="text-muted-foreground text-xs">
-										Create a service token with the{" "}
-										<span className="font-mono">read_metrics_endpoints</span> organization
-										permission.
-									</p>
-								</div>
-							</>
-						)}
+						<div className="space-y-2">
+							<Label htmlFor="scrape-url">URL</Label>
+							<Input
+								id="scrape-url"
+								placeholder="e.g. https://myapp.com:9090/metrics"
+								value={formUrl}
+								onChange={(e) => setFormUrl(e.target.value)}
+							/>
+						</div>
 						<div className="space-y-2">
 							<Label htmlFor="scrape-interval">Scrape Interval (seconds)</Label>
 							<Input
@@ -648,7 +518,6 @@ export function ScrapeTargetsSection({
 								onChange={(e) => setFormInterval(e.target.value)}
 							/>
 						</div>
-						{formTargetType === "prometheus" && (
 						<div className="space-y-2">
 							<Label>Authentication</Label>
 							<Select
@@ -671,15 +540,14 @@ export function ScrapeTargetsSection({
 								</SelectContent>
 							</Select>
 						</div>
-						)}
-						{formTargetType === "prometheus" && formAuthType === "bearer" && (
+						{formAuthType === "bearer" && (
 							<div className="space-y-2">
 								<Label htmlFor="scrape-auth-token">Bearer Token</Label>
 								<Input
 									id="scrape-auth-token"
 									type="password"
 									placeholder={
-										editingTarget?.hasCredentials && editingTarget.authType === "bearer"
+										editingTarget?.has_credentials && editingTarget.auth_type === "bearer"
 											? "Leave blank to keep existing"
 											: "Enter bearer token"
 									}
@@ -688,15 +556,15 @@ export function ScrapeTargetsSection({
 								/>
 							</div>
 						)}
-						{formTargetType === "prometheus" && formAuthType === "basic" && (
+						{formAuthType === "basic" && (
 							<>
 								<div className="space-y-2">
 									<Label htmlFor="scrape-auth-username">Username</Label>
 									<Input
 										id="scrape-auth-username"
 										placeholder={
-											editingTarget?.hasCredentials &&
-											editingTarget.authType === "basic"
+											editingTarget?.has_credentials &&
+											editingTarget.auth_type === "basic"
 												? "Leave blank to keep existing"
 												: "Enter username"
 										}
@@ -710,8 +578,8 @@ export function ScrapeTargetsSection({
 										id="scrape-auth-password"
 										type="password"
 										placeholder={
-											editingTarget?.hasCredentials &&
-											editingTarget.authType === "basic"
+											editingTarget?.has_credentials &&
+											editingTarget.auth_type === "basic"
 												? "Leave blank to keep existing"
 												: "Enter password"
 										}
@@ -760,12 +628,12 @@ export function ScrapeTargetsSection({
 					<AlertDialogFooter>
 						<AlertDialogCancel>Cancel</AlertDialogCancel>
 						<AlertDialogAction
+							variant="destructive"
 							onClick={() => {
 								if (deleteConfirmTarget) {
 									void handleDelete(deleteConfirmTarget.id)
 								}
 							}}
-							className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
 						>
 							Delete
 						</AlertDialogAction>
@@ -781,7 +649,6 @@ function ScrapeTargetRow({
 	selected,
 	toggling,
 	probing,
-	hideTypeBadge,
 	onSelect,
 	onProbe,
 	onToggle,
@@ -792,23 +659,13 @@ function ScrapeTargetRow({
 	selected: boolean
 	toggling: boolean
 	probing: boolean
-	/** The PlanetScale drill-in shows only planetscale targets — the badge is noise there. */
-	hideTypeBadge?: boolean
 	onSelect: (targetId: ScrapeTargetId) => void
 	onProbe: (target: ScrapeTarget) => void
 	onToggle: (target: ScrapeTarget) => void
 	onEdit: (target: ScrapeTarget) => void
 	onDelete: (target: ScrapeTarget) => void
 }) {
-	const latestCheckResult = useAtomValue(
-		MapleApiAtomClient.query("scrapeTargets", "listChecks", {
-			params: { targetId: target.id },
-			query: { limit: 1 },
-			reactivityKeys: ["scrapeTargetChecks", target.id, "latest"],
-		}),
-	)
-	const latestCheck = checksFromResult(latestCheckResult).at(0) ?? null
-	const status = scheduledStatus(target, latestCheck, Result.isInitial(latestCheckResult))
+	const status = scheduledStatusFromRollup(target)
 
 	function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
 		if (event.key === "Enter" || event.key === " ") {
@@ -837,43 +694,38 @@ function ScrapeTargetRow({
 					<Badge variant={status.badgeVariant} className="shrink-0">
 						{status.label}
 					</Badge>
-					{target.targetType === "planetscale" && !hideTypeBadge && (
+					{target.service_name && (
 						<Badge variant="outline" className="shrink-0">
-							PlanetScale
+							{target.service_name}
 						</Badge>
 					)}
-					{target.serviceName && (
+					{target.auth_type !== "none" && (
 						<Badge variant="outline" className="shrink-0">
-							{target.serviceName}
-						</Badge>
-					)}
-					{target.authType !== "none" && (
-						<Badge variant="outline" className="shrink-0">
-							{AUTH_TYPE_LABELS[target.authType] ?? target.authType}
+							{AUTH_TYPE_LABELS[target.auth_type] ?? target.auth_type}
 						</Badge>
 					)}
 				</div>
 				<div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-					<span className="max-w-[280px] truncate font-mono">
-						{target.targetType === "planetscale"
-							? (target.organization ?? hostnameFromUrl(target.url))
-							: hostnameFromUrl(target.url)}
-					</span>
-					<span>{target.scrapeIntervalSeconds}s interval</span>
+					<span className="max-w-[280px] truncate font-mono">{hostnameFromUrl(target.url)}</span>
+					<span>{target.scrape_interval_seconds}s interval</span>
 					<span>{status.detail}</span>
-					{target.lastScrapeAt && <span>Last scrape {formatRelativeTime(target.lastScrapeAt)}</span>}
+					{target.last_scrape_at && (
+						<span>Last scrape {formatRelativeTime(target.last_scrape_at)}</span>
+					)}
 				</div>
-				{latestCheck?.message && !latestCheck.success && (
-					<div className="mt-1.5 flex items-center gap-1.5 text-xs text-destructive">
-						<CircleXmarkIcon size={12} className="shrink-0" />
-						<span className="truncate">{latestCheck.message}</span>
-					</div>
-				)}
-				{target.lastScrapeError && (
-					<div className="mt-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-						<CircleInfoIcon size={12} className="shrink-0" />
-						<span className="truncate">Last scrape: {target.lastScrapeError}</span>
-					</div>
+				{target.last_scrape_error && (
+					<Tooltip>
+						<TooltipTrigger
+							render={<div />}
+							className="mt-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
+						>
+							<CircleInfoIcon size={12} className="shrink-0" />
+							<span className="truncate">Last scrape: {target.last_scrape_error}</span>
+						</TooltipTrigger>
+						<TooltipContent className="max-w-xs font-mono text-xs">
+							{target.last_scrape_error}
+						</TooltipContent>
+					</Tooltip>
 				)}
 			</div>
 
@@ -912,12 +764,17 @@ function ScrapeTargetRow({
 						<DotsVerticalIcon size={14} />
 					</DropdownMenuTrigger>
 					<DropdownMenuContent align="end">
-						<DropdownMenuItem onClick={() => onEdit(target)}>
+						{/* Managed targets are edited/removed through the owning integration card. */}
+						<DropdownMenuItem disabled={target.managed_by != null} onClick={() => onEdit(target)}>
 							<PencilIcon size={14} />
 							Edit
 						</DropdownMenuItem>
 						<DropdownMenuSeparator />
-						<DropdownMenuItem variant="destructive" onClick={() => onDelete(target)}>
+						<DropdownMenuItem
+							variant="destructive"
+							disabled={target.managed_by != null}
+							onClick={() => onDelete(target)}
+						>
 							<TrashIcon size={14} />
 							Delete
 						</DropdownMenuItem>
@@ -945,19 +802,25 @@ function ScrapeTargetDetails({
 	onEdit: (target: ScrapeTarget) => void
 	onDelete: (target: ScrapeTarget) => void
 }) {
-	const checksQueryAtom = MapleApiAtomClient.query("scrapeTargets", "listChecks", {
-		params: { targetId: target.id },
-		query: { limit: 20 },
-		reactivityKeys: ["scrapeTargetChecks", target.id],
-	})
-	const checksResult = useAtomValue(checksQueryAtom)
+	const { result: checksResult } = useScrapeTargetChecks(target.id)
 	const checks = checksFromResult(checksResult)
 	const latestCheck = checks.at(0) ?? null
-	const status = scheduledStatus(target, latestCheck, Result.isInitial(checksResult))
-	const labels = labelEntries(target.labelsJson)
+	const status = scheduledStatusFromChecks(
+		target,
+		latestCheck,
+		Result.isInitial(checksResult),
+		Result.isFailure(checksResult),
+	)
+	const labels = labelEntries(target.labels_json)
+
+	// Diagnose the freshest failure: the latest failed check, falling back to the
+	// target-level rollup error. Healthy targets show no banner.
+	const failureMessage =
+		latestCheck && !latestCheck.success ? latestCheck.message : target.last_scrape_error
+	const diagnosis = diagnoseScrapeError(failureMessage, target.target_type)
 
 	return (
-		<aside className="rounded-lg border bg-card/40">
+		<aside className="rounded-lg border bg-card">
 			<div className="space-y-3 border-b p-4">
 				<div className="flex items-start justify-between gap-3">
 					<div className="min-w-0">
@@ -974,19 +837,26 @@ function ScrapeTargetDetails({
 						{probing ? <LoaderIcon size={14} className="animate-spin" /> : <BoltIcon size={14} />}
 						Test
 					</Button>
-					<Button variant="outline" size="sm" onClick={() => onEdit(target)}>
+					{/* Managed targets are edited/removed through the owning integration card. */}
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={() => onEdit(target)}
+						disabled={target.managed_by != null}
+					>
 						<PencilIcon size={14} />
 						Edit
+					</Button>
+					<Button variant="ghost" size="sm" onClick={() => onToggle(target)} disabled={toggling}>
+						{target.enabled ? "Disable" : "Enable"}
 					</Button>
 					<Button
 						variant="ghost"
 						size="sm"
-						onClick={() => onToggle(target)}
-						disabled={toggling}
+						className="text-destructive"
+						onClick={() => onDelete(target)}
+						disabled={target.managed_by != null}
 					>
-						{target.enabled ? "Disable" : "Enable"}
-					</Button>
-					<Button variant="ghost" size="sm" className="text-destructive" onClick={() => onDelete(target)}>
 						<TrashIcon size={14} />
 						Delete
 					</Button>
@@ -994,25 +864,50 @@ function ScrapeTargetDetails({
 			</div>
 
 			<div className="space-y-5 p-4">
+				{diagnosis && (
+					<Alert variant={diagnosis.severity}>
+						<CircleWarningIcon size={16} />
+						<AlertTitle>{diagnosis.title}</AlertTitle>
+						<AlertDescription>
+							<p>{diagnosis.summary}</p>
+							<div className="space-y-1">
+								<p className="font-medium text-foreground">How to fix</p>
+								<ul className="list-disc space-y-0.5 pl-4">
+									{diagnosis.fixes.map((fix) => (
+										<li key={fix}>{fix}</li>
+									))}
+								</ul>
+							</div>
+							{failureMessage && (
+								<p className="font-mono text-[0.7rem] text-muted-foreground/80">
+									{failureMessage}
+								</p>
+							)}
+						</AlertDescription>
+					</Alert>
+				)}
+
 				<section className="space-y-2">
 					<div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
 						<PulseIcon size={13} />
 						Scheduled Scrape
 					</div>
 					<div className="grid grid-cols-2 gap-2 text-xs">
-						<MetricBox label="Interval" value={`${target.scrapeIntervalSeconds}s`} />
+						<MetricBox label="Interval" value={`${target.scrape_interval_seconds}s`} />
 						<MetricBox
 							label="Duration"
-							value={latestCheck ? formatDurationSeconds(latestCheck.durationSeconds) : "-"}
+							value={latestCheck ? formatDurationSeconds(latestCheck.duration_seconds) : "-"}
 						/>
 						<MetricBox
 							label="Samples"
-							value={latestCheck ? formatOptionalCount(latestCheck.samplesScraped) : "-"}
+							value={latestCheck ? formatOptionalCount(latestCheck.samples_scraped) : "-"}
 						/>
 						<MetricBox
 							label="Post relabel"
 							value={
-								latestCheck ? formatOptionalCount(latestCheck.samplesPostMetricRelabeling) : "-"
+								latestCheck
+									? formatOptionalCount(latestCheck.samples_post_metric_relabeling)
+									: "-"
 							}
 						/>
 					</div>
@@ -1024,16 +919,15 @@ function ScrapeTargetDetails({
 						Target
 					</div>
 					<div className="divide-y rounded-md border bg-background/35 text-xs">
-						<DetailRow label="Service" value={target.serviceName ?? target.name} />
-						{target.targetType === "planetscale" ? (
-							<DetailRow label="Organization" value={target.organization ?? "-"} />
-						) : (
-							<DetailRow label="Instance" value={hostnameFromUrl(target.url)} />
-						)}
-						<DetailRow label="Auth" value={AUTH_TYPE_LABELS[target.authType] ?? target.authType} />
+						<DetailRow label="Service" value={target.service_name ?? target.name} />
+						<DetailRow label="Instance" value={hostnameFromUrl(target.url)} />
+						<DetailRow
+							label="Auth"
+							value={AUTH_TYPE_LABELS[target.auth_type] ?? target.auth_type}
+						/>
 						<DetailRow label="Target ID" value={<span className="font-mono">{target.id}</span>} />
-						<DetailRow label="Created" value={formatDateTime(target.createdAt)} />
-						<DetailRow label="Updated" value={formatDateTime(target.updatedAt)} />
+						<DetailRow label="Created" value={formatDateTime(target.created_at)} />
+						<DetailRow label="Updated" value={formatDateTime(target.updated_at)} />
 					</div>
 					{labels.length > 0 && (
 						<div className="flex flex-wrap gap-1.5 pt-1">
@@ -1060,7 +954,7 @@ function ScrapeTargetDetails({
 							</span>
 						)}
 					</div>
-					<ChecksTable result={checksResult} checks={checks} />
+					<ScrapeTargetChecksTable result={checksResult} checks={checks} />
 				</section>
 			</div>
 		</aside>
@@ -1085,7 +979,13 @@ function DetailRow({ label, value }: { label: string; value: ReactNode }) {
 	)
 }
 
-function ChecksTable({ result, checks }: { result: ScrapeTargetChecksResult; checks: ScrapeTargetCheck[] }) {
+export function ScrapeTargetChecksTable({
+	result,
+	checks,
+}: {
+	result: ScrapeTargetChecksResult
+	checks: ScrapeTargetCheck[]
+}) {
 	if (Result.isInitial(result)) {
 		return (
 			<div className="space-y-2">
@@ -1121,13 +1021,23 @@ function ChecksTable({ result, checks }: { result: ScrapeTargetChecksResult; che
 			<div className="divide-y">
 				{checks.map((check) => (
 					<div
-						key={`${check.timestamp}-${check.subTargetKey ?? ""}`}
+						key={`${check.timestamp}-${check.sub_target_key ?? ""}`}
 						className="grid grid-cols-[minmax(100px,1fr)_64px_70px_72px] items-center gap-2 px-3 py-2 text-xs"
 					>
 						<div className="min-w-0">
 							<div className="truncate font-mono">{formatDateTime(check.timestamp)}</div>
 							{check.message && (
-								<div className="text-muted-foreground mt-0.5 truncate">{check.message}</div>
+								<Tooltip>
+									<TooltipTrigger
+										render={<div />}
+										className="text-muted-foreground mt-0.5 cursor-default truncate"
+									>
+										{check.message}
+									</TooltipTrigger>
+									<TooltipContent className="max-w-xs font-mono text-xs">
+										{check.message}
+									</TooltipContent>
+								</Tooltip>
 							)}
 						</div>
 						<div className="flex items-center gap-1.5">
@@ -1138,8 +1048,8 @@ function ChecksTable({ result, checks }: { result: ScrapeTargetChecksResult; che
 							)}
 							<span>{check.success ? "up" : "down"}</span>
 						</div>
-						<span className="font-mono">{formatDurationSeconds(check.durationSeconds)}</span>
-						<span className="font-mono">{formatOptionalCount(check.samplesScraped)}</span>
+						<span className="font-mono">{formatDurationSeconds(check.duration_seconds)}</span>
+						<span className="font-mono">{formatOptionalCount(check.samples_scraped)}</span>
 					</div>
 				))}
 			</div>

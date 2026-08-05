@@ -11,16 +11,11 @@ import type { AlertComparator, AlertSeverity, AlertSignalType } from "@maple/dom
 import { Card } from "@maple/ui/components/ui/card"
 import { Input } from "@maple/ui/components/ui/input"
 import { Label } from "@maple/ui/components/ui/label"
-import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@maple/ui/components/ui/select"
-import { cn } from "@maple/ui/utils"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@maple/ui/components/ui/select"
+import { cn } from "@maple/ui/lib/utils"
 
 import { AlertSegmentedSelect } from "@/components/alerts/alert-segmented-select"
+import { SectionHeader } from "@/components/layout/section-header"
 import { QueryPanel } from "@/components/dashboard-builder/config/query-panel"
 import { RawSqlEditorPanel } from "@/components/dashboard-builder/config/raw-sql-editor-panel"
 import {
@@ -28,6 +23,7 @@ import {
 	BracketsCurlyIcon,
 	ChartLineIcon,
 	ChevronDownIcon,
+	CircleWarningIcon,
 	CirclePercentageIcon,
 	FireIcon,
 	PulseIcon,
@@ -42,6 +38,7 @@ import {
 } from "@/lib/alerts/form-utils"
 import { Result, useAtomValue } from "@/lib/effect-atom"
 import {
+	buildTimeseriesQuerySpec,
 	resetAggregationForMetricType,
 	resetQueryForDataSource,
 	type QueryBuilderDataSource,
@@ -56,7 +53,7 @@ interface SignalAndThresholdSectionProps {
 	autocompleteValues: AutocompleteValuesContextType
 }
 
-/* Eight signal types is too many for a single segmented bar — they wrap and
+/* Seven signal types is too many for a single segmented bar — they wrap and
    every option looks equally weighted even though five of them are "I want a
    common metric" and the other two are "I'll define my own". We split the
    choice into two tiers:
@@ -69,7 +66,7 @@ interface SignalAndThresholdSectionProps {
 type SignalKind = "builtin" | "builder_query" | "raw_query"
 
 function signalTypeToKind(signalType: AlertSignalType): SignalKind {
-	if (signalType === "builder_query" || signalType === "metric") return "builder_query"
+	if (signalType === "builder_query") return "builder_query"
 	if (signalType === "raw_query") return "raw_query"
 	return "builtin"
 }
@@ -162,7 +159,8 @@ const SEVERITY_OPTIONS: ReadonlyArray<{
 		label: "Warning",
 		selectedClass:
 			"border-severity-warn/60 bg-severity-warn/10 text-severity-warn hover:bg-severity-warn/15 focus-visible:ring-severity-warn/40",
-		dotClass: "bg-severity-warn shadow-[0_0_0_2px_color-mix(in_oklch,var(--severity-warn)_25%,transparent)]",
+		dotClass:
+			"bg-severity-warn shadow-[0_0_0_2px_color-mix(in_oklch,var(--severity-warn)_25%,transparent)]",
 	},
 	{
 		value: "critical",
@@ -201,16 +199,15 @@ export function SignalAndThresholdSection({
 			signalType:
 				next === "builtin"
 					? "error_rate"
-					: (next as Exclude<SignalKind, "builtin"> &
-							AlertSignalType),
+					: (next as Exclude<SignalKind, "builtin"> & AlertSignalType),
 		}))
 	}
 
 	return (
 		<Card className="p-4">
-			<SectionLabel>Signal &amp; threshold</SectionLabel>
+			<SectionHeader id="rule-signal-heading" label="Signal & threshold" />
 
-			<div className="mt-3 space-y-4">
+			<div className="space-y-4">
 				{/* Tier 1: signal kind. Always visible. */}
 				<AlertSegmentedSelect<SignalKind>
 					options={SIGNAL_KIND_OPTIONS}
@@ -229,11 +226,7 @@ export function SignalAndThresholdSection({
 					/>
 				)}
 
-				<SignalSubConfig
-					form={form}
-					onChange={onChange}
-					autocompleteValues={autocompleteValues}
-				/>
+				<SignalSubConfig form={form} onChange={onChange} autocompleteValues={autocompleteValues} />
 
 				{/* Threshold row — comparator + value(s). Upper threshold stays mounted but
 				    disabled outside range mode so the grid never reflows. The
@@ -242,9 +235,7 @@ export function SignalAndThresholdSection({
 				    chevron into the next field. */}
 				<div className="grid gap-3 sm:grid-cols-[140px_1fr_1fr]">
 					<div className="min-w-0 space-y-1.5">
-						<Label htmlFor="rule-comparator" className="text-xs">
-							Condition
-						</Label>
+						<Label htmlFor="rule-comparator">Condition</Label>
 						<Select
 							items={comparatorLabels}
 							value={form.comparator}
@@ -265,7 +256,7 @@ export function SignalAndThresholdSection({
 						</Select>
 					</div>
 					<div className="min-w-0 space-y-1.5">
-						<Label htmlFor="rule-threshold" className="text-xs">
+						<Label htmlFor="rule-threshold">
 							{rangeMode ? "Lower" : "Threshold"}
 							{isErrorRate && <span className="text-muted-foreground"> (%)</span>}
 							{isBuilderErrorRate && (
@@ -285,10 +276,7 @@ export function SignalAndThresholdSection({
 					<div className="min-w-0 space-y-1.5">
 						<Label
 							htmlFor="rule-threshold-upper"
-							className={cn(
-								"text-xs",
-								!rangeMode && "text-muted-foreground/60",
-							)}
+							className={cn(!rangeMode && "text-muted-foreground/60")}
 						>
 							Upper
 							{isErrorRate && <span className="text-muted-foreground"> (%)</span>}
@@ -301,9 +289,7 @@ export function SignalAndThresholdSection({
 							type="number"
 							inputMode="decimal"
 							value={form.thresholdUpper}
-							onChange={(e) =>
-								onChange((c) => ({ ...c, thresholdUpper: e.target.value }))
-							}
+							onChange={(e) => onChange((c) => ({ ...c, thresholdUpper: e.target.value }))}
 							disabled={!rangeMode}
 							className={NUMERIC_INPUT_CLASS}
 							placeholder={rangeMode ? "0" : "—"}
@@ -313,7 +299,7 @@ export function SignalAndThresholdSection({
 
 				{/* Severity inline — branded pills, not neutral toggle. */}
 				<div className="flex items-center justify-between gap-3">
-					<Label className="text-xs">Severity</Label>
+					<Label id="rule-severity-label">Severity</Label>
 					<SeverityToggle
 						value={form.severity}
 						onChange={(value) => onChange((c) => ({ ...c, severity: value }))}
@@ -328,33 +314,26 @@ export function SignalAndThresholdSection({
 						className="flex w-full items-center justify-between gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
 						aria-expanded={advancedOpen}
 					>
-						<span className="font-medium uppercase tracking-wide">
-							Evaluation timing
-						</span>
+						<span className="font-medium uppercase tracking-wide">Evaluation timing</span>
 						<span className="flex items-center gap-1.5">
 							<span className="font-mono">
-								{form.windowMinutes}min · {form.consecutiveBreachesRequired}× ·
-								renotify {form.renotifyIntervalMinutes}min
+								{form.windowMinutes}min · {form.consecutiveBreachesRequired}× · renotify{" "}
+								{form.renotifyIntervalMinutes}min
 							</span>
 							<ChevronDownIcon
 								size={12}
-								className={cn(
-									"transition-transform",
-									advancedOpen && "rotate-180",
-								)}
+								className={cn("transition-transform", advancedOpen && "rotate-180")}
 							/>
 						</span>
 					</button>
 					{advancedOpen && (
-						<div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+						<div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
 							<NumericField
 								id="rule-window-minutes"
 								label="Window (min)"
 								hint="Aggregate window each check."
 								value={form.windowMinutes}
-								onChange={(value) =>
-									onChange((c) => ({ ...c, windowMinutes: value }))
-								}
+								onChange={(value) => onChange((c) => ({ ...c, windowMinutes: value }))}
 							/>
 							<NumericField
 								id="rule-consecutive-breaches"
@@ -369,13 +348,23 @@ export function SignalAndThresholdSection({
 								}
 							/>
 							<NumericField
+								id="rule-consecutive-healthy"
+								label="Healthy to resolve"
+								hint="Consecutive healthy checks required."
+								value={form.consecutiveHealthyRequired}
+								onChange={(value) =>
+									onChange((c) => ({
+										...c,
+										consecutiveHealthyRequired: value,
+									}))
+								}
+							/>
+							<NumericField
 								id="rule-minimum-samples"
 								label="Min samples"
 								hint="Skip below this count."
 								value={form.minimumSampleCount}
-								onChange={(value) =>
-									onChange((c) => ({ ...c, minimumSampleCount: value }))
-								}
+								onChange={(value) => onChange((c) => ({ ...c, minimumSampleCount: value }))}
 							/>
 							<NumericField
 								id="rule-renotify"
@@ -410,42 +399,50 @@ function BuiltinSignalChips({
 	onChange: (next: AlertSignalType) => void
 }) {
 	return (
-		<div
-			role="radiogroup"
-			aria-label="Built-in signal"
-			className="-mt-1 flex flex-wrap items-center gap-1 rounded-md border border-dashed border-border/60 bg-muted/20 p-1"
-		>
-			{BUILTIN_SIGNAL_OPTIONS.map((opt) => {
-				const selected = value === opt.value
-				const Icon = opt.icon
-				return (
-					<button
-						key={opt.value}
-						type="button"
-						role="radio"
-						aria-checked={selected}
-						onClick={() => onChange(opt.value)}
-						className={cn(
-							"inline-flex h-7 items-center gap-1.5 rounded-sm border border-transparent px-2 text-xs font-medium",
-							"transition-[background-color,border-color,color] duration-150",
-							"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-							selected
-								? opt.selectedClass
-								: "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
-						)}
-					>
-						<Icon
-							size={12}
+		<div className="-mt-1 flex flex-col gap-1.5">
+			<div
+				role="radiogroup"
+				aria-label="Built-in signal"
+				className="flex flex-wrap items-center gap-1 rounded-md border border-dashed border-border/60 bg-muted/20 p-1"
+				data-slot="builtin-signal-chips"
+			>
+				{BUILTIN_SIGNAL_OPTIONS.map((opt) => {
+					const selected = value === opt.value
+					const Icon = opt.icon
+					return (
+						<button
+							key={opt.value}
+							type="button"
+							role="radio"
+							aria-checked={selected}
+							onClick={() => onChange(opt.value)}
 							className={cn(
-								"transition-opacity",
-								opt.iconClass,
-								selected ? "opacity-100" : "opacity-70",
+								"inline-flex h-7 items-center gap-1.5 rounded-sm border border-transparent px-2 text-xs font-medium",
+								"transition-[background-color,border-color,color] duration-150",
+								"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+								selected
+									? opt.selectedClass
+									: "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
 							)}
-						/>
-						{opt.label}
-					</button>
-				)
-			})}
+						>
+							<Icon
+								size={12}
+								className={cn(
+									"transition-opacity",
+									opt.iconClass,
+									selected ? "opacity-100" : "opacity-70",
+								)}
+							/>
+							{opt.label}
+						</button>
+					)
+				})}
+			</div>
+			<p className="text-[11px] leading-snug text-muted-foreground">
+				Built-in signals measure entry-point (root) spans only. A service that records failures on
+				child spans and returns success from its entry point — cron jobs and workers typically do —
+				stays healthy here at any threshold. Use Raw SQL for those, or rely on error notifications.
+			</p>
 		</div>
 	)
 }
@@ -466,7 +463,7 @@ function SeverityToggle({
 	return (
 		<div
 			role="radiogroup"
-			aria-label="Severity"
+			aria-labelledby="rule-severity-label"
 			className="inline-flex items-center gap-1 rounded-md bg-muted/30 p-0.5"
 		>
 			{SEVERITY_OPTIONS.map((opt) => {
@@ -481,10 +478,10 @@ function SeverityToggle({
 						className={cn(
 							"inline-flex h-7 items-center gap-1.5 rounded-[5px] border border-transparent px-2.5 text-xs font-medium",
 							"transition-[background-color,border-color,color] duration-150",
-							"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-							selected
-								? opt.selectedClass
-								: "text-muted-foreground hover:text-foreground",
+							// `ring-ring` is the base so an unselected pill still shows a focus
+							// ring; the selected variants override it with their brand color.
+							"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+							selected ? opt.selectedClass : "text-muted-foreground hover:text-foreground",
 						)}
 					>
 						<span
@@ -502,14 +499,6 @@ function SeverityToggle({
 	)
 }
 
-export function SectionLabel({ children }: { children: React.ReactNode }) {
-	return (
-		<h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-			{children}
-		</h3>
-	)
-}
-
 function NumericField({
 	id,
 	label,
@@ -524,10 +513,8 @@ function NumericField({
 	onChange: (value: string) => void
 }) {
 	return (
-		<div className="space-y-1">
-			<Label htmlFor={id} className="text-xs">
-				{label}
-			</Label>
+		<div className="space-y-1.5">
+			<Label htmlFor={id}>{label}</Label>
 			<Input
 				id={id}
 				type="number"
@@ -537,7 +524,7 @@ function NumericField({
 				onChange={(e) => onChange(e.target.value)}
 				className={NUMERIC_INPUT_CLASS}
 			/>
-			{hint && <p className="text-muted-foreground text-[10px] leading-tight">{hint}</p>}
+			{hint && <p className="text-muted-foreground text-xs">{hint}</p>}
 		</div>
 	)
 }
@@ -551,28 +538,6 @@ type MetricRow = {
 	metricType: string
 	serviceName: string
 	isMonotonic: boolean
-}
-
-function applyQueryDraftToForm(
-	current: RuleFormState,
-	queryBuilderDraft: QueryBuilderQueryDraft,
-): RuleFormState {
-	return {
-		...current,
-		signalType: "builder_query",
-		queryBuilderDraft,
-		queryDataSource: queryBuilderDraft.dataSource,
-		queryAggregation: queryBuilderDraft.aggregation,
-		queryWhereClause: queryBuilderDraft.whereClause,
-		metricName:
-			queryBuilderDraft.dataSource === "metrics"
-				? queryBuilderDraft.metricName
-				: current.metricName,
-		metricType:
-			queryBuilderDraft.dataSource === "metrics"
-				? queryBuilderDraft.metricType
-				: current.metricType,
-	}
 }
 
 function useAlertMetricSelectionOptions(query: QueryBuilderQueryDraft) {
@@ -619,80 +584,80 @@ function useAlertMetricSelectionOptions(query: QueryBuilderQueryDraft) {
 	return { metricSelectionOptions, setMetricSearch }
 }
 
-function AlertQueryPanel({
-	form,
-	onChange,
-	autocompleteValues,
-}: SignalAndThresholdSectionProps) {
-	const query = form.queryBuilderDraft as QueryBuilderQueryDraft
+function AlertQueryPanel({ form, onChange, autocompleteValues }: SignalAndThresholdSectionProps) {
+	const query = form.queryBuilderDraft
+	const warnings = useMemo(() => buildTimeseriesQuerySpec(query).warnings, [query])
 	const { metricSelectionOptions, setMetricSearch } = useAlertMetricSelectionOptions(query)
 
 	const updateQuery = (updater: (query: QueryBuilderQueryDraft) => QueryBuilderQueryDraft) => {
-		onChange((current) =>
-			applyQueryDraftToForm(current, updater(current.queryBuilderDraft as QueryBuilderQueryDraft)),
-		)
+		onChange((current) => ({
+			...current,
+			queryBuilderDraft: updater(current.queryBuilderDraft),
+		}))
 	}
 
 	return (
-		<QueryPanel
-			query={query}
-			index={0}
-			canRemove={false}
-			metricSelectionOptions={metricSelectionOptions}
-			onMetricSearch={setMetricSearch}
-			autocompleteValues={autocompleteValues}
-			onUpdate={updateQuery}
-			onAggregationChange={(aggregation) =>
-				updateQuery((current) => ({ ...current, aggregation }))
-			}
-			onMetricSelectionChange={(selection) =>
-				updateQuery((current) =>
-					current.dataSource === "metrics"
-						? {
-								...current,
-								metricName: selection.metricName,
-								metricType: selection.metricType,
-								isMonotonic: selection.isMonotonic,
-								aggregation: resetAggregationForMetricType(
-									current.aggregation,
-									selection.metricType,
-									selection.isMonotonic,
-								),
-							}
-						: current,
-				)
-			}
-			onClone={() => {}}
-			onRemove={() => {}}
-			onDataSourceChange={(dataSource: QueryBuilderDataSource) =>
-				updateQuery((current) => resetQueryForDataSource(current, dataSource))
-			}
-			showHeaderActions={false}
-			showVisibilityToggle={false}
-		/>
+		<div className="space-y-2">
+			<QueryPanel
+				query={query}
+				index={0}
+				canRemove={false}
+				metricSelectionOptions={metricSelectionOptions}
+				onMetricSearch={setMetricSearch}
+				autocompleteValues={autocompleteValues}
+				onUpdate={updateQuery}
+				onAggregationChange={(aggregation) => updateQuery((current) => ({ ...current, aggregation }))}
+				onMetricSelectionChange={(selection) =>
+					updateQuery((current) =>
+						current.dataSource === "metrics"
+							? {
+									...current,
+									metricName: selection.metricName,
+									metricType: selection.metricType,
+									isMonotonic: selection.isMonotonic,
+									aggregation: resetAggregationForMetricType(
+										current.aggregation,
+										selection.metricType,
+										selection.isMonotonic,
+									),
+								}
+							: current,
+					)
+				}
+				onClone={() => {}}
+				onRemove={() => {}}
+				onDataSourceChange={(dataSource: QueryBuilderDataSource) =>
+					updateQuery((current) => resetQueryForDataSource(current, dataSource))
+				}
+				showHeaderActions={false}
+				showVisibilityToggle={false}
+			/>
+			{warnings.length > 0 && (
+				<div className="flex gap-2 border border-warning/30 bg-warning/10 p-2 text-xs text-warning-foreground">
+					<CircleWarningIcon size={14} className="mt-0.5 shrink-0" />
+					<ul className="space-y-1">
+						{warnings.map((warning) => (
+							<li key={warning}>{warning}</li>
+						))}
+					</ul>
+				</div>
+			)}
+		</div>
 	)
 }
 
-function SignalSubConfig({
-	form,
-	onChange,
-	autocompleteValues,
-}: SignalAndThresholdSectionProps) {
+function SignalSubConfig({ form, onChange, autocompleteValues }: SignalAndThresholdSectionProps) {
 	switch (form.signalType) {
 		case "apdex":
 			return (
 				<div className="flex items-end gap-3">
 					<div className="space-y-1.5">
-						<Label htmlFor="apdex-threshold" className="text-xs">
-							Apdex target (ms)
-						</Label>
+						<Label htmlFor="apdex-threshold">Apdex target (ms)</Label>
 						<Input
 							id="apdex-threshold"
 							type="number"
 							value={form.apdexThresholdMs}
-							onChange={(e) =>
-								onChange((c) => ({ ...c, apdexThresholdMs: e.target.value }))
-							}
+							onChange={(e) => onChange((c) => ({ ...c, apdexThresholdMs: e.target.value }))}
 							className={cn("w-[180px]", NUMERIC_INPUT_CLASS)}
 						/>
 					</div>
@@ -716,12 +681,12 @@ function SignalSubConfig({
 						showBucketControl={false}
 						targetLabel="alert rule"
 					/>
-					<p className="text-muted-foreground text-[10px] leading-tight">
+					<p className="text-muted-foreground text-xs">
 						Alert SQL must return a numeric <code>value</code> column.
 					</p>
 					<div className="flex items-end gap-3">
 						<div className="space-y-1.5">
-							<Label className="text-xs">Reduce buckets by</Label>
+							<Label htmlFor="rule-raw-reducer">Reduce buckets by</Label>
 							<Select
 								items={RAW_QUERY_REDUCER_LABELS}
 								value={form.rawQueryReducer}
@@ -729,22 +694,19 @@ function SignalSubConfig({
 									value &&
 									onChange((c) => ({
 										...c,
-										rawQueryReducer:
-											value as RuleFormState["rawQueryReducer"],
+										rawQueryReducer: value as RuleFormState["rawQueryReducer"],
 									}))
 								}
 							>
-								<SelectTrigger className="w-[180px]">
+								<SelectTrigger id="rule-raw-reducer" className="w-[180px]">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>
-									{Object.entries(RAW_QUERY_REDUCER_LABELS).map(
-										([val, label]) => (
-											<SelectItem key={val} value={val}>
-												{label}
-											</SelectItem>
-										),
-									)}
+									{Object.entries(RAW_QUERY_REDUCER_LABELS).map(([val, label]) => (
+										<SelectItem key={val} value={val}>
+											{label}
+										</SelectItem>
+									))}
 								</SelectContent>
 							</Select>
 						</div>

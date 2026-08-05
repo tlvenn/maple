@@ -152,6 +152,7 @@ const HOMEBREW_PATH =
 </section>
 
 <script>
+	import { bindCopyButtons } from "../../lib/copy-to-clipboard";
 	for (const root of document.querySelectorAll<HTMLElement>("[data-install-tabs]")) {
 		function setActive(id: string) {
 			root.querySelectorAll<HTMLElement>("[data-tab-trigger]").forEach((btn) => {
@@ -170,23 +171,11 @@ const HOMEBREW_PATH =
 
 		// Progressive enhancement: wire copy buttons. Without JS the command is
 		// still fully visible and selectable — the button just does nothing.
-		for (const cmd of root.querySelectorAll<HTMLElement>(".it__cmd[data-copy]")) {
-			const btn = cmd.querySelector<HTMLButtonElement>(".it__copy");
-			const text = cmd.dataset.copy ?? "";
-			btn?.addEventListener("click", async () => {
-				try {
-					await navigator.clipboard.writeText(text);
-					btn.textContent = "copied";
-					btn.classList.add("is-done");
-					setTimeout(() => {
-						btn.textContent = "copy";
-						btn.classList.remove("is-done");
-					}, 1400);
-				} catch {
-					/* clipboard blocked — no-op */
-				}
-			});
-		}
+		bindCopyButtons({
+			root,
+			hostSelector: ".it__cmd[data-copy]",
+			buttonSelector: ".it__copy",
+		});
 	}
 </script>
 
@@ -226,9 +215,9 @@ const HOMEBREW_PATH =
 	}
 	.it__tab[aria-selected="true"] {
 		color: var(--foreground);
-		border-color: var(--accent);
-		background: color-mix(in oklab, var(--accent) 12%, transparent);
-		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 55%, transparent);
+		border-color: var(--primary);
+		background: color-mix(in oklab, var(--primary) 12%, transparent);
+		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, transparent);
 	}
 	.it__tab-icon {
 		width: 18px;
@@ -246,8 +235,8 @@ const HOMEBREW_PATH =
 		font-size: 9px;
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
-		color: var(--accent);
-		background: color-mix(in oklab, var(--accent) 14%, transparent);
+		color: var(--primary);
+		background: color-mix(in oklab, var(--primary) 14%, transparent);
 		border-radius: 4px;
 		padding: 2px 6px;
 	}
@@ -305,7 +294,7 @@ const HOMEBREW_PATH =
 		gap: 9px;
 	}
 	.it__prompt {
-		color: var(--accent);
+		color: var(--primary);
 		user-select: none;
 	}
 	.it__code {
@@ -338,8 +327,8 @@ const HOMEBREW_PATH =
 			border-color 140ms ease;
 	}
 	.it__copy:hover {
-		color: var(--accent);
-		border-color: color-mix(in oklab, var(--accent) 50%, var(--border));
+		color: var(--primary);
+		border-color: color-mix(in oklab, var(--primary) 50%, var(--border));
 	}
 	.it__copy.is-done {
 		color: var(--chart-3);
@@ -422,7 +411,7 @@ const HOMEBREW_PATH =
 		width: 4px;
 		height: 4px;
 		border-radius: 999px;
-		background: color-mix(in oklab, var(--accent) 70%, transparent);
+		background: color-mix(in oklab, var(--primary) 70%, transparent);
 	}
 
 	/* inline <code> injected via set:html inside blurb/notes */

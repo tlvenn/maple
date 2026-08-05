@@ -122,6 +122,79 @@ describe("markIncompleteSegments", () => {
 		expect(result.incompleteKeys).toEqual([])
 	})
 
+	it("prefers an explicit per-row `partial` flag over the wall-clock heuristic", () => {
+		// Timestamps are far in the past (heuristic would mark nothing), but the
+		// pipeline flagged the trailing buckets as still-settling.
+		const data: Array<Record<string, unknown>> = [
+			{ bucket: "2020-01-01T00:00:00Z", throughput: 10 },
+			{ bucket: "2020-01-01T00:05:00Z", throughput: 20, partial: true },
+			{ bucket: "2020-01-01T00:10:00Z", throughput: 5, partial: true },
+		]
+
+		const result = markIncompleteSegments(data, ["throughput"])
+
+		expect(result.hasIncomplete).toBe(true)
+		// Index 0 complete; the bridge duplicates its value into the incomplete key.
+		expect(result.data[0].throughput).toBe(10)
+		expect(result.data[0].throughput_incomplete).toBe(10)
+		// First flagged bucket onward moves to the dashed (incomplete) series.
+		expect(result.data[1].throughput).toBeNull()
+		expect(result.data[1].throughput_incomplete).toBe(20)
+		expect(result.data[2].throughput).toBeNull()
+		expect(result.data[2].throughput_incomplete).toBe(5)
+	})
+
+	it("drops an empty trailing incomplete bucket instead of drawing a cliff to zero", () => {
+		const now = Date.now()
+		const data = [
+			makeRow(hoursAgo(3, now), { throughput: 10 }),
+			makeRow(hoursAgo(2, now), { throughput: 20 }),
+			makeRow(hoursAgo(1, now), { throughput: 30 }),
+			// The current, still-filling bucket — queried before any data landed.
+			makeRow(hoursAgo(0, now), { throughput: 0 }),
+		]
+
+		const result = markIncompleteSegments(data, ["throughput"], { now })
+
+		expect(result.data).toHaveLength(3)
+		expect(result.data[2].throughput).toBe(30)
+		// Nothing incomplete survives, so no dashed segment is drawn at all.
+		expect(result.hasIncomplete).toBe(false)
+		expect(result.incompleteKeys).toEqual([])
+	})
+
+	it("keeps a trailing incomplete bucket that reported real data", () => {
+		const now = Date.now()
+		const data = [
+			makeRow(hoursAgo(2, now), { throughput: 10 }),
+			makeRow(hoursAgo(1, now), { throughput: 20 }),
+			makeRow(hoursAgo(0, now), { throughput: 7 }),
+		]
+
+		const result = markIncompleteSegments(data, ["throughput"], { now })
+
+		expect(result.data).toHaveLength(3)
+		expect(result.hasIncomplete).toBe(true)
+		expect(result.data[2].throughput).toBeNull()
+		expect(result.data[2].throughput_incomplete).toBe(7)
+	})
+
+	it("trims only the empty tail when several incomplete buckets follow", () => {
+		const data: Array<Record<string, unknown>> = [
+			{ bucket: "2020-01-01T00:00:00Z", v: 10 },
+			{ bucket: "2020-01-01T00:05:00Z", v: 8, partial: true },
+			{ bucket: "2020-01-01T00:10:00Z", v: 0, partial: true },
+			{ bucket: "2020-01-01T00:15:00Z", v: null, partial: true },
+		]
+
+		const result = markIncompleteSegments(data, ["v"], { now: Date.now() })
+
+		expect(result.data).toHaveLength(2)
+		expect(result.hasIncomplete).toBe(true)
+		expect(result.data[1].v).toBeNull()
+		expect(result.data[1].v_incomplete).toBe(8)
+	})
+
 	it("handles multiple value keys", () => {
 		const now = Date.now()
 		const data = [

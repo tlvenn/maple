@@ -19,9 +19,17 @@ describe("SignInPage (clerk mode)", () => {
 		}))
 
 		const module = await import("./sign-in")
+		const { component: SignInPage } = await import("./sign-in?tsr-split=component")
 
-		render(<module.SignInPage />)
+		// SignInPage reads redirect_url via Route.useSearch(), which needs a live
+		// router — stub it since this test renders the page standalone.
+		vi.spyOn(module.Route, "useSearch").mockReturnValue({ redirect_url: undefined })
+
+		render(<SignInPage />)
 
 		expect(screen.getByText("Clerk Sign In")).toBeTruthy()
-	})
+		// The two dynamic imports pull the route's whole module graph in cold, which
+		// overruns the 5s default when the suite shares the machine with turbo's
+		// typecheck/build tasks.
+	}, 30_000)
 })

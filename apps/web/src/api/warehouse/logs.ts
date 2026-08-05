@@ -1,5 +1,5 @@
-import { Clock, Effect, Schema } from "effect"
-import { QueryEngineExecuteRequest } from "@maple/query-engine"
+import { Clock, Effect, Option, Schema } from "effect"
+import { LogsFacetDimension, QueryEngineExecuteRequest, formatWarehouseDateTime } from "@maple/query-engine"
 import { TraceId, SpanId } from "@maple/domain"
 import {
 	DeploymentEnvironment,
@@ -13,7 +13,6 @@ import {
 	WarehouseDateTimeString,
 	decodeInput,
 	executeQueryEngine,
-	extractAttributeValues,
 	extractCount,
 	extractFacets,
 	runWarehouseQuery,
@@ -67,14 +66,18 @@ export interface LogsResponse {
 	}
 }
 
+const parseJson = Option.liftThrowable((value: string): unknown => JSON.parse(value))
+
 function parseAttributes(value: string | null | undefined): Record<string, string> {
 	if (!value) return {}
-	try {
-		const parsed = JSON.parse(value)
-		return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {}
-	} catch {
-		return {}
-	}
+	return parseJson(value).pipe(
+		Option.flatMap((parsed) =>
+			parsed && typeof parsed === "object"
+				? Option.some(parsed as Record<string, string>)
+				: Option.none(),
+		),
+		Option.getOrElse((): Record<string, string> => ({})),
+	)
 }
 
 function transformLog(raw: Record<string, unknown>): Log {
@@ -186,8 +189,10 @@ export function getLogsCount({ data }: { data: ListLogsInput }) {
 }
 
 const defaultLogsTimeRange = (nowMillis: number) => {
-	const fmt = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 19)
-	return { startTime: fmt(nowMillis - 24 * 60 * 60 * 1000), endTime: fmt(nowMillis) }
+	return {
+		startTime: formatWarehouseDateTime(nowMillis - 24 * 60 * 60 * 1000),
+		endTime: formatWarehouseDateTime(nowMillis),
+	}
 }
 
 const getLogsCountEffect = Effect.fn("QueryEngine.getLogsCount")(function* ({
@@ -225,20 +230,9 @@ const getLogsCountEffect = Effect.fn("QueryEngine.getLogsCount")(function* ({
 	}
 })
 
-export interface FacetItem {
+interface FacetItem {
 	name: string
 	count: number
-}
-
-export interface LogsFacets {
-	services: FacetItem[]
-	severities: FacetItem[]
-	deploymentEnvs: FacetItem[]
-	namespaces: FacetItem[]
-}
-
-export interface LogsFacetsResponse {
-	data: LogsFacets
 }
 
 const GetLogsFacetsInputSchema = Schema.Struct({
@@ -310,6 +304,47 @@ const getLogsFacetsEffect = Effect.fn("QueryEngine.getLogsFacets")(function* ({
 	}
 })
 
+// Single facet list for dashboard variables: compiles only the requested UNION
+// branch server-side instead of the full four-facet scan `getLogsFacets` runs
+// for the logs sidebar.
+const GetLogsFacetValuesInputSchema = Schema.Struct({
+	startTime: Schema.optional(WarehouseDateTimeString),
+	endTime: Schema.optional(WarehouseDateTimeString),
+	facet: LogsFacetDimension,
+})
+
+export type GetLogsFacetValuesInput = (typeof GetLogsFacetValuesInputSchema)["Encoded"]
+
+export function getLogsFacetValues({ data }: { data: GetLogsFacetValuesInput }) {
+	return getLogsFacetValuesEffect({ data })
+}
+
+const getLogsFacetValuesEffect = Effect.fn("QueryEngine.getLogsFacetValues")(function* ({
+	data,
+}: {
+	data: GetLogsFacetValuesInput
+}) {
+	const input = yield* decodeInput(GetLogsFacetValuesInputSchema, data ?? {}, "getLogsFacetValues")
+
+	yield* Effect.annotateCurrentSpan("facet", input.facet)
+
+	const fallback = defaultLogsTimeRange(yield* Clock.currentTimeMillis)
+	const response = yield* executeQueryEngine(
+		"queryEngine.getLogsFacetValues",
+		new QueryEngineExecuteRequest({
+			startTime: input.startTime ?? fallback.startTime,
+			endTime: input.endTime ?? fallback.endTime,
+			query: { kind: "facets" as const, source: "logs" as const, facet: input.facet },
+		}),
+	)
+
+	return {
+		data: extractFacets(response)
+			.filter((row) => row.facetType === input.facet && row.name)
+			.map((row): FacetItem => ({ name: row.name, count: Number(row.count) })),
+	}
+})
+
 // ---------------------------------------------------------------------------
 // Log attribute keys / values
 // Backed by `log_attribute_keys_mv` and `log_attribute_values_mv` →
@@ -324,10 +359,6 @@ const GetLogAttributeKeysInputSchema = Schema.Struct({
 })
 
 export type GetLogAttributeKeysInput = Schema.Schema.Type<typeof GetLogAttributeKeysInputSchema>
-
-export interface LogAttributeKeysResponse {
-	data: Array<{ attributeKey: string; usageCount: number }>
-}
 
 export function getLogAttributeKeys({ data }: { data: GetLogAttributeKeysInput }) {
 	return getLogAttributeKeysEffect({ data })
@@ -352,62 +383,6 @@ const getLogAttributeKeysEffect = Effect.fn("QueryEngine.getLogAttributeKeys")(f
 	return {
 		data: result.data.map((row) => ({
 			attributeKey: row.key,
-			usageCount: Number(row.count),
-		})),
-	}
-})
-
-const GetLogAttributeValuesInputSchema = Schema.Struct({
-	startTime: Schema.optional(WarehouseDateTimeString),
-	endTime: Schema.optional(WarehouseDateTimeString),
-	attributeKey: Schema.String,
-})
-
-export type GetLogAttributeValuesInput = Schema.Schema.Type<typeof GetLogAttributeValuesInputSchema>
-
-export interface LogAttributeValuesResponse {
-	data: Array<{ attributeValue: string; usageCount: number }>
-}
-
-export function getLogAttributeValues({ data }: { data: GetLogAttributeValuesInput }) {
-	return getLogAttributeValuesEffect({ data })
-}
-
-const getLogAttributeValuesEffect = Effect.fn("QueryEngine.getLogAttributeValues")(function* ({
-	data,
-}: {
-	data: GetLogAttributeValuesInput
-}) {
-	const input = yield* decodeInput(
-		GetLogAttributeValuesInputSchema,
-		data ?? {},
-		"getLogAttributeValues",
-	)
-
-	yield* Effect.annotateCurrentSpan("attributeKey", input.attributeKey)
-
-	if (!input.attributeKey) {
-		return { data: [] }
-	}
-
-	const fallback = defaultLogsTimeRange(yield* Clock.currentTimeMillis)
-	const response = yield* executeQueryEngine(
-		"queryEngine.getLogAttributeValues",
-		new QueryEngineExecuteRequest({
-			startTime: input.startTime ?? fallback.startTime,
-			endTime: input.endTime ?? fallback.endTime,
-			query: {
-				kind: "attributeValues" as const,
-				source: "logs" as const,
-				scope: "log" as const,
-				attributeKey: input.attributeKey,
-			},
-		}),
-	)
-
-	return {
-		data: extractAttributeValues(response).map((row) => ({
-			attributeValue: row.value,
 			usageCount: Number(row.count),
 		})),
 	}

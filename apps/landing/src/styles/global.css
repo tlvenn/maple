@@ -1,83 +1,23 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@source "../../../../packages/ui/src";
+/* Design tokens are shared with apps/web — do not re-declare token names
+   here (enforced by `bun run check:tokens`). Must come after tailwindcss.
+   Landing is dark-only: Layout.astro pins class="dark" on <html>. */
+@import "@maple/ui/styles/tokens.css";
 @import "@fontsource-variable/geist-mono";
 @import "@fontsource-variable/geist";
 
+@source "../../../../packages/ui/src";
+
+/* Landing-only tokens — marketing surfaces, not part of the shared system. */
 :root {
-	--background: oklch(0.207 0.008 67);
-	--foreground: oklch(0.91 0.016 74);
-	--card: oklch(0.224 0.009 75);
-	--card-foreground: oklch(0.91 0.016 74);
-	--popover: oklch(0.224 0.009 75);
-	--popover-foreground: oklch(0.91 0.016 74);
-	--primary: oklch(0.714 0.154 59);
-	--primary-foreground: oklch(0.207 0.008 67);
-	--secondary: oklch(0.26 0.012 67);
-	--secondary-foreground: oklch(0.91 0.016 74);
-	--muted: oklch(0.26 0.012 67);
-	--muted-foreground: oklch(0.603 0.023 72);
-	--accent: oklch(0.714 0.154 59);
-	--accent-foreground: oklch(0.207 0.008 67);
-	--destructive: oklch(0.654 0.176 30);
-	--destructive-foreground: oklch(0.91 0.016 74);
-	--border: oklch(0.268 0.012 67);
-	--input: oklch(0.33 0.015 72);
-	--ring: oklch(0.58 0.02 65);
-	--chart-1: oklch(0.714 0.154 59);
-	--chart-2: oklch(0.693 0.165 254);
-	--chart-3: oklch(0.658 0.134 151);
-	--chart-4: oklch(0.654 0.176 30);
-	--chart-5: oklch(0.7 0.12 310);
-	--chart-p99: oklch(0.654 0.176 30);
-	--chart-p95: oklch(0.714 0.154 59);
-	--chart-p50: oklch(0.693 0.165 254);
-	/* See apps/web/src/styles.css — chart-error and chart-throughput diverge
-	   from their tier-1 neighbors (chart-p99 and chart-p95 respectively) so
-	   they read as distinct identities in dark mode. */
-	--chart-error: oklch(0.62 0.225 22);
-	--chart-throughput: oklch(0.66 0.14 290);
-	--chart-apdex: oklch(0.658 0.134 151);
 	--bg-elevated: oklch(0.224 0.009 75);
 	--bg-deep: oklch(0.165 0.007 67);
 	--amber-deep: oklch(0.55 0.16 55);
 	--amber-soft: oklch(0.78 0.12 65);
-	--radius: 8px;
-	--border-hairline: 1px;
-	--severity-trace: oklch(0.603 0.023 72);
-	--severity-debug: oklch(0.693 0.165 254);
-	--severity-info: oklch(0.658 0.134 151);
-	--severity-warn: oklch(0.714 0.154 59);
-	--severity-error: oklch(0.654 0.176 30);
-	--severity-fatal: oklch(0.555 0.174 30);
-	--service-1: oklch(0.68 0.17 250);
-	--service-2: oklch(0.65 0.12 185);
-	--service-3: oklch(0.65 0.15 155);
-	--service-4: oklch(0.65 0.15 130);
-	--service-5: oklch(0.7 0.14 90);
-	--service-6: oklch(0.7 0.16 60);
-	--service-7: oklch(0.65 0.15 45);
-	--service-8: oklch(0.65 0.18 25);
-	--service-9: oklch(0.62 0.16 0);
-	--service-10: oklch(0.62 0.14 340);
-	--service-11: oklch(0.6 0.14 320);
-	--service-12: oklch(0.62 0.14 290);
-	--service-13: oklch(0.62 0.16 270);
-	--service-14: oklch(0.64 0.16 260);
-	--service-15: oklch(0.65 0.13 210);
-	--service-16: oklch(0.6 0.1 230);
-}
-
-@media only screen and (min-device-pixel-ratio: 2), only screen and (min-resolution: 192dpi) {
-	:root {
-		--border-hairline: 0.5px;
-	}
 }
 
 @theme inline {
-	--font-sans: "Geist Mono Variable", ui-monospace, monospace;
-	--font-mono: "Geist Mono Variable", ui-monospace, monospace;
-	--font-display: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
 	--color-bg: var(--background);
 	--color-fg: var(--foreground);
 	--color-fg-muted: var(--muted-foreground);
@@ -85,105 +25,67 @@
 	--color-bg-deep: var(--bg-deep);
 	--color-amber-deep: var(--amber-deep);
 	--color-amber-soft: var(--amber-soft);
-	--color-background: var(--background);
-	--color-foreground: var(--foreground);
-	--color-card: var(--card);
-	--color-card-foreground: var(--card-foreground);
-	--color-popover: var(--popover);
-	--color-popover-foreground: var(--popover-foreground);
-	--color-primary: var(--primary);
-	--color-primary-foreground: var(--primary-foreground);
-	--color-secondary: var(--secondary);
-	--color-secondary-foreground: var(--secondary-foreground);
-	--color-muted: var(--muted);
-	--color-muted-foreground: var(--muted-foreground);
-	--color-accent: var(--accent);
-	--color-accent-foreground: var(--accent-foreground);
-	--color-destructive: var(--destructive);
-	--color-destructive-foreground: var(--destructive-foreground);
-	--color-border: var(--border);
-	--color-input: var(--input);
-	--color-ring: var(--ring);
-	--color-chart-1: var(--chart-1);
-	--color-chart-2: var(--chart-2);
-	--color-chart-3: var(--chart-3);
-	--color-chart-4: var(--chart-4);
-	--color-chart-5: var(--chart-5);
-	--color-chart-p99: var(--chart-p99);
-	--color-chart-p95: var(--chart-p95);
-	--color-chart-p50: var(--chart-p50);
-	--color-chart-error: var(--chart-error);
-	--color-chart-throughput: var(--chart-throughput);
-	--color-chart-apdex: var(--chart-apdex);
-	--color-severity-trace: var(--severity-trace);
-	--color-severity-debug: var(--severity-debug);
-	--color-severity-info: var(--severity-info);
-	--color-severity-warn: var(--severity-warn);
-	--color-severity-error: var(--severity-error);
-	--color-severity-fatal: var(--severity-fatal);
-	--color-service-1: var(--service-1);
-	--color-service-2: var(--service-2);
-	--color-service-3: var(--service-3);
-	--color-service-4: var(--service-4);
-	--color-service-5: var(--service-5);
-	--color-service-6: var(--service-6);
-	--color-service-7: var(--service-7);
-	--color-service-8: var(--service-8);
-	--color-service-9: var(--service-9);
-	--color-service-10: var(--service-10);
-	--color-service-11: var(--service-11);
-	--color-service-12: var(--service-12);
-	--color-service-13: var(--service-13);
-	--color-service-14: var(--service-14);
-	--color-service-15: var(--service-15);
-	--color-service-16: var(--service-16);
-	--radius-sm: calc(var(--radius) - 4px);
-	--radius-md: calc(var(--radius) - 2px);
-	--radius-lg: var(--radius);
-	--radius-xl: calc(var(--radius) + 4px);
-	--radius-2xl: calc(var(--radius) + 8px);
-	--radius-3xl: calc(var(--radius) + 12px);
-	--radius-4xl: calc(var(--radius) + 16px);
 }
 
-@layer base {
-	* {
-		@apply border-border outline-ring/50;
-	}
-	body {
-		@apply font-sans bg-background text-foreground;
+/* ──────────────────────────────────────────────────────────────
+   Page shell.
+   The homepage, nav, and footer run at 1400px; every other page
+   keeps its own narrower container.
+   ────────────────────────────────────────────────────────────── */
+.shell {
+	margin-inline: auto;
+	max-width: 1400px;
+	padding-inline: 24px;
+}
+@media (min-width: 768px) {
+	.shell {
+		padding-inline: 52px;
 	}
 }
 
-/* ReactFlow Controls styling */
-.react-flow__controls {
-	box-shadow: none !important;
-	border: 1px solid var(--border) !important;
-	border-radius: var(--radius) !important;
-	overflow: hidden;
+/* ──────────────────────────────────────────────────────────────
+   MediaFrame placeholder body.
+   The dot grid is the product's own /infra texture, not a
+   loading affordance — placeholders are deliberate reserved
+   frames, so no shimmer (DESIGN.md: no spinners by default).
+   ────────────────────────────────────────────────────────────── */
+.media-frame__body {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	background-image: radial-gradient(var(--border) 1px, transparent 1px);
+	background-size: 16px 16px;
 }
-
-.react-flow__controls-button {
-	background: var(--muted) !important;
-	border: none !important;
-	border-bottom: 1px solid var(--border) !important;
-	fill: var(--foreground) !important;
+.media-frame__note {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	max-width: 46ch;
+	text-align: center;
 }
-
-.react-flow__controls-button:hover {
-	background: var(--accent) !important;
+.media-frame__play {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 44px;
+	height: 44px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	color: var(--primary);
+	padding-left: 2px;
 }
-
-.react-flow__controls-button:last-child {
-	border-bottom: none !important;
+.media-frame__caption {
+	font-size: 11px;
+	line-height: 1.6;
+	color: var(--muted-foreground);
 }
-
-.react-flow__controls-button svg {
-	fill: var(--foreground) !important;
-}
-
-.react-flow__controls-button svg path {
-	fill: var(--foreground) !important;
+.media-frame__spec {
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
 }
 
 /* App mock interactive sidebar — CSS-only tab switching */
@@ -201,6 +103,20 @@
 	display: none;
 }
 
+/* Topbar breadcrumb follows the active tab */
+.app-mock .mock-crumb {
+	display: none;
+}
+
+.app-mock:has(.mock-radio-map:checked) .mock-crumb-map,
+.app-mock:has(.mock-radio-overview:checked) .mock-crumb-overview,
+.app-mock:has(.mock-radio-services:checked) .mock-crumb-services,
+.app-mock:has(.mock-radio-traces:checked) .mock-crumb-traces,
+.app-mock:has(.mock-radio-logs:checked) .mock-crumb-logs,
+.app-mock:has(.mock-radio-metrics:checked) .mock-crumb-metrics {
+	display: inline;
+}
+
 .app-mock:has(.mock-radio-map:checked) .mock-view-map,
 .app-mock:has(.mock-radio-overview:checked) .mock-view-overview,
 .app-mock:has(.mock-radio-services:checked) .mock-view-services,
@@ -208,6 +124,22 @@
 .app-mock:has(.mock-radio-logs:checked) .mock-view-logs,
 .app-mock:has(.mock-radio-metrics:checked) .mock-view-metrics {
 	display: block;
+}
+
+/* Mobile: the sidebar (the only tab switcher) is hidden below md, and the
+   Service Map graph doesn't fit a phone — pin the mock to the Overview
+   dashboard regardless of the checked radio. */
+@media (max-width: 767px) {
+	.app-mock .mock-view,
+	.app-mock .mock-crumb {
+		display: none !important;
+	}
+	.app-mock .mock-view-overview {
+		display: block !important;
+	}
+	.app-mock .mock-crumb-overview {
+		display: inline !important;
+	}
 }
 
 .app-mock:has(.mock-radio-map:checked) nav .mock-nav-map,
@@ -231,7 +163,7 @@
 
 /* Gradient text utility — used in the hero accent line. */
 .text-gradient-accent {
-	background: linear-gradient(to right, var(--accent), oklch(0.75 0.15 90));
+	background: linear-gradient(to right, var(--primary), oklch(0.75 0.15 90));
 	-webkit-background-clip: text;
 	-webkit-text-fill-color: transparent;
 	background-clip: text;
@@ -275,6 +207,177 @@
 	);
 	background-size: 100% 24px;
 	mix-blend-mode: multiply;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Hero carousel.
+   The timer segments are span bars — scaleX off a left origin, the
+   construction .roadmap-seg and .span-bar already use. The active
+   segment widens to carry its label while the others collapse to
+   dashes, so the rail states where you are without a counter.
+
+   One motion vocabulary throughout: --hero-ease over --hero-swap
+   for the segment width, the label reveal and the plate crossfade,
+   so the rail and the plate settle together instead of racing.
+   Reduced motion freezes all of it (see the freeze block).
+   ────────────────────────────────────────────────────────────── */
+[data-hero-carousel] {
+	--hero-swap: 700ms;
+	--hero-ease: cubic-bezier(0, 0, 0.2, 1);
+	--hero-seg-idle: 20px;
+	--hero-seg-active: 92px;
+}
+.hero-carousel__stage {
+	position: relative;
+	margin-top: 32px;
+	aspect-ratio: 1400 / 720;
+}
+@media (min-width: 768px) {
+	.hero-carousel__stage {
+		margin-top: 40px;
+	}
+}
+.hero-carousel__pane {
+	position: absolute;
+	inset: 0;
+	opacity: 0;
+	pointer-events: none;
+	/* z-index, not opacity alone: the incoming plate fades in over the outgoing
+	   one, so two dark dashboards don't cross at 50% and read as a dip. */
+	z-index: 0;
+	transition: opacity var(--hero-swap) var(--hero-ease);
+}
+.hero-carousel__pane[data-on] {
+	opacity: 1;
+	pointer-events: auto;
+	z-index: 1;
+}
+/* Both MediaFrame branches fill the stage box exactly, so a real capture and a
+   placeholder occupy the same rectangle and the frame never moves. */
+.hero-carousel__pane .live-frame {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+/* The shot settles the last 2% as it fades in, so a swap reads as the plate
+   arriving rather than two stills blinking. Scaling the image and not the
+   frame keeps the border and radius fixed — .live-frame already clips, so the
+   overscan never pokes past the stage. */
+.hero-carousel__pane .live-frame img {
+	height: 100%;
+	width: 100%;
+	object-fit: cover;
+	object-position: top left;
+	transform: scale(1.02);
+	transition: transform var(--hero-swap) var(--hero-ease);
+}
+.hero-carousel__pane[data-on] .live-frame img {
+	transform: scale(1);
+}
+.hero-carousel__pane .media-frame__body {
+	flex: 1;
+	aspect-ratio: auto;
+}
+
+.hero-rail {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	gap: 12px;
+}
+/* Fixed row height, so the track thickening on hover grows about its own
+   centre instead of nudging the caption. 24px also keeps the bare bar a legal
+   tap target. */
+.hero-tab {
+	display: flex;
+	align-items: center;
+	height: 24px;
+	cursor: pointer;
+	border-radius: 2px;
+}
+.hero-tab:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 4px;
+}
+.hero-seg {
+	display: block;
+	height: 2px;
+	width: var(--hero-seg-idle);
+	overflow: hidden;
+	border-radius: 999px;
+	background: var(--border);
+	transition:
+		width var(--hero-swap) var(--hero-ease),
+		height 200ms ease-out,
+		background-color 200ms ease-out;
+}
+.hero-tab[data-on] .hero-seg {
+	width: var(--hero-seg-active);
+}
+.hero-tab:hover .hero-seg {
+	height: 6px;
+	background: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+}
+.hero-seg__fill {
+	display: block;
+	height: 100%;
+	width: 100%;
+	transform: scaleX(0);
+	transform-origin: left center;
+	background: var(--primary);
+}
+/* Caption. All three lines share one grid cell, so the box is as tall as the
+   tallest line and a longer ja/ko string never shifts the plate below it.
+   The swap is a blur-and-fade rather than a slide: the outgoing line dissolves
+   in place, which reads as the same sentence resolving into a new one instead
+   of two labels racing past each other. */
+.hero-caption {
+	display: grid;
+	justify-items: center;
+	margin-top: 20px;
+	text-align: center;
+}
+.hero-caption__item {
+	grid-area: 1 / 1;
+	max-width: 34ch;
+	opacity: 0;
+	filter: blur(6px);
+	font-family: var(--font-display);
+	font-size: 1.125rem;
+	font-weight: 500;
+	line-height: 1.3;
+	letter-spacing: -0.01em;
+	color: var(--foreground);
+	transition:
+		opacity var(--hero-swap) var(--hero-ease),
+		filter var(--hero-swap) var(--hero-ease);
+}
+.hero-caption__item[data-on] {
+	opacity: 1;
+	filter: blur(0);
+}
+@media (min-width: 768px) {
+	.hero-caption__item {
+		font-size: 1.5rem;
+	}
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Dot-grid veil.
+   The product's own /infra texture (16×16 in --border), faded off
+   toward the edges by a radial mask. The hero backdrop on every
+   top-level page. DESIGN.md reserves this texture for sparing use —
+   it belongs behind a headline, never on a card body.
+   Absolutely positioned, so its host needs `position: relative`.
+   ────────────────────────────────────────────────────────────── */
+.dot-grid-veil {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background-image: radial-gradient(var(--border) 1px, transparent 1px);
+	background-size: 16px 16px;
+	-webkit-mask-image: radial-gradient(ellipse 70% 50% at 50% 28%, black, transparent);
+	mask-image: radial-gradient(ellipse 70% 50% at 50% 28%, black, transparent);
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -339,13 +442,17 @@
 	color: var(--muted-foreground);
 	border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
 }
-.waterfall-row:last-child { border-bottom: none; }
+.waterfall-row:last-child {
+	border-bottom: none;
+}
 .waterfall-row .span-name {
 	position: relative;
 	color: var(--foreground);
 	transition: color 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.waterfall-row .span-name.is-active { color: var(--primary); }
+.waterfall-row .span-name.is-active {
+	color: var(--primary);
+}
 .waterfall-row .span-name::after {
 	content: "";
 	position: absolute;
@@ -357,8 +464,9 @@
 	opacity: 0;
 	transform: scaleX(0);
 	transform-origin: left center;
-	transition: opacity 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
-	            transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	transition:
+		opacity 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
+		transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .waterfall-row .span-name.is-active::after {
 	opacity: 1;
@@ -367,7 +475,9 @@
 .waterfall-row .span-dur {
 	transition: color 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.waterfall-row .span-dur.is-active { color: var(--primary); }
+.waterfall-row .span-dur.is-active {
+	color: var(--primary);
+}
 .waterfall-row .span-bar-track {
 	position: relative;
 	height: 8px;
@@ -399,7 +509,9 @@
 	background: color-mix(in oklab, var(--border) 70%, transparent);
 	pointer-events: none;
 }
-.waterfall-row:last-child .trace-connector { bottom: 50%; }
+.waterfall-row:last-child .trace-connector {
+	bottom: 50%;
+}
 
 /* Slowest-span annotation, revealed during the cycle pause. */
 .waterfall-row.is-slowest::after {
@@ -418,10 +530,22 @@
 	animation: slowest-reveal 1300ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes slowest-reveal {
-	0%   { opacity: 0; transform: translateY(-2px); }
-	18%  { opacity: 1; transform: translateY(0); }
-	78%  { opacity: 1; transform: translateY(0); }
-	100% { opacity: 0; transform: translateY(0); }
+	0% {
+		opacity: 0;
+		transform: translateY(-2px);
+	}
+	18% {
+		opacity: 1;
+		transform: translateY(0);
+	}
+	78% {
+		opacity: 1;
+		transform: translateY(0);
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(0);
+	}
 }
 
 /* Trace clock — vertical cursor sweeping across the bar-track column. */
@@ -456,10 +580,18 @@
    the keyframe restarts. Continuous illusion of an infinite feed.
    ────────────────────────────────────────────────────────────── */
 @keyframes log-scroll {
-	0%   { transform: translate3d(0, 0, 0); }
-	100% { transform: translate3d(0, -50%, 0); }
+	0% {
+		transform: translate3d(0, 0, 0);
+	}
+	100% {
+		transform: translate3d(0, -50%, 0);
+	}
 }
-.log-stream__viewport { position: relative; height: 320px; overflow: hidden; }
+.log-stream__viewport {
+	position: relative;
+	height: 320px;
+	overflow: hidden;
+}
 .log-stream__viewport::after {
 	content: "";
 	position: absolute;
@@ -489,17 +621,34 @@
 	color: var(--muted-foreground);
 	border-bottom: 1px solid color-mix(in oklab, var(--border) 40%, transparent);
 }
-.log-row__lvl { font-weight: 600; }
-.log-row[data-level="info"] .log-row__lvl  { color: var(--severity-info); }
-.log-row[data-level="warn"] .log-row__lvl  { color: var(--severity-warn); }
-.log-row[data-level="error"] .log-row__lvl { color: var(--severity-error); }
-.log-row[data-level="debug"] .log-row__lvl { color: var(--severity-debug); }
+.log-row__lvl {
+	font-weight: 600;
+}
+.log-row[data-level="info"] .log-row__lvl {
+	color: var(--severity-info);
+}
+.log-row[data-level="warn"] .log-row__lvl {
+	color: var(--severity-warn);
+}
+.log-row[data-level="error"] .log-row__lvl {
+	color: var(--severity-error);
+}
+.log-row[data-level="debug"] .log-row__lvl {
+	color: var(--severity-debug);
+}
 .log-row[data-level="error"] {
 	background: color-mix(in oklab, var(--primary) 6%, transparent);
 }
-.log-row__svc { color: var(--foreground); }
-.log-row__msg { color: var(--foreground); }
-.log-row__dur { color: var(--muted-foreground); justify-self: end; }
+.log-row__svc {
+	color: var(--foreground);
+}
+.log-row__msg {
+	color: var(--foreground);
+}
+.log-row__dur {
+	color: var(--muted-foreground);
+	justify-self: end;
+}
 
 /* ──────────────────────────────────────────────────────────────
    Service map.
@@ -510,7 +659,9 @@
    the product (apps/web/src/styles.css).
    ────────────────────────────────────────────────────────────── */
 @keyframes service-map-flow {
-	to { stroke-dashoffset: -24; }
+	to {
+		stroke-dashoffset: -24;
+	}
 }
 .svc-map-flow {
 	animation: service-map-flow 1.5s linear infinite;
@@ -551,18 +702,34 @@
 	font-weight: 500;
 	fill: color-mix(in oklab, var(--foreground) 92%, transparent);
 }
-.svc-map-metric-val--warn { fill: var(--severity-warn); }
-.svc-map-health { stroke: none; }
-.svc-map-health--info  { fill: var(--severity-info); }
-.svc-map-health--warn  { fill: var(--severity-warn); }
-.svc-map-health--error { fill: var(--severity-error); }
+.svc-map-metric-val--warn {
+	fill: var(--severity-warn);
+}
+.svc-map-health {
+	stroke: none;
+}
+.svc-map-health--info {
+	fill: var(--severity-info);
+}
+.svc-map-health--warn {
+	fill: var(--severity-warn);
+}
+.svc-map-health--error {
+	fill: var(--severity-error);
+}
 
 /* ──────────────────────────────────────────────────────────────
    MCP transcript caret + typing cursor.
    ────────────────────────────────────────────────────────────── */
-@keyframes caret-blink {
-	0%, 49%   { opacity: 1; }
-	50%, 100% { opacity: 0; }
+@keyframes mcp-caret-blink {
+	0%,
+	49% {
+		opacity: 1;
+	}
+	50%,
+	100% {
+		opacity: 0;
+	}
 }
 .mcp-caret {
 	display: inline-block;
@@ -571,17 +738,24 @@
 	background: var(--primary);
 	vertical-align: -0.15em;
 	margin-left: 2px;
-	animation: caret-blink 1.05s steps(1) infinite;
+	animation: mcp-caret-blink 1.05s steps(1) infinite;
 }
 
 /* ──────────────────────────────────────────────────────────────
    Live indicator pulse (reused from prior design).
    ────────────────────────────────────────────────────────────── */
 @keyframes pulse-dot {
-	0%, 100% { opacity: 1; }
-	50%      { opacity: 0.35; }
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
 }
-.animate-pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+.animate-pulse-dot {
+	animation: pulse-dot 2s ease-in-out infinite;
+}
 
 /* ──────────────────────────────────────────────────────────────
    Roadmap board.
@@ -591,8 +765,12 @@
    each element's delay elapses. Reduced-motion freezes both.
    ────────────────────────────────────────────────────────────── */
 @keyframes roadmap-seg-grow {
-	from { transform: scaleX(0); }
-	to   { transform: scaleX(1); }
+	from {
+		transform: scaleX(0);
+	}
+	to {
+		transform: scaleX(1);
+	}
 }
 .roadmap-seg {
 	transform-origin: left center;
@@ -600,11 +778,290 @@
 	will-change: transform;
 }
 @keyframes roadmap-reveal {
-	from { opacity: 0; transform: translateY(8px); }
-	to   { opacity: 1; transform: translateY(0); }
+	from {
+		opacity: 0;
+		transform: translateY(8px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
 }
 .roadmap-reveal {
 	animation: roadmap-reveal 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Customer logo marquee.
+   Two copies of the logo list laid out in a row; the belt translates
+   left by exactly one copy's width (-50%) and loops seamlessly. A CSS
+   mask fades both edges (works over any background), and the belt
+   pauses while the strip is hovered.
+   ────────────────────────────────────────────────────────────── */
+@keyframes logo-marquee {
+	0% {
+		transform: translate3d(0, 0, 0);
+	}
+	100% {
+		transform: translate3d(-50%, 0, 0);
+	}
+}
+.logo-marquee {
+	position: relative;
+	overflow: hidden;
+	-webkit-mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+	mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+}
+.logo-marquee__belt {
+	display: flex;
+	width: max-content;
+	align-items: center;
+	animation: logo-marquee 42s linear infinite;
+	will-change: transform;
+}
+.logo-marquee:hover .logo-marquee__belt {
+	animation-play-state: paused;
+}
+.logo-cell {
+	display: inline-flex;
+	align-items: center;
+	gap: 14px;
+	padding: 0 clamp(30px, 4.5vw, 60px);
+	white-space: nowrap;
+	color: var(--muted-foreground);
+	transition: color 200ms ease;
+}
+.logo-cell:hover {
+	color: var(--foreground);
+}
+.logo-cell__mark {
+	flex-shrink: 0;
+	/* Marks carry each brand's own color; a slight rest-state fade lifts on hover. */
+	opacity: 0.85;
+	transition: opacity 200ms ease;
+}
+.logo-cell:hover .logo-cell__mark {
+	opacity: 1;
+}
+.logo-cell__name {
+	font-family: var(--font-display);
+	font-weight: 600;
+	font-size: 20px;
+	letter-spacing: -0.01em;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Scroll story — the pinned-pane walkthrough.
+   One IntersectionObserver writes `data-on` / `data-passed` off a
+   single index, so the step count lives in the markup and never in
+   this file. Step one ships marked, and is lit before any JS runs.
+
+   One motion vocabulary throughout: --story-swap over --story-ease
+   for the plate, the route label and the rail alike, so the three
+   settle together instead of racing. 520ms sits between the hero's
+   unhurried 700ms and a blink — a scroll-triggered swap shouldn't
+   dawdle, but it shouldn't snap either.
+
+   Nothing here dims: two steps are on screen at once, so the active
+   one is marked positively (amber label, filled node) rather than by
+   pushing its neighbours under a legible contrast.
+   ────────────────────────────────────────────────────────────── */
+[data-scrollstory] {
+	--story-swap: 520ms;
+	--story-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* The pinned frame. Same construction as .live-frame — deep-ink body,
+   elevated head, hairline border — so it reads as one of the page's live
+   artifacts rather than a new kind of box. */
+.story-frame {
+	background: var(--bg-deep);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-xl);
+	overflow: hidden;
+}
+.story-frame__head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-elevated);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted-foreground);
+}
+/* All four routes share one grid cell, so the head keeps its width when
+   /alerts becomes /traces and the trace id beside it never shifts. */
+.story-frame__route {
+	display: grid;
+	justify-items: end;
+}
+.story-frame__route > span {
+	grid-area: 1 / 1;
+	opacity: 0;
+	transform: translateY(4px);
+	color: var(--primary);
+	transition:
+		opacity var(--story-swap) var(--story-ease),
+		transform var(--story-swap) var(--story-ease);
+}
+.story-frame__route > span[data-on] {
+	opacity: 1;
+	transform: none;
+}
+
+/* The clock cell, used by the use-case stories only. Same swapping-grid
+   construction as the route so the head can't shift, but foreground rather
+   than amber: the route is the thing that changes surface, the clock is just
+   how little time it took. Two amber items in one head would be noise, and the
+   page's amber budget is spent on the closing CTA. */
+.story-frame__clock {
+	display: grid;
+	justify-items: end;
+	min-width: 6ch;
+}
+.story-frame__clock > span {
+	grid-area: 1 / 1;
+	opacity: 0;
+	transform: translateY(4px);
+	color: var(--foreground);
+	transition:
+		opacity var(--story-swap) var(--story-ease),
+		transform var(--story-swap) var(--story-ease);
+}
+.story-frame__clock > span[data-on] {
+	opacity: 1;
+	transform: none;
+}
+
+/* One fixed box for every plate in a story, so the frame can't change height
+   mid-swap. Each story sets --story-aspect to whichever capture family it runs
+   (992/600 for the flow and strip shots, 1280/660 for the surface ones);
+   `contain` is the safety net, so a plate at another ratio insets against the
+   deep floor rather than getting cropped. */
+.story-frame__stage {
+	position: relative;
+	aspect-ratio: var(--story-aspect, 992 / 600);
+}
+/* z-index, not opacity alone: the incoming plate fades in over the outgoing
+   one, so two dark dashboards don't cross at 50% and read as a dip. Same fix
+   the hero carousel carries. */
+.story-frame__stage img {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	object-position: center;
+	opacity: 0;
+	z-index: 0;
+	transform: translateY(10px);
+	transition:
+		opacity var(--story-swap) var(--story-ease),
+		transform var(--story-swap) var(--story-ease);
+}
+.story-frame__stage img[data-on] {
+	opacity: 1;
+	z-index: 1;
+	transform: none;
+}
+
+/* Rail. Each step owns the hairline running from its own node down to the
+   next one, so the fill is just `data-passed` and nothing counts steps.
+   --story-node-y is the node's centre: the step's top padding plus half the
+   10px label row, which is also where the segment has to start to land on the
+   next node instead of stopping short of it.
+   The step's block padding lives HERE, not as a `py-*` utility in the markup,
+   because the rail offset is derived from it — one source, so the two can't
+   drift when a step's spacing is tuned. It is also why the copy stays
+   top-aligned in the step box rather than centred: centring would float the
+   node off the rail. */
+.story-steps [data-step] {
+	position: relative;
+	--story-step-pad: 3rem;
+	--story-node-y: calc(var(--story-step-pad) + 5px);
+	padding-block: var(--story-step-pad);
+}
+@media (min-width: 1024px) {
+	.story-steps [data-step] {
+		--story-step-pad: 9rem;
+	}
+}
+.story-steps [data-step]::before,
+.story-steps [data-step]::after {
+	content: "";
+	position: absolute;
+	left: 4px;
+	top: var(--story-node-y);
+	width: 1px;
+	height: 100%;
+}
+.story-steps [data-step]::before {
+	background: var(--border);
+}
+.story-steps [data-step]::after {
+	background: var(--primary);
+	transform: scaleY(0);
+	transform-origin: top;
+	transition: transform var(--story-swap) var(--story-ease);
+}
+.story-steps [data-step][data-passed]::after {
+	transform: scaleY(1);
+}
+/* Nothing to connect to below the last node. */
+.story-steps [data-step]:last-child::before,
+.story-steps [data-step]:last-child::after {
+	display: none;
+}
+
+.story-node {
+	align-self: center;
+	width: 9px;
+	height: 9px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--background);
+	/* Over the rail, so the hairline never shows through the dot. */
+	position: relative;
+	z-index: 1;
+	transition:
+		background-color var(--story-swap) var(--story-ease),
+		border-color var(--story-swap) var(--story-ease),
+		box-shadow var(--story-swap) var(--story-ease);
+}
+.story-steps [data-step][data-passed] .story-node {
+	background: var(--amber-deep);
+	border-color: var(--amber-deep);
+}
+.story-steps [data-step][data-on] .story-node {
+	background: var(--primary);
+	border-color: var(--primary);
+	box-shadow: 0 0 0 4px color-mix(in oklab, var(--primary) 14%, transparent);
+}
+
+/* .op-key is the same token wearing a different hat: the mono key gutter that
+   runs down the left edge of a feature page, from SurfacePanel's fact list
+   through CapabilityLedger's operation column. It is deliberately identical to
+   .story-surface — a key is a key, whether it labels a step or a row. */
+.story-surface,
+.story-trace,
+.op-key {
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--muted-foreground);
+}
+.story-surface {
+	transition: color var(--story-swap) var(--story-ease);
+}
+.story-steps [data-step][data-on] .story-surface {
+	color: var(--primary);
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -612,7 +1069,55 @@
    Every live artifact freezes at a sensible static frame.
    ────────────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
+	/* The scroll story unpins entirely: the pinned pane would otherwise
+	   freeze on step 1 while three steps scrolled past it. Same code path
+	   as the <lg layout — one thing to reason about, one thing to test.
+	   The observer doesn't run here either, so the rail is neutralised
+	   rather than left marking step 1 as the current step forever. */
+	[data-scrollstory] [data-sticky] {
+		display: none !important;
+	}
+	[data-scrollstory] [data-inline] {
+		display: block !important;
+	}
+	[data-scrollstory] .story-steps [data-step]::after {
+		display: none !important;
+	}
+	[data-scrollstory] .story-node,
+	[data-scrollstory] .story-surface {
+		transition: none !important;
+	}
+	[data-scrollstory] .story-steps [data-step][data-on] .story-node {
+		background: var(--background) !important;
+		border-color: var(--border) !important;
+		box-shadow: none !important;
+	}
+	[data-scrollstory] .story-steps [data-step][data-on] .story-surface {
+		color: var(--muted-foreground) !important;
+	}
+
+	/* The hero carousel stops auto-advancing in JS, so it holds slide 1 with a
+	   full segment — the same frame the no-JS state renders. The rail still
+	   switches on click; only the motion is gone. Nothing here may touch
+	   .hero-seg__fill: an !important transform would outrank the Web Animations
+	   timer for everyone, not just this query. */
+	.hero-carousel__pane,
+	[data-hero-carousel] .hero-seg,
+	[data-hero-carousel] .hero-caption__item,
+	[data-hero-carousel] .live-frame img {
+		transition: none !important;
+	}
+	/* No settle either — the shot sits at its resting scale from the start. */
+	[data-hero-carousel] .live-frame img {
+		transform: none !important;
+	}
+	/* Blur is motion's cousin here — the caption should land sharp, not soft. */
+	[data-hero-carousel] .hero-caption__item[data-on] {
+		filter: none !important;
+	}
+
 	.log-stream__belt,
+	.logo-marquee__belt,
 	.svc-map-flow,
 	.svc-map-node-halo,
 	.mcp-caret,
@@ -621,14 +1126,36 @@
 	.waterfall-row.is-slowest::after {
 		animation: none !important;
 	}
-	.waterfall-stage { opacity: 1 !important; transition: none !important; }
-	.waterfall-row .span-bar { transform: scaleX(1) !important; }
-	.roadmap-seg { animation: none !important; transform: scaleX(1) !important; }
-	.roadmap-reveal { animation: none !important; opacity: 1 !important; transform: none !important; }
-	.svc-map-flow { stroke-dashoffset: 0 !important; opacity: 0.7 !important; }
-	.mcp-caret { opacity: 0.3 !important; }
-	.trace-cursor { display: none !important; }
-	.waterfall-row.is-slowest::after { opacity: 1 !important; transform: translateY(0) !important; }
+	.waterfall-stage {
+		opacity: 1 !important;
+		transition: none !important;
+	}
+	.waterfall-row .span-bar {
+		transform: scaleX(1) !important;
+	}
+	.roadmap-seg {
+		animation: none !important;
+		transform: scaleX(1) !important;
+	}
+	.roadmap-reveal {
+		animation: none !important;
+		opacity: 1 !important;
+		transform: none !important;
+	}
+	.svc-map-flow {
+		stroke-dashoffset: 0 !important;
+		opacity: 0.7 !important;
+	}
+	.mcp-caret {
+		opacity: 0.3 !important;
+	}
+	.trace-cursor {
+		display: none !important;
+	}
+	.waterfall-row.is-slowest::after {
+		opacity: 1 !important;
+		transform: translateY(0) !important;
+	}
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -647,7 +1174,7 @@
 }
 
 .docs-content a {
-	@apply text-accent underline underline-offset-2 hover:text-fg transition-colors;
+	@apply text-primary underline underline-offset-2 hover:text-fg transition-colors;
 }
 
 .docs-content ul {
@@ -663,7 +1190,7 @@
 }
 
 .docs-content code:not(pre code) {
-	@apply bg-bg-elevated text-accent text-[13px] px-1.5 py-0.5 border border-border;
+	@apply bg-bg-elevated text-primary text-[13px] px-1.5 py-0.5 border border-border;
 }
 
 .docs-content pre {
@@ -671,7 +1198,7 @@
 }
 
 .docs-content blockquote {
-	@apply border-l-2 border-accent pl-4 text-sm text-fg-muted italic my-4;
+	@apply border-l-2 border-primary pl-4 text-sm text-fg-muted italic my-4;
 }
 
 .docs-content hr {
@@ -694,12 +1221,22 @@
 	@apply text-fg font-semibold;
 }
 
+/*
+ * Release/section art in prose. Markdown images can't carry width/height, so
+ * the source aspect (1280 × 660, exported @2x) plus this ratio box is what
+ * keeps them from shifting layout as they decode.
+ */
+.docs-content img {
+	@apply w-full h-auto aspect-[1280/660] object-cover bg-bg-deep border border-border rounded-xl my-8;
+}
+
 /* details/summary toggle arrow for mobile nav */
 details[open] > summary .details-open\:rotate-180 {
 	transform: rotate(180deg);
 }
 
-/* Smooth scroll */
+/* Smooth scroll. The padding keeps anchor targets clear of the fixed nav. */
 html {
 	scroll-behavior: smooth;
+	scroll-padding-top: 5rem;
 }

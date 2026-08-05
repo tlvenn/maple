@@ -7,7 +7,7 @@ import {
 	ChartTooltipContent,
 } from "@maple/ui/components/ui/chart"
 import { cn } from "@maple/ui/lib/utils"
-import { formatBucketLabel } from "@/lib/format"
+import { formatBucketLabel } from "@maple/ui/lib/format"
 
 interface TimeseriesPoint {
 	bucket: string

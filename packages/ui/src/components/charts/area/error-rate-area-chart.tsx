@@ -1,5 +1,5 @@
-import { useId, useMemo } from "react"
-import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts"
+import { memo, useId, useMemo } from "react"
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
 
 import type { BaseChartProps } from "../_shared/chart-types"
 import { errorRateTimeSeriesData } from "../_shared/sample-data"
@@ -21,13 +21,16 @@ const baseChartConfig = {
 	errorRate: { label: "Error Rate", color: "var(--chart-error)" },
 } satisfies ChartConfig
 
-export function ErrorRateAreaChart({
+// Memoized: these charts sit in synced grids whose parent rerenders on every
+// atom/query settle; with stable props the whole Recharts subtree is skipped.
+export const ErrorRateAreaChart = memo(function ErrorRateAreaChart({
 	data,
 	className,
 	legend,
 	tooltip,
-	referenceLines,
 	syncId,
+	overlay,
+	yAxisWidth,
 }: BaseChartProps) {
 	const id = useId()
 	const gradientId = `errorRateGradient-${id.replace(/:/g, "")}`
@@ -68,15 +71,6 @@ export function ErrorRateAreaChart({
 					)}
 				</defs>
 				<CartesianGrid vertical={false} />
-				{referenceLines?.map((rl, i) => (
-					<ReferenceLine
-						key={`release-${i}`}
-						x={rl.x}
-						stroke={rl.color ?? "var(--muted-foreground)"}
-						strokeDasharray={rl.strokeDasharray ?? "6 4"}
-						strokeWidth={1}
-					/>
-				))}
 				<XAxis
 					dataKey="bucket"
 					tickLine={false}
@@ -88,7 +82,7 @@ export function ErrorRateAreaChart({
 					tickLine={false}
 					axisLine={false}
 					tickMargin={8}
-					width={60}
+					width={yAxisWidth ?? 60}
 					domain={[0, (dataMax: number) => Math.min(1, Math.max(dataMax * 1.2, 0.01))]}
 					tickFormatter={(v) => formatErrorRate(v)}
 				/>
@@ -99,17 +93,7 @@ export function ErrorRateAreaChart({
 								labelFormatter={(_, payload) => {
 									if (!payload?.[0]?.payload?.bucket) return ""
 									const bucket = payload[0].payload.bucket as string
-									const release = referenceLines?.find((rl) => rl.x === bucket)
-									return (
-										<span>
-											{formatBucketLabel(bucket, axisContext, "tooltip")}
-											{release?.label && (
-												<span className="ml-2 text-muted-foreground">
-													Deploy: {release.label}
-												</span>
-											)}
-										</span>
-									)
+									return formatBucketLabel(bucket, axisContext, "tooltip")
 								}}
 								formatter={(value, name, item) => {
 									const nameStr = String(name)
@@ -158,7 +142,8 @@ export function ErrorRateAreaChart({
 						isAnimationActive={false}
 					/>
 				)}
+				{overlay}
 			</AreaChart>
 		</ChartContainer>
 	)
-}
+})

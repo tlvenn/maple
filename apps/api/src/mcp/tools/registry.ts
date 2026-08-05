@@ -3,6 +3,8 @@ import { registerAddDashboardWidgetTool } from "./add-dashboard-widget"
 import { registerDescribeWarehouseTablesTool } from "./describe-warehouse-tables"
 import { registerComparePeriodsTool } from "./compare-periods"
 import { registerCreateAlertRuleTool } from "./create-alert-rule"
+import { registerUpdateAlertRuleTool } from "./update-alert-rule"
+import { registerDeleteAlertRuleTool } from "./delete-alert-rule"
 import { registerCreateDashboardTool } from "./create-dashboard"
 import { registerDiagnoseServiceTool } from "./diagnose-service"
 import { registerErrorDetailTool } from "./error-detail"
@@ -12,6 +14,7 @@ import { registerFindSlowTracesTool } from "./find-slow-traces"
 import { registerGetAlertRuleTool } from "./get-alert-rule"
 import { registerGetDashboardTool } from "./get-dashboard"
 import { registerGetIncidentTimelineTool } from "./get-incident-timeline"
+import { registerAuditSetupTool } from "./audit-setup"
 import { registerGetInstrumentationRecommendationsTool } from "./get-instrumentation-recommendations"
 import { registerGetServiceTopOperationsTool } from "./get-service-top-operations"
 import { registerInspectChartDataTool } from "./inspect-chart-data"
@@ -36,6 +39,7 @@ import { registerListDashboardsTool } from "./list-dashboards"
 import { registerListMetricsTool } from "./list-metrics"
 import { registerListServicesTool } from "./list-services"
 import { registerQueryDataTool } from "./query-data"
+import { registerRunSqlTool } from "./run-sql"
 import { registerRemoveDashboardWidgetTool } from "./remove-dashboard-widget"
 import { registerReplaceDashboardWidgetsTool } from "./replace-dashboard-widgets"
 import { registerReorderDashboardWidgetsTool } from "./reorder-dashboard-widgets"
@@ -46,6 +50,7 @@ import { registerSearchSessionsTool } from "./search-sessions"
 import { registerGetSessionTranscriptTool } from "./get-session-transcript"
 import { registerGetSessionTracesTool } from "./get-session-traces"
 import { registerServiceMapTool } from "./service-map"
+import { registerSourceCodeTools } from "./source-code"
 import type { McpToolError, McpToolRegistrar, McpToolResult } from "./types"
 import { registerUpdateDashboardTool } from "./update-dashboard"
 import { registerUpdateDashboardWidgetTool } from "./update-dashboard-widget"
@@ -59,18 +64,59 @@ import { registerUpdateDashboardWidgetTool } from "./update-dashboard-widget"
 export interface MapleToolDefinition {
 	readonly name: string
 	readonly description: string
-	readonly schema: Schema.Decoder<unknown, never>
+	readonly schema: Schema.Codec<unknown, unknown, never, unknown>
 	readonly handler: (params: unknown) => Effect.Effect<McpToolResult, McpToolError, any>
+}
+
+/**
+ * Effect emits exactly `{ anyOf: [{ type: "object" }, { type: "array" }] }` — no
+ * `type`, no `properties` — for an empty `Struct({})`. Matched structurally so
+ * the normalization below cannot swallow any other rootless schema.
+ */
+const isEmptyStructSchema = (base: Record<string, unknown>): boolean => {
+	if ("type" in base || "properties" in base) return false
+	const anyOf = base.anyOf
+	if (!Array.isArray(anyOf) || anyOf.length === 0) return false
+	return anyOf.every((member) => {
+		if (typeof member !== "object" || member === null) return false
+		const type = (member as { type?: unknown }).type
+		return Object.keys(member).length === 1 && (type === "object" || type === "array")
+	})
 }
 
 export const toInputSchema = (schema: Schema.Top): Record<string, unknown> => {
 	const document = Schema.toJsonSchemaDocument(schema)
-	return Object.keys(document.definitions).length > 0
-		? { ...document.schema, $defs: document.definitions }
-		: document.schema
+	const base =
+		Object.keys(document.definitions).length > 0
+			? { ...document.schema, $defs: document.definitions }
+			: document.schema
+	// MCP requires the top-level inputSchema to be an object schema (`type: "object"`).
+	// An empty `Struct({})` (a no-parameter tool) comes out untyped, which strict MCP
+	// clients reject — the Vercel AI SDK's `tools/list` Zod validator fails on
+	// `inputSchema.type` and drops EVERY tool from the connection. Normalize just that
+	// case. `$ref` roots (hoisted schemas) already carry a valid object type.
+	const record = base as Record<string, unknown>
+	if (isEmptyStructSchema(record)) {
+		return {
+			type: "object",
+			properties: {},
+			additionalProperties: false,
+			...("$defs" in record ? { $defs: record.$defs } : {}),
+		}
+	}
+	// A genuinely non-object root (a top-level `Schema.Union`/`Schema.Literals`/array)
+	// has parameters that an empty object schema would erase, publishing the tool to
+	// every MCP client as if it took none. Fail at registration instead — this runs at
+	// module init, so it surfaces in tests and at worker boot rather than in the wire.
+	if (record.type !== "object" && !("$ref" in record)) {
+		throw new Error(
+			`MCP tool input schemas must have an object root; got ${JSON.stringify(record).slice(0, 200)}. Wrap the tool input in a Schema.Struct.`,
+		)
+	}
+	return base
 }
 
-export const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition> => {
+const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition> => {
 	const definitions: MapleToolDefinition[] = []
 	const registrar: McpToolRegistrar = {
 		tool(name, description, schema, handler) {
@@ -97,6 +143,7 @@ export const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition
 	registerErrorDetailTool(registrar)
 	registerListMetricsTool(registrar)
 	registerQueryDataTool(registrar)
+	registerRunSqlTool(registrar)
 	registerServiceMapTool(registrar)
 	registerListAlertRulesTool(registrar)
 	registerGetAlertRuleTool(registrar)
@@ -104,6 +151,8 @@ export const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition
 	registerListAlertChecksTool(registrar)
 	registerGetIncidentTimelineTool(registrar)
 	registerCreateAlertRuleTool(registrar)
+	registerUpdateAlertRuleTool(registrar)
+	registerDeleteAlertRuleTool(registrar)
 	registerListDashboardsTool(registrar)
 	registerGetDashboardTool(registrar)
 	registerCreateDashboardTool(registrar)
@@ -120,6 +169,8 @@ export const collectMapleToolDefinitions = (): ReadonlyArray<MapleToolDefinition
 	registerListServicesTool(registrar)
 	registerGetServiceTopOperationsTool(registrar)
 	registerGetInstrumentationRecommendationsTool(registrar)
+	registerAuditSetupTool(registrar)
+	registerSourceCodeTools(registrar)
 	registerListErrorIssuesTool(registrar)
 	registerTransitionErrorIssueTool(registrar)
 	registerSetIssueSeverityTool(registrar)

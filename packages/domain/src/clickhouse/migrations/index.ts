@@ -3,6 +3,14 @@ import { migration_0001_initial } from "./0001_initial"
 import { migration_0002_service_map_edges_rollup } from "./0002_service_map_edges_rollup"
 import { migration_0003_error_events_label } from "./0003_error_events_label"
 import { migration_0004_service_namespace_projections } from "./0004_service_namespace_projections"
+import { migration_0005_alert_checks_error_columns } from "./0005_alert_checks_error_columns"
+import { migration_0006_db_edge_namespace } from "./0006_db_edge_namespace"
+import { migration_0007_db_namespace_hyperdrive } from "./0007_db_namespace_hyperdrive"
+import { migration_0008_service_operations_minutely } from "./0008_service_operations_minutely"
+import { migration_0009_one_year_service_history } from "./0009_one_year_service_history"
+import { migration_0010_search_indexes } from "./0010_search_indexes"
+import { migration_0011_session_analytics_columns } from "./0011_session_analytics_columns"
+import { migration_0012_session_event_attribute_keys } from "./0012_session_event_attribute_keys"
 
 /**
  * A migration statement is either a raw SQL string (structural DDL) or a
@@ -15,6 +23,8 @@ export interface ClickHouseMigration {
 	readonly version: number
 	readonly description: string
 	readonly statements: ReadonlyArray<MigrationStatement>
+	/** Performance-only migrations are applied normally but do not gate direct ingest. */
+	readonly requiredForIngest?: boolean
 }
 
 /**
@@ -36,4 +46,44 @@ export const migrations: ReadonlyArray<ClickHouseMigration> = [
 	migration_0002_service_map_edges_rollup,
 	migration_0003_error_events_label,
 	migration_0004_service_namespace_projections,
+	migration_0005_alert_checks_error_columns,
+	migration_0006_db_edge_namespace,
+	migration_0007_db_namespace_hyperdrive,
+	migration_0008_service_operations_minutely,
+	migration_0009_one_year_service_history,
+	migration_0010_search_indexes,
+	migration_0011_session_analytics_columns,
+	migration_0012_session_event_attribute_keys,
 ] as const
+
+/** Highest migration `version` bundled — i.e. the schema level a fully-applied
+ * ClickHouse instance reaches. */
+export const latestMigrationVersion: number = migrations.reduce(
+	(max, migration) => Math.max(max, migration.version),
+	0,
+)
+
+/**
+ * The ClickHouse schema identity used to gate BYO-ClickHouse **ingest readiness**
+ * (`org_clickhouse_settings.schema_version`): the ingest gateway routes an org's
+ * frames to its own ClickHouse only when the stored value equals this.
+ *
+ * Deliberately the latest ingest-required migration version — NOT the
+ * `clickHouseProjectRevision` hash,
+ * which is shared with the Tinybird manifest and therefore bumps on Tinybird-only
+ * schema changes. Keying on that global hash silently un-readied every BYO-CH org
+ * (routing their ingest to managed Tinybird while the dashboard kept reading their
+ * ClickHouse → invisible data) whenever an unrelated Tinybird datasource changed.
+ * Performance-only migrations set `requiredForIngest: false`; they can improve
+ * query speed without interrupting routing to an otherwise compatible schema.
+ *
+ * Stamped into D1 by the API's applySchema workflow and the schemaDiff self-heal,
+ * and compared by the Rust ingest gateway (emitted as `SCHEMA_VERSION` into
+ * `clickhouse_insert_mappings.rs` by `scripts/generate-clickhouse-insert-mappings.ts`).
+ */
+export const clickHouseSchemaVersion: string = String(
+	migrations.reduce(
+		(max, migration) => (migration.requiredForIngest === false ? max : Math.max(max, migration.version)),
+		0,
+	),
+)

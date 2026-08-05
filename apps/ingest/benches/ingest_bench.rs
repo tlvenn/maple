@@ -12,7 +12,9 @@ use axum::routing::post;
 use axum::Router;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use flate2::read::GzDecoder;
-use maple_ingest::telemetry::{DatasourceNames, SamplingPolicy, TelemetryPipeline, TinybirdConfig};
+use maple_ingest::telemetry::{
+    ClickHouseBreakerConfig, DatasourceNames, SamplingPolicy, TelemetryPipeline, TinybirdConfig,
+};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
@@ -97,8 +99,15 @@ impl BenchFixture {
                 endpoint: format!("http://{addr}"),
                 token: "bench-token".to_string(),
                 queue_dir: queue_dir.clone(),
-                queue_max_bytes: 1024 * 1024 * 1024,
-                org_queue_max_bytes: 1024 * 1024 * 1024,
+                // Effectively uncapped: this benchmark measures accept latency
+                // (encode + WAL append + ack), not back-pressure. A single org
+                // hashes to a single shard, so every frame lands in one lane and
+                // the lane only truncates when the exporter's cursor fully catches
+                // up with the appender — which it never does under sustained
+                // bench load. With a finite cap, a fast runner simply writes more
+                // bytes than a slow one and the run fails with "WAL lane is full".
+                queue_max_bytes: u64::MAX,
+                org_queue_max_bytes: u64::MAX,
                 queue_channel_capacity: 100_000,
                 wal_shards: 4,
                 batch_max_rows: 5_000,
@@ -106,6 +115,8 @@ impl BenchFixture {
                 batch_max_wait: Duration::from_millis(10),
                 export_concurrency_per_shard: 1,
                 export_max_attempts: 20,
+                clickhouse_export_timeout: Duration::from_secs(5),
+                clickhouse_breaker: ClickHouseBreakerConfig::default(),
                 datasources: DatasourceNames::defaults(),
                 datasource_session_replays: "session_replays".to_string(),
                 datasource_session_replay_events: "session_replay_events".to_string(),

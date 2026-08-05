@@ -21,6 +21,15 @@ import { computeBucketSeconds } from "@/api/warehouse/timeseries-utils"
 
 type ExecuteError = WarehouseApiError | BackendError
 
+// Discriminate the typed error channel on `_tag` (every member is a tagged
+// error — the local `Warehouse*Error` classes and the backend
+// `@maple/http/errors/Warehouse*` union both carry a `message` field) rather
+// than collapsing it via `instanceof Error`, which loses the tag and the
+// statically-known message.
+function executeErrorMessage(error: ExecuteError, fallback: string): string {
+	return "message" in error && typeof error.message === "string" ? error.message : fallback
+}
+
 const dateTimeString = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/))
 
 const COMPARISON_MODES = ["none", "previous_period"] as const
@@ -52,7 +61,7 @@ const StrategySchema = Schema.Struct({
 	maxFallbackRangeSeconds: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 })
 
-export const QueryBuilderTimeseriesInputSchema = Schema.Struct({
+const QueryBuilderTimeseriesInputSchema = Schema.Struct({
 	startTime: dateTimeString,
 	endTime: dateTimeString,
 	queries: Schema.mutable(Schema.Array(QueryBuilderQueryDraftSchema)),
@@ -103,7 +112,7 @@ interface QueryBuilderTimeseriesDebug {
 	previousQueries: QueryExecutionDebug[]
 }
 
-export interface QueryBuilderTimeseriesResponse {
+interface QueryBuilderTimeseriesResponse {
 	data: Array<Record<string, string | number>>
 	debug?: QueryBuilderTimeseriesDebug
 }
@@ -311,7 +320,7 @@ const executeTimeseriesQueryWithFallbackUsing = Effect.fn("QueryEngine.executeTi
 
 			if (Result.isFailure(outcome)) {
 				const error = outcome.failure
-				const message = error instanceof Error ? error.message : "Query execution failed"
+				const message = executeErrorMessage(error, "Query execution failed")
 
 				attempts.push({
 					startTime: window.startTime,
@@ -539,8 +548,13 @@ function appendPercentChangeSeries(
 			const currentValue = typeof current === "number" && Number.isFinite(current) ? current : 0
 			const previousValue = typeof previous === "number" && Number.isFinite(previous) ? previous : 0
 
-			row[deltaSeriesName] =
-				previousValue === 0 ? 0 : ((currentValue - previousValue) / Math.abs(previousValue)) * 100
+			// prev=0 & cur=0 is genuinely "unchanged"; prev=0 & cur>0 has no
+			// meaningful percent — omit the point (gap) instead of fabricating 0%.
+			if (previousValue === 0) {
+				if (currentValue === 0) row[deltaSeriesName] = 0
+				continue
+			}
+			row[deltaSeriesName] = ((currentValue - previousValue) / Math.abs(previousValue)) * 100
 		}
 	}
 }
@@ -585,7 +599,13 @@ const runQueryWindow = Effect.fn("QueryEngine.runQueryWindow")(function* (
 				const querySpec = resolveTimeseriesBucketSpec(built.query, startTime, endTime)
 
 				const outcome = yield* Effect.result(
-					executeTimeseriesQueryWithFallback(startTime, endTime, querySpec, strategy, allowFallback),
+					executeTimeseriesQueryWithFallback(
+						startTime,
+						endTime,
+						querySpec,
+						strategy,
+						allowFallback,
+					),
 				)
 
 				if (Result.isFailure(outcome)) {
@@ -604,7 +624,7 @@ const runQueryWindow = Effect.fn("QueryEngine.runQueryWindow")(function* (
 						queryName: query.name,
 						source: query.dataSource,
 						status: "error",
-						error: error instanceof Error ? error.message : "Query execution failed",
+						error: executeErrorMessage(error, "Query execution failed"),
 						warnings: built.warnings,
 						data: [],
 					} satisfies QueryRunResult
@@ -653,6 +673,26 @@ const runQueryWindow = Effect.fn("QueryEngine.runQueryWindow")(function* (
 	}
 })
 
+/**
+ * Ids of queries and formulas whose series must not be plotted.
+ *
+ * `hidden` means "feed the formulas, don't draw me" — a hidden query still runs, because the
+ * formula that references it needs its numbers. The query-builder UI has always honored the flag
+ * (`widget-builder-utils`) but this data source did not, so a saved widget built on a hidden
+ * numerator/denominator plotted its raw operands next to the formula. On a ratio widget that also
+ * means raw counts rendered with the ratio's unit — the Cloudflare cache-hit chart drew
+ * "416849856400.0%" beside its real 0–1 hit rate.
+ */
+function collectHiddenResultIds(input: {
+	queries: ReadonlyArray<{ id: string; hidden?: boolean }>
+	formulas?: ReadonlyArray<{ id: string; hidden?: boolean }>
+}): Set<string> {
+	return new Set([
+		...input.queries.filter((query) => query.hidden).map((query) => query.id),
+		...(input.formulas ?? []).filter((formula) => formula.hidden).map((formula) => formula.id),
+	])
+}
+
 function shiftRunResults(results: QueryRunResult[], shiftMs: number): QueryRunResult[] {
 	return results.map((result) => ({
 		...result,
@@ -669,6 +709,7 @@ export const __testables = {
 	executeTimeseriesQueryWithFallbackUsing,
 	noQueryDataMessage,
 	countSuccessfulQuerySeries,
+	collectHiddenResultIds,
 	mergeQueryRunResults,
 	appendPercentChangeSeries,
 }
@@ -690,6 +731,8 @@ const getQueryBuilderTimeseriesEffect = Effect.fn("QueryEngine.getQueryBuilderTi
 		expression: formula.expression,
 		legend: formula.legend,
 	}))
+	const hiddenResultIds = collectHiddenResultIds(input)
+	const isPlotted = (result: QueryRunResult): boolean => !hiddenResultIds.has(result.queryId)
 	const strategy = resolveStrategy(input)
 	const comparison = {
 		mode: input.comparison?.mode ?? "none",
@@ -731,6 +774,17 @@ const getQueryBuilderTimeseriesEffect = Effect.fn("QueryEngine.getQueryBuilderTi
 		)
 	}
 
+	// Data came back, but nothing plottable did — say why rather than drawing an empty chart the
+	// reader would blame on the time range. On a ratio widget the plotted series is the formula,
+	// so its own failure (an unknown reference, no overlapping buckets) is the useful message.
+	if (!allResults.some((result) => isPlotted(result) && hasAnySeriesData(result.data))) {
+		const plottedError = allResults.find((result) => isPlotted(result) && result.error)?.error
+		return yield* invalidWarehouseInput(
+			"getQueryBuilderTimeseries",
+			plottedError ?? "Every query and formula with data is hidden — nothing to plot",
+		)
+	}
+
 	const displayNameById = toDisplayNameById([
 		...enabledQueries,
 		...formulas.map((formula) => ({
@@ -740,7 +794,7 @@ const getQueryBuilderTimeseriesEffect = Effect.fn("QueryEngine.getQueryBuilderTi
 		})),
 	])
 	const usedSeriesNames = new Set<string>()
-	const mergedCurrent = mergeQueryRunResults(allResults, displayNameById, {
+	const mergedCurrent = mergeQueryRunResults(allResults.filter(isPlotted), displayNameById, {
 		usedSeriesNames,
 	})
 	const mergedSets = [mergedCurrent]
@@ -771,7 +825,7 @@ const getQueryBuilderTimeseriesEffect = Effect.fn("QueryEngine.getQueryBuilderTi
 		)
 		previousDebug = previousWindow.debug
 
-		const shiftedPreviousResults = shiftRunResults(previousWindow.allResults, shiftMs)
+		const shiftedPreviousResults = shiftRunResults(previousWindow.allResults.filter(isPlotted), shiftMs)
 		mergedPrevious = mergeQueryRunResults(shiftedPreviousResults, displayNameById, {
 			seriesSuffix: " (prev)",
 			usedSeriesNames,

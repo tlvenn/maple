@@ -1,15 +1,9 @@
 import { Result, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
 import { useMemo, useState } from "react"
+import { Link } from "@tanstack/react-router"
 import { Exit } from "effect"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@maple/ui/components/ui/card"
-import {
-	InputGroup,
-	InputGroupAddon,
-	InputGroupButton,
-	InputGroupInput,
-} from "@maple/ui/components/ui/input-group"
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -21,96 +15,205 @@ import {
 	AlertDialogMedia,
 	AlertDialogTitle,
 } from "@maple/ui/components/ui/alert-dialog"
-import { Badge } from "@maple/ui/components/ui/badge"
-import { Separator } from "@maple/ui/components/ui/separator"
-import { AlertWarningIcon, ArrowPathIcon, CheckIcon, CopyIcon, EyeIcon, ShieldIcon } from "@/components/icons"
+import { Button } from "@maple/ui/components/ui/button"
+import { cn } from "@maple/ui/lib/utils"
+import {
+	AlertWarningIcon,
+	ArrowPathIcon,
+	ArrowRightIcon,
+	EyeIcon,
+	PaperPlaneIcon,
+	PulseIcon,
+} from "@/components/icons"
+import { CopyIndicator } from "@maple/ui/components/ui/copy-button"
+import { useCopy } from "@maple/ui/hooks/use-copy"
+import { formatNumber } from "@maple/ui/lib/format"
 import { ingestUrl } from "@/lib/services/common/ingest-url"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
+import { maskKey } from "@maple/ui/components/ui/copyable-field"
+import { ConnectInstructions, FrameworkPicker, useGuidedFramework } from "@/components/ingest/guided-setup"
+import {
+	sendTestEvent,
+	useIngestConnection,
+	type IngestConnection,
+} from "@/components/ingest/use-ingest-connection"
 import { AttributeMappingsSection } from "./attribute-mappings-section"
 import { RecommendedMappingsSection } from "./recommended-mappings-section"
 
-function maskKey(key: string): string {
-	if (key.length <= 18) return key
-	const prefix = key.slice(0, 14)
-	const suffix = key.slice(-4)
-	return `${prefix}${"•".repeat(key.length - 18)}${suffix}`
-}
+const LANE_BADGE = "w-14 shrink-0 font-mono text-[10px] font-medium uppercase tracking-[0.12em]"
 
-interface ApiKeyRowProps {
-	type: "public" | "private"
-	label: string
-	description: string
-	keyValue: string
-	isVisible: boolean
-	onToggleVisibility: () => void
-	isCopied: boolean
-	onCopy: () => void
-	onRegenerate: () => void
-	disabled: boolean
-}
+/** Live ingest-health strip: green once telemetry lands, amber pulse while waiting. */
+function StatusBanner({ connection }: { connection: IngestConnection }) {
+	const [sending, setSending] = useState(false)
+	const connected = connection.status === "connected"
 
-function ApiKeyRow({
-	type,
-	label,
-	description,
-	keyValue,
-	isVisible,
-	onToggleVisibility,
-	isCopied,
-	onCopy,
-	onRegenerate,
-	disabled,
-}: ApiKeyRowProps) {
+	async function handleSendTest() {
+		if (!connection.apiKey || sending) return
+		setSending(true)
+		try {
+			await sendTestEvent(connection.apiKey)
+			toastManager.add({ title: "Test event sent — watch for it to land in traces", type: "success" })
+			connection.refresh()
+		} catch {
+			toastManager.add({
+				title: "Couldn't reach the ingest endpoint — double-check your API key",
+				type: "error",
+			})
+		} finally {
+			setSending(false)
+		}
+	}
+
+	const spansPerMinute = Math.round(connection.spansPerMinute)
+
 	return (
-		<div className="space-y-2">
-			<div className="flex items-center gap-2">
-				<Badge variant={type === "private" ? "outline" : "secondary"}>
-					{type === "private" && <ShieldIcon size={12} />}
-					{label}
-				</Badge>
-				<span className="text-muted-foreground text-xs">{description}</span>
-			</div>
-
-			<InputGroup>
-				<InputGroupInput
-					readOnly
-					value={isVisible ? keyValue : maskKey(keyValue)}
-					className="font-mono text-xs tracking-wide select-all"
+		<div className="bg-card flex items-center gap-3 rounded-lg border px-4 py-2.5">
+			{connected ? (
+				<span className="bg-severity-info size-2 shrink-0 rounded-full" />
+			) : (
+				<PulseIcon
+					size={12}
+					className="text-primary shrink-0 animate-pulse motion-reduce:animate-none"
 				/>
-				<InputGroupAddon align="inline-end">
-					<InputGroupButton
+			)}
+			<span className="text-sm font-medium whitespace-nowrap">
+				{connected ? "Receiving telemetry" : "Waiting for telemetry"}
+			</span>
+			<span className="text-muted-foreground truncate font-mono text-xs">
+				{connected
+					? [
+							`${connection.serviceCount} ${connection.serviceCount === 1 ? "service" : "services"}`,
+							spansPerMinute > 0 ? `${formatNumber(spansPerMinute)} spans/min` : null,
+						]
+							.filter(Boolean)
+							.join(" · ")
+					: "watching for your first trace"}
+			</span>
+			<div className="grow" />
+			{connected ? (
+				<Button
+					variant="ghost"
+					size="sm"
+					className="text-muted-foreground hover:text-foreground gap-1.5"
+					render={<Link to="/traces" />}
+				>
+					Explore traces
+					<ArrowRightIcon size={13} />
+				</Button>
+			) : (
+				<Button
+					variant="outline"
+					size="sm"
+					className="shrink-0 gap-2"
+					onClick={handleSendTest}
+					disabled={sending || !connection.apiKey}
+				>
+					<PaperPlaneIcon size={13} />
+					{sending ? "Sending…" : "Send test event"}
+				</Button>
+			)}
+		</div>
+	)
+}
+
+interface CredentialRowProps {
+	label: string
+	badge: string
+	badgeClass: string
+	value: string
+	masked?: boolean
+	description?: string
+	isVisible?: boolean
+	onToggleVisibility?: () => void
+	/** Clipboard payload; defaults to `value` (which may be masked for display). */
+	copyValue?: string
+	onRegenerate?: () => void
+	disabled?: boolean
+}
+
+function CredentialRow({
+	label,
+	badge,
+	badgeClass,
+	value,
+	masked = false,
+	description,
+	isVisible = false,
+	onToggleVisibility,
+	copyValue,
+	onRegenerate,
+	disabled = false,
+}: CredentialRowProps) {
+	// One copy state drives both affordances — the inline value and the trailing
+	// button — so they can never disagree about what was just copied.
+	const { copy, status } = useCopy({ label })
+	const onCopy = () => void copy(copyValue ?? value)
+
+	return (
+		<div className="flex items-center gap-3 border-t px-4 py-3">
+			<span className="w-[120px] shrink-0 text-sm">{label}</span>
+			<span className={cn(LANE_BADGE, badgeClass)}>{badge}</span>
+			<div className="flex min-w-0 grow flex-col items-start gap-0.5">
+				<button
+					type="button"
+					onClick={onCopy}
+					disabled={disabled}
+					title={status === "copied" ? "Copied!" : "Click to copy"}
+					className="group/value text-muted-foreground hover:text-foreground flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 font-mono text-xs tracking-wide transition-colors"
+				>
+					<span className="truncate">{masked && !isVisible ? maskKey(value) : value}</span>
+					<CopyIndicator
+						status={status}
+						size={12}
+						className={cn(
+							"transition-opacity group-hover/value:opacity-100",
+							status === "idle" && "opacity-0",
+						)}
+					/>
+				</button>
+				{description && (
+					<span className="text-muted-foreground/75 text-[11px] leading-3.5">{description}</span>
+				)}
+			</div>
+			<div className="flex shrink-0 items-center gap-1.5">
+				{onToggleVisibility && (
+					<Button
+						variant="outline"
+						size="icon-sm"
 						onClick={onToggleVisibility}
 						aria-label={isVisible ? "Hide key" : "Reveal key"}
 						title={isVisible ? "Hide" : "Reveal"}
 						disabled={disabled}
 					>
-						<EyeIcon size={14} className={isVisible ? "text-foreground" : undefined} />
-					</InputGroupButton>
-
-					<InputGroupButton
-						onClick={onCopy}
-						aria-label="Copy key to clipboard"
-						title={isCopied ? "Copied!" : "Copy"}
-						disabled={disabled}
-					>
-						{isCopied ? (
-							<CheckIcon size={14} className="text-severity-info" />
-						) : (
-							<CopyIcon size={14} />
-						)}
-					</InputGroupButton>
-
-					<InputGroupButton
+						<EyeIcon
+							size={13}
+							className={isVisible ? "text-foreground" : "text-muted-foreground"}
+						/>
+					</Button>
+				)}
+				<Button
+					variant="outline"
+					size="icon-sm"
+					onClick={onCopy}
+					aria-label={`Copy ${label}`}
+					title={status === "copied" ? "Copied!" : "Copy"}
+					disabled={disabled}
+				>
+					<CopyIndicator status={status} size={13} />
+				</Button>
+				{onRegenerate && (
+					<Button
+						variant="outline"
+						size="icon-sm"
 						onClick={onRegenerate}
-						aria-label="Regenerate key"
+						aria-label={`Regenerate ${label.toLowerCase()}`}
 						title="Regenerate"
-						className="text-destructive hover:text-destructive"
 						disabled={disabled}
 					>
-						<ArrowPathIcon size={14} />
-					</InputGroupButton>
-				</InputGroupAddon>
-			</InputGroup>
+						<ArrowPathIcon size={13} className="text-destructive" />
+					</Button>
+				)}
+			</div>
 		</div>
 	)
 }
@@ -118,20 +221,21 @@ function ApiKeyRow({
 export function IngestionSection() {
 	const [publicKeyVisible, setPublicKeyVisible] = useState(false)
 	const [privateKeyVisible, setPrivateKeyVisible] = useState(false)
-	const [copiedKey, setCopiedKey] = useState<"public" | "private" | null>(null)
 	const [regenerateDialogOpen, setRegenerateDialogOpen] = useState(false)
 	const [regenerateKeyType, setRegenerateKeyType] = useState<"public" | "private" | null>(null)
 	const [submittingKeyType, setSubmittingKeyType] = useState<"public" | "private" | null>(null)
-	const [endpointCopied, setEndpointCopied] = useState(false)
 
-	const keysQueryAtom = MapleApiAtomClient.query("ingestKeys", "get", {})
+	const keysQueryAtom = MapleApiV2AtomClient.query("ingestKeys", "retrieve", {})
 	const keysResult = useAtomValue(keysQueryAtom)
 	const refreshKeys = useAtomRefresh(keysQueryAtom)
 
-	const rerollPublicMutation = useAtomSet(MapleApiAtomClient.mutation("ingestKeys", "rerollPublic"), {
+	const connection = useIngestConnection()
+	const { framework, setFramework } = useGuidedFramework()
+
+	const rerollPublicMutation = useAtomSet(MapleApiV2AtomClient.mutation("ingestKeys", "rollPublic"), {
 		mode: "promiseExit",
 	})
-	const rerollPrivateMutation = useAtomSet(MapleApiAtomClient.mutation("ingestKeys", "rerollPrivate"), {
+	const rerollPrivateMutation = useAtomSet(MapleApiV2AtomClient.mutation("ingestKeys", "rollPrivate"), {
 		mode: "promiseExit",
 	})
 
@@ -139,34 +243,6 @@ export function IngestionSection() {
 		() => !Result.isSuccess(keysResult) || submittingKeyType !== null,
 		[keysResult, submittingKeyType],
 	)
-
-	async function handleCopy(keyType: "public" | "private") {
-		if (!Result.isSuccess(keysResult)) return
-
-		const key = keyType === "public" ? keysResult.value.publicKey : keysResult.value.privateKey
-
-		try {
-			await navigator.clipboard.writeText(key)
-			setCopiedKey(keyType)
-			toast.success("Ingest key copied to clipboard")
-			setTimeout(() => {
-				setCopiedKey((current) => (current === keyType ? null : current))
-			}, 2000)
-		} catch {
-			toast.error("Failed to copy ingest key")
-		}
-	}
-
-	async function handleCopyEndpoint() {
-		try {
-			await navigator.clipboard.writeText(ingestUrl)
-			setEndpointCopied(true)
-			toast.success("Ingest endpoint copied to clipboard")
-			setTimeout(() => setEndpointCopied(false), 2000)
-		} catch {
-			toast.error("Failed to copy endpoint")
-		}
-	}
 
 	function openRegenerateDialog(keyType: "public" | "private") {
 		setRegenerateKeyType(keyType)
@@ -183,13 +259,13 @@ export function IngestionSection() {
 
 		if (Exit.isSuccess(result)) {
 			refreshKeys()
-			setCopiedKey(null)
 
-			toast.success(
-				`${regenerateKeyType === "public" ? "Public" : "Private"} key regenerated. Previous key was revoked immediately.`,
-			)
+			toastManager.add({
+				title: `${regenerateKeyType === "public" ? "Public" : "Private"} key regenerated. Previous key was revoked immediately.`,
+				type: "success",
+			})
 		} else {
-			toast.error("Unable to complete request")
+			toastManager.add({ title: "Unable to complete request", type: "error" })
 		}
 
 		setSubmittingKeyType(null)
@@ -198,93 +274,87 @@ export function IngestionSection() {
 	}
 
 	const publicKey = Result.builder(keysResult)
-		.onSuccess((v) => v.publicKey)
+		.onSuccess((v) => v.public_key)
 		.orElse(() => "Loading...")
 	const privateKey = Result.builder(keysResult)
-		.onSuccess((v) => v.privateKey)
+		.onSuccess((v) => v.private_key)
 		.orElse(() => "Loading...")
 
 	return (
 		<>
-			<div className="space-y-4">
-			<div className="grid grid-cols-2 gap-4">
-				<Card>
-					<CardHeader>
-						<CardTitle>Ingest Endpoint</CardTitle>
-						<CardDescription>Send telemetry data to this endpoint using OTLP.</CardDescription>
-					</CardHeader>
-					<CardContent className="space-y-3">
-						<InputGroup>
-							<InputGroupInput
-								readOnly
-								value={ingestUrl}
-								className="font-mono text-xs tracking-wide select-all"
-							/>
-							<InputGroupAddon align="inline-end">
-								<InputGroupButton
-									onClick={handleCopyEndpoint}
-									aria-label="Copy endpoint to clipboard"
-									title={endpointCopied ? "Copied!" : "Copy"}
-								>
-									{endpointCopied ? (
-										<CheckIcon size={14} className="text-severity-info" />
-									) : (
-										<CopyIcon size={14} />
-									)}
-								</InputGroupButton>
-							</InputGroupAddon>
-						</InputGroup>
-						<p className="text-muted-foreground text-xs">
-							Learn how to send telemetry data in the{" "}
-							<a
-								href="https://maple.dev/docs"
-								target="_blank"
-								rel="noopener noreferrer"
-								className="text-foreground underline underline-offset-2 hover:no-underline"
-							>
-								documentation
-							</a>
-							.
-						</p>
-					</CardContent>
-				</Card>
+			<div className="space-y-5">
+				<StatusBanner connection={connection} />
 
-				<Card>
-					<CardHeader>
-						<CardTitle>Ingest Keys</CardTitle>
-						<CardDescription>Use these keys to authenticate ingestion requests.</CardDescription>
-					</CardHeader>
-					<CardContent className="space-y-4">
-						<ApiKeyRow
-							type="public"
-							label="Public"
-							description="For browser and client-side telemetry SDKs"
-							keyValue={publicKey}
-							isVisible={publicKeyVisible}
-							onToggleVisibility={() => setPublicKeyVisible((v) => !v)}
-							isCopied={copiedKey === "public"}
-							onCopy={() => handleCopy("public")}
-							onRegenerate={() => openRegenerateDialog("public")}
-							disabled={isBusy}
-						/>
-						<Separator />
-						<ApiKeyRow
-							type="private"
-							label="Private"
-							description="For server-side ingestion and backend services"
-							keyValue={privateKey}
-							isVisible={privateKeyVisible}
-							onToggleVisibility={() => setPrivateKeyVisible((v) => !v)}
-							isCopied={copiedKey === "private"}
-							onCopy={() => handleCopy("private")}
-							onRegenerate={() => openRegenerateDialog("private")}
-							disabled={isBusy}
-						/>
-					</CardContent>
-				</Card>
-			</div>
+				<div className="bg-card flex flex-col rounded-lg border">
+					<div className="flex items-start gap-3 px-4 pt-4 pb-3">
+						<div className="flex flex-col gap-1">
+							<h3 className="text-sm font-medium">Endpoint &amp; keys</h3>
+							<p className="text-muted-foreground text-xs">
+								Point your OTLP exporter at the endpoint and authenticate with an ingest key.
+							</p>
+						</div>
+						<div className="grow" />
+						<a
+							href="https://maple.dev/docs"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="text-muted-foreground hover:text-foreground font-mono text-[11px] whitespace-nowrap transition-colors"
+						>
+							Docs ↗
+						</a>
+					</div>
+					<CredentialRow
+						label="OTLP endpoint"
+						badge="HTTP"
+						badgeClass="text-muted-foreground"
+						value={ingestUrl}
+					/>
+					<CredentialRow
+						label="Public key"
+						badge="Client"
+						badgeClass="text-info"
+						value={publicKey}
+						copyValue={Result.isSuccess(keysResult) ? keysResult.value.public_key : ""}
+						masked
+						description="For browser and client-side telemetry SDKs"
+						isVisible={publicKeyVisible}
+						onToggleVisibility={() => setPublicKeyVisible((v) => !v)}
+						onRegenerate={() => openRegenerateDialog("public")}
+						disabled={isBusy}
+					/>
+					<CredentialRow
+						label="Private key"
+						badge="Server"
+						badgeClass="text-warning"
+						value={privateKey}
+						copyValue={Result.isSuccess(keysResult) ? keysResult.value.private_key : ""}
+						masked
+						description="For server-side ingestion and backend services"
+						isVisible={privateKeyVisible}
+						onToggleVisibility={() => setPrivateKeyVisible((v) => !v)}
+						onRegenerate={() => openRegenerateDialog("private")}
+						disabled={isBusy}
+					/>
+				</div>
 
-			<RecommendedMappingsSection />
+				<div className="bg-card flex flex-col rounded-lg border">
+					<div className="flex flex-wrap items-start gap-x-6 gap-y-3 px-4 pt-4 pb-3">
+						<div className="flex min-w-[260px] flex-col gap-1">
+							<h3 className="text-sm font-medium whitespace-nowrap">
+								Send your first telemetry
+							</h3>
+							<p className="text-muted-foreground text-xs">
+								Point your OpenTelemetry SDK at Maple, or let Claude Code wire it up for you.
+							</p>
+						</div>
+						<div className="ml-auto">
+							<FrameworkPicker compact selected={framework} onSelect={setFramework} />
+						</div>
+					</div>
+					<ConnectInstructions framework={framework} apiKey={connection.apiKey} variant="flush" />
+				</div>
+
+				<RecommendedMappingsSection />
 
 				<AttributeMappingsSection />
 			</div>

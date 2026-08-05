@@ -12,46 +12,31 @@
 
 import { afterEach, assert, describe, it } from "@effect/vitest"
 import { ConfigProvider, Effect, Layer, Schema } from "effect"
-import { HttpServerRequest } from "effect/unstable/http"
-import {
-	DashboardDocument,
-	DashboardId,
-	IsoDateTimeString,
-	OrgId,
-	UserId,
-} from "@maple/domain/http"
-import { DatabaseLibsqlLive } from "@/lib/DatabaseLibsqlLive"
-import { DashboardPersistenceService } from "@/services/DashboardPersistenceService"
-import { AuthService } from "@/services/AuthService"
-import { ApiKeysService } from "@/services/ApiKeysService"
-import { Env } from "@/lib/Env"
-import { cleanupTempDirs, createTempDbUrl as makeTempDb } from "@/lib/test-sqlite"
+import { DashboardDocument, DashboardId, IsoDateTimeString, OrgId, UserId } from "@maple/domain/http"
+import { DashboardPersistenceService } from "@/services/dashboards/DashboardPersistenceService"
+import { Env } from "@/platform/Env"
+import { cleanupTestDbs, createTestDb, type TestDb } from "@/platform/test-pglite"
 import { withDashboardMutation } from "./dashboard-mutations"
+import { CurrentMcpTenant } from "./query-warehouse"
 import { registerUpdateDashboardTool } from "@/mcp/tools/update-dashboard"
 import type { McpToolError, McpToolRegistrar, McpToolResult } from "@/mcp/tools/types"
 
-const createdTempDirs: string[] = []
+const trackedDbs: TestDb[] = []
 
-afterEach(() => {
-	cleanupTempDirs(createdTempDirs)
-})
+afterEach(() => cleanupTestDbs(trackedDbs))
 
-const createTempDbUrl = () => makeTempDb("maple-dashboard-no-tags-", createdTempDirs).url
-
-// The dashboard-mutation tools resolve their tenant from the inbound HTTP
-// request. We take the internal-service auth branch (a `maple_svc_` bearer +
-// `x-org-id`), which only needs `Env`, so no API key / session plumbing.
+// MCP transport authentication resolves the tenant before dispatch. Tool tests
+// inject that already-resolved context directly, matching both HTTP and RPC.
 const INTERNAL_TOKEN = "test-internal-token"
 const ORG = "org_no_tags"
 
-const testConfig = (url: string) =>
+const testConfig = () =>
 	ConfigProvider.layer(
 		ConfigProvider.fromUnknown({
 			PORT: "3472",
 			MCP_PORT: "3473",
 			TINYBIRD_HOST: "https://api.tinybird.co",
 			TINYBIRD_TOKEN: "test-token",
-			MAPLE_DB_URL: url,
 			MAPLE_AUTH_MODE: "self_hosted",
 			MAPLE_ROOT_PASSWORD: "test-root-password",
 			MAPLE_DEFAULT_ORG_ID: "default",
@@ -61,33 +46,16 @@ const testConfig = (url: string) =>
 		}),
 	)
 
-const requestLayer = Layer.succeed(
-	HttpServerRequest.HttpServerRequest,
-	HttpServerRequest.fromWeb(
-		new Request("http://api.localhost/mcp", {
-			method: "POST",
-			headers: {
-				authorization: `Bearer maple_svc_${INTERNAL_TOKEN}`,
-				"x-org-id": ORG,
-			},
-		}),
-	),
-)
-
-const makeLayer = (url: string) =>
+const makeLayer = (testDb: TestDb) =>
 	Layer.mergeAll(
 		DashboardPersistenceService.layer,
-		AuthService.layer,
-		ApiKeysService.layer,
-		requestLayer,
-	).pipe(
-		Layer.provide(DatabaseLibsqlLive),
-		// `provideMerge` so `Env` is both satisfied for the services above and
-		// exposed in the output — `withDashboardMutation` → `resolveTenant` reads
-		// `Env` directly from the outer context.
-		Layer.provideMerge(Env.layer),
-		Layer.provide(testConfig(url)),
-	)
+		Layer.succeed(CurrentMcpTenant, {
+			orgId: Schema.decodeUnknownSync(OrgId)(ORG),
+			userId: Schema.decodeUnknownSync(UserId)("internal-service"),
+			roles: [],
+			authMode: "self_hosted",
+		}),
+	).pipe(Layer.provide(testDb.layer), Layer.provideMerge(Env.layer), Layer.provide(testConfig()))
 
 const asDashboardId = Schema.decodeUnknownSync(DashboardId)
 const asIsoDateTimeString = Schema.decodeUnknownSync(IsoDateTimeString)
@@ -128,16 +96,14 @@ type ToolHandler = (params: {
 
 describe("dashboard mutations on tag-less / description-less dashboards", () => {
 	it.effect("withDashboardMutation adds a widget without crashing on the absent tags key", () => {
-		const dbUrl = createTempDbUrl()
-		const layer = makeLayer(dbUrl)
+		const testDb = createTestDb(trackedDbs)
+		const layer = makeLayer(testDb)
 
 		return Effect.gen(function* () {
 			yield* DashboardPersistenceService.upsert(asOrgId(ORG), asUserId("seed-user"), seed())
 
-			const result = yield* withDashboardMutation(
-				DASHBOARD,
-				"update_dashboard_widget",
-				(widgets) => Effect.succeed([...widgets, widget("w-new")]),
+			const result = yield* withDashboardMutation(DASHBOARD, "update_dashboard_widget", (widgets) =>
+				Effect.succeed([...widgets, widget("w-new")]),
 			)
 
 			assert.strictEqual(result.ok, true)
@@ -152,8 +118,8 @@ describe("dashboard mutations on tag-less / description-less dashboards", () => 
 	})
 
 	it.effect("update_dashboard renames a dashboard that has no tags or description", () => {
-		const dbUrl = createTempDbUrl()
-		const layer = makeLayer(dbUrl)
+		const testDb = createTestDb(trackedDbs)
+		const layer = makeLayer(testDb)
 
 		let handler: ToolHandler | null = null
 		const registrar: McpToolRegistrar = {

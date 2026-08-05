@@ -1,5 +1,5 @@
-import { useMemo } from "react"
-import { CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from "recharts"
+import { memo, useMemo } from "react"
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts"
 
 import type { BaseChartProps } from "../_shared/chart-types"
 import { latencyTimeSeriesData } from "../_shared/sample-data"
@@ -22,13 +22,16 @@ const baseChartConfig = {
 	p50LatencyMs: { label: "P50", color: "var(--chart-p50)" },
 } satisfies ChartConfig
 
-export function LatencyLineChart({
+// Memoized: these charts sit in synced grids whose parent rerenders on every
+// atom/query settle; with stable props the whole Recharts subtree is skipped.
+export const LatencyLineChart = memo(function LatencyLineChart({
 	data,
 	className,
 	legend,
 	tooltip,
-	referenceLines,
 	syncId,
+	overlay,
+	yAxisWidth,
 }: BaseChartProps) {
 	const chartData = data ?? latencyTimeSeriesData
 
@@ -55,15 +58,6 @@ export function LatencyLineChart({
 		<ChartContainer config={chartConfig} className={className}>
 			<LineChart data={processedData} accessibilityLayer syncId={syncId} syncMethod="value">
 				<CartesianGrid vertical={false} />
-				{referenceLines?.map((rl, i) => (
-					<ReferenceLine
-						key={`release-${i}`}
-						x={rl.x}
-						stroke={rl.color ?? "var(--muted-foreground)"}
-						strokeDasharray={rl.strokeDasharray ?? "6 4"}
-						strokeWidth={1}
-					/>
-				))}
 				<XAxis
 					dataKey="bucket"
 					tickLine={false}
@@ -75,7 +69,7 @@ export function LatencyLineChart({
 					tickLine={false}
 					axisLine={false}
 					tickMargin={8}
-					width={70}
+					width={yAxisWidth ?? 70}
 					tickFormatter={(v) => formatLatency(v)}
 				/>
 				{tooltip !== "hidden" && (
@@ -85,17 +79,7 @@ export function LatencyLineChart({
 								labelFormatter={(_, payload) => {
 									if (!payload?.[0]?.payload?.bucket) return ""
 									const bucket = payload[0].payload.bucket as string
-									const release = referenceLines?.find((rl) => rl.x === bucket)
-									return (
-										<span>
-											{formatBucketLabel(bucket, axisContext, "tooltip")}
-											{release?.label && (
-												<span className="ml-2 text-muted-foreground">
-													Deploy: {release.label}
-												</span>
-											)}
-										</span>
-									)
+									return formatBucketLabel(bucket, axisContext, "tooltip")
 								}}
 								formatter={(value, name, item) => {
 									const nameStr = String(name)
@@ -189,7 +173,8 @@ export function LatencyLineChart({
 						isAnimationActive={false}
 					/>
 				)}
+				{overlay}
 			</LineChart>
 		</ChartContainer>
 	)
-}
+})

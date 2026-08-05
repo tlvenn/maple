@@ -1,9 +1,10 @@
 import { type ReactNode, createElement, useCallback, useMemo } from "react"
 import { Atom, ScopedAtom, useAtom } from "@/lib/effect-atom"
+import { useOptionalPageRefreshContext } from "@/components/time-range-picker/page-refresh-context"
 import type { TimeRange } from "@/components/dashboard-builder/types"
 import { relativeToAbsolute } from "@/lib/time-utils"
 
-export type ResolvedTimeRange = { startTime: string; endTime: string }
+type ResolvedTimeRange = { startTime: string; endTime: string }
 
 const DEFAULT_RELATIVE_FALLBACK = "1h"
 
@@ -41,7 +42,18 @@ export function useDashboardTimeRange() {
 	const timeRangeAtom = DashboardTimeRange.use()
 	const [timeRange, setTimeRangeRaw] = useAtom(timeRangeAtom)
 
-	const resolvedTimeRange = useMemo(() => resolveTimeRange(timeRange), [timeRange])
+	// Rebase relative presets to "now" on manual reload, matching
+	// useEffectiveTimeRange. Without refreshVersion in the deps the resolved
+	// absolute window stays frozen, so clicking Reload re-fetches the same stale
+	// range and appears to do nothing. Absolute ranges resolve to the same value,
+	// so they are unaffected (the explicit useRefreshableAtomValue refresh still
+	// re-runs their queries).
+	const refreshVersion = useOptionalPageRefreshContext()?.refreshVersion ?? 0
+	const resolvedTimeRange = useMemo(
+		() => resolveTimeRange(timeRange),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[timeRange, refreshVersion],
+	)
 
 	// Skip atom writes when the new range is structurally equal to the current
 	// one. Without this guard the picker can re-emit the same range on mount

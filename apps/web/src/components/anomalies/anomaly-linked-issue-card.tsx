@@ -4,15 +4,14 @@ import type { AnomalyIncidentDocument, ErrorIssueId } from "@maple/domain/http"
 import { Button } from "@maple/ui/components/ui/button"
 import { Card, CardContent } from "@maple/ui/components/ui/card"
 import { Skeleton } from "@maple/ui/components/ui/skeleton"
-import { cn } from "@maple/ui/lib/utils"
-import { getServiceColorClass } from "@maple/ui/lib/colors"
 
 import { ActorAvatar } from "@/components/errors/actor-chip"
 import { shortIssueId } from "@/components/errors/issue-id"
 import { WorkflowBadge } from "@/components/errors/workflow-badge"
 import { ArrowRightIcon, LinkIcon, XmarkIcon } from "@/components/icons"
-import { formatNumber } from "@/lib/format"
+import { formatNumber } from "@maple/ui/lib/format"
 import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { ServiceDot } from "@maple/ui/components/service-dot"
 
 export function AnomalyLinkedIssueCard({
 	incident,
@@ -33,7 +32,7 @@ export function AnomalyLinkedIssueCard({
 						<p className="text-sm text-foreground">Not linked to an issue</p>
 						<p className="text-xs text-muted-foreground">
 							{incident.signalType === "error_spike"
-								? "This spike is fingerprint-scoped — an issue with this fingerprint may already exist for the service."
+								? "This frequency increase is fingerprint-scoped — an issue with this fingerprint may already exist for the service."
 								: "Escalate this anomaly by linking it to an existing error issue."}
 						</p>
 						{incident.fingerprintHash !== null ? (
@@ -108,13 +107,7 @@ function LinkedIssueBody({
 										{shortIssueId(issue.id)}
 									</code>
 									<span className="inline-flex h-5 items-center gap-1.5 rounded-full border border-border/70 bg-background px-2 text-[11px] text-muted-foreground">
-										<span
-											aria-hidden
-											className={cn(
-												"size-1.5 shrink-0 rounded-full",
-												getServiceColorClass(issue.serviceName),
-											)}
-										/>
+										<ServiceDot serviceName={issue.serviceName} className="size-1.5" />
 										<span className="max-w-[140px] truncate">{issue.serviceName}</span>
 									</span>
 								</div>
@@ -163,11 +156,21 @@ function IssueCardActions({
 }) {
 	return (
 		<div className="flex shrink-0 items-center gap-1.5">
-			<Button size="sm" variant="outline" render={<Link to="/errors/issues/$issueId" params={{ issueId }} />}>
+			<Button
+				size="sm"
+				variant="outline"
+				render={<Link to="/errors/issues/$issueId" params={{ issueId }} />}
+			>
 				Open issue
 				<ArrowRightIcon size={13} />
 			</Button>
-			<Button size="sm" variant="ghost" onClick={onOpenLinkDialog} disabled={busy} title="Link a different issue">
+			<Button
+				size="sm"
+				variant="ghost"
+				onClick={onOpenLinkDialog}
+				disabled={busy}
+				title="Link a different issue"
+			>
 				<LinkIcon size={13} />
 			</Button>
 			<Button size="sm" variant="ghost" onClick={onUnlink} disabled={busy} title="Unlink issue">

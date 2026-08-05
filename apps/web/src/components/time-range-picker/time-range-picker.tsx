@@ -1,11 +1,19 @@
 import { useCallback, useState } from "react"
 import { Button } from "@maple/ui/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@maple/ui/components/ui/popover"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
 import { ClockIcon } from "@/components/icons"
 import { useAppHotkey } from "@/hooks/use-app-hotkey"
 import { useRecentlyUsedTimes, type RecentTimeRange } from "@/hooks/use-recently-used-times"
-import { formatTimeRangeDisplay, presetLabel, relativeToAbsolute, type TimePreset } from "@/lib/time-utils"
+import {
+	formatTimeRangeDisplay,
+	isTimeRangeWithin,
+	PRESET_OPTIONS,
+	presetLabel,
+	relativeToAbsolute,
+	type TimePreset,
+} from "@/lib/time-utils"
 
 import { CustomRangePicker } from "./custom-range-picker"
 import { PresetList } from "./preset-list"
@@ -15,7 +23,15 @@ import { ShorthandInput } from "./shorthand-input"
 import { TimezoneDisplay } from "./timezone-display"
 import type { TimeRangePickerProps, TimeRangeTab } from "./types"
 
-export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hotkey = false }: TimeRangePickerProps) {
+export function TimeRangePicker({
+	startTime,
+	endTime,
+	presetValue,
+	onChange,
+	hotkey = false,
+	presets = PRESET_OPTIONS,
+	maxRangeSeconds,
+}: TimeRangePickerProps) {
 	const [open, setOpen] = useState(false)
 	const [tab, setTab] = useState<TimeRangeTab>("relative")
 	const { recentTimes, addRecentTime } = useRecentlyUsedTimes()
@@ -25,10 +41,23 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 	useAppHotkey("time.open", () => setOpen(true), { enabled: hotkey })
 
 	const displayText = presetValue ? presetLabel(presetValue) : formatTimeRangeDisplay(startTime, endTime)
+	const rangeAllowed = useCallback(
+		(range: { startTime: string; endTime: string }) => {
+			if (maxRangeSeconds == null) return true
+			if (isTimeRangeWithin(range, maxRangeSeconds)) return true
+			toastManager.add({
+				title: `This page supports a maximum range of ${Math.round(maxRangeSeconds / 86400)} days`,
+				type: "error",
+			})
+			return false
+		},
+		[maxRangeSeconds],
+	)
 
 	const handlePresetSelect = useCallback(
 		(preset: TimePreset) => {
 			const range = preset.getRange()
+			if (!rangeAllowed(range)) return
 			onChange({ ...range, presetValue: preset.value })
 			addRecentTime({
 				label: preset.label,
@@ -37,11 +66,12 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 			})
 			setOpen(false)
 		},
-		[onChange, addRecentTime],
+		[onChange, addRecentTime, rangeAllowed],
 	)
 
 	const handleQuickSelect = useCallback(
 		(range: { startTime: string; endTime: string }, value: string, label: string) => {
+			if (!rangeAllowed(range)) return
 			onChange({ ...range, presetValue: value })
 			addRecentTime({
 				label: `Last ${label}`,
@@ -50,11 +80,12 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 			})
 			setOpen(false)
 		},
-		[onChange, addRecentTime],
+		[onChange, addRecentTime, rangeAllowed],
 	)
 
 	const handleShorthandApply = useCallback(
 		(range: { startTime: string; endTime: string }, value: string, label: string) => {
+			if (!rangeAllowed(range)) return
 			onChange({ ...range, presetValue: value })
 			addRecentTime({
 				label,
@@ -63,7 +94,7 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 			})
 			setOpen(false)
 		},
-		[onChange, addRecentTime],
+		[onChange, addRecentTime, rangeAllowed],
 	)
 
 	const handleRecentSelect = useCallback(
@@ -71,6 +102,7 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 			// Refresh the time range based on the relative value
 			const range = relativeToAbsolute(item.value)
 			if (range) {
+				if (!rangeAllowed(range)) return
 				onChange({ ...range, presetValue: item.value })
 				addRecentTime({
 					...item,
@@ -78,15 +110,17 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 				})
 			} else {
 				// Custom range - use stored values
+				if (!rangeAllowed({ startTime: item.startTime, endTime: item.endTime })) return
 				onChange({ startTime: item.startTime, endTime: item.endTime })
 			}
 			setOpen(false)
 		},
-		[onChange, addRecentTime],
+		[onChange, addRecentTime, rangeAllowed],
 	)
 
 	const handleCustomApply = useCallback(
 		(range: { startTime: string; endTime: string }) => {
+			if (!rangeAllowed(range)) return
 			onChange(range)
 			addRecentTime({
 				label: "Custom range",
@@ -96,7 +130,7 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 			setOpen(false)
 			setTab("relative")
 		},
-		[onChange, addRecentTime],
+		[onChange, addRecentTime, rangeAllowed],
 	)
 
 	return (
@@ -114,7 +148,16 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 					</Button>
 				}
 			/>
-			<PopoverContent align="end" className={tab === "custom" ? "w-auto p-4" : "w-[520px] p-0"}>
+			<PopoverContent
+				align="end"
+				className={
+					// Cap to the viewport so the popover never runs off-screen on
+					// phones (the 520px relative pane is wider than a mobile viewport).
+					tab === "custom"
+						? "w-auto max-w-[calc(100vw-1.5rem)] p-4"
+						: "w-[520px] max-w-[calc(100vw-1.5rem)] p-0"
+				}
+			>
 				{tab === "custom" ? (
 					<CustomRangePicker
 						startTime={startTime}
@@ -128,14 +171,17 @@ export function TimeRangePicker({ startTime, endTime, presetValue, onChange, hot
 							{/* Left rail: presets */}
 							<div className="w-[168px] shrink-0 border-r border-border/70">
 								<PresetList
+									presets={presets}
 									selectedValue={presetValue}
 									onSelect={handlePresetSelect}
 									onCustomClick={() => setTab("custom")}
 								/>
 							</div>
 
-							{/* Right pane: shorthand input + quick select + recent */}
-							<div className="flex-1 space-y-5 p-4">
+							{/* Right pane: shorthand input + quick select + recent.
+							    min-w-0 lets it shrink below content width on narrow
+							    viewports so the quick-select grid doesn't overflow. */}
+							<div className="min-w-0 flex-1 space-y-5 p-4">
 								<ShorthandInput onApply={handleShorthandApply} />
 								<QuickSelectGrid onSelect={handleQuickSelect} />
 								{recentTimes.length > 0 && (

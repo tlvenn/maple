@@ -15,22 +15,41 @@ export interface WidgetActions {
 	configure?: () => void
 	createAlert?: () => void
 	fix?: () => void
+	/**
+	 * Pulls just this tile back to the widest window its query kind supports.
+	 * Present only while the tile is blocked on a `range` error; local to the
+	 * session, so it works on read-only dashboards too.
+	 */
+	narrowRange?: () => void
+	/** Label for `narrowRange`, e.g. "Show last 7 days". */
+	narrowRangeLabel?: string
 }
 
 const WidgetActionsContext = createContext<WidgetActions | null>(null)
 
 /**
- * Returns the widget actions provided by the nearest `WidgetActionsProvider`,
- * or `null` when rendered outside one (e.g. the widget lab, which passes
- * explicit action props instead).
+ * Returns the widget actions provided by the nearest provider, or `null` when
+ * rendered outside one (the template preview, which has no actions at all).
  */
 export function useWidgetActions(): WidgetActions | null {
 	return use(WidgetActionsContext)
 }
 
+/**
+ * Supplies an explicit action set, for callers that render widgets outside a
+ * dashboard — the widget lab, whose actions are console stubs. Widget renderers
+ * take no action props; this is how you give them any.
+ */
+export function WidgetActionsScope({ actions, children }: { actions: WidgetActions; children: ReactNode }) {
+	return <WidgetActionsContext value={actions}>{children}</WidgetActionsContext>
+}
+
 interface WidgetActionsProviderProps {
 	widget: DashboardWidget
 	dataState: WidgetDataState
+	/** Supplied by `useWidgetData` when the tile is blocked on its range cap. */
+	narrowRange?: () => void
+	narrowRangeLabel?: string
 	children: ReactNode
 }
 
@@ -40,9 +59,14 @@ interface WidgetActionsProviderProps {
  * keeps the per-widget action wiring out of the canvas renderer and out of the
  * widget components' prop interfaces.
  */
-export function WidgetActionsProvider({ widget, dataState, children }: WidgetActionsProviderProps) {
-	const { readOnly, removeWidget, cloneWidget, configureWidget, dashboardId } =
-		useDashboardActions()
+export function WidgetActionsProvider({
+	widget,
+	dataState,
+	narrowRange,
+	narrowRangeLabel,
+	children,
+}: WidgetActionsProviderProps) {
+	const { readOnly, removeWidget, cloneWidget, configureWidget, dashboardId } = useDashboardActions()
 	const navigate = useNavigate()
 
 	const errorTitle = dataState.status === "error" ? (dataState.title ?? null) : null
@@ -114,7 +138,7 @@ export function WidgetActionsProvider({ widget, dataState, children }: WidgetAct
 					}
 				: undefined
 
-		return { remove, clone, configure, createAlert, fix }
+		return { remove, clone, configure, createAlert, fix, narrowRange, narrowRangeLabel }
 	}, [
 		widget,
 		readOnly,
@@ -126,6 +150,8 @@ export function WidgetActionsProvider({ widget, dataState, children }: WidgetAct
 		errorTitle,
 		errorMessage,
 		navigate,
+		narrowRange,
+		narrowRangeLabel,
 	])
 
 	return <WidgetActionsContext value={actions}>{children}</WidgetActionsContext>

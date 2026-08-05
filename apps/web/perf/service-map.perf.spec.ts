@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test"
+import { writeFile } from "node:fs/promises"
 
 /**
  * Service-map rendering perf gate.
@@ -21,20 +22,87 @@ interface Metrics {
 	longTasks: number
 	totalBlockingMs: number
 	frames: number
+	react: ReactRenderMetrics
+}
+
+interface ReactRenderMetrics {
+	commits: number
+	mountCommits: number
+	updateCommits: number
+	nestedUpdateCommits: number
+	totalActualDurationMs: number
+	actualDurationP50Ms: number
+	actualDurationP95Ms: number
+	maxActualDurationMs: number
+	lastBaseDurationMs: number
+}
+
+interface ReactRenderReport {
+	initial: ReactRenderMetrics
+	metricRefresh: ReactRenderMetrics
+	topologyChange: ReactRenderMetrics
+	viewportPan: ReactRenderMetrics
+	viewportPanFrames: number
+	viewportPanDurationMs: number
+	viewportPanCommitsPerFrame: number
+	viewportPanActualDurationPerFrameMs: number
+	metricRefreshes: number
+	topologyChanges: number
 }
 
 declare global {
 	interface Window {
 		__smBench?: {
 			ready: boolean
+			readyMs: number | null
 			run: (opts?: { durationMs?: number; pan?: boolean }) => Promise<Metrics>
+			runReact: (opts?: {
+				metricRefreshes?: number
+				topologyChanges?: number
+			}) => Promise<ReactRenderReport>
 		}
 	}
 }
 
-test("service map renders filter/SMIL-free and animates smoothly under heavy traffic", async ({
-	page,
-}) => {
+test("React render work stays measurable during refresh and topology updates", async ({ page }, testInfo) => {
+	await page.goto(BENCH_URL)
+	await page.waitForFunction(() => window.__smBench?.ready === true, undefined, { timeout: 60_000 })
+
+	const scenarios = await page.evaluate(() =>
+		window.__smBench!.runReact({ metricRefreshes: 12, topologyChanges: 2 }),
+	)
+	const report = {
+		label: process.env.MAPLE_PERF_LABEL ?? "working-tree",
+		url: BENCH_URL,
+		strictMode: true,
+		capturedAt: new Date().toISOString(),
+		...scenarios,
+	}
+	const json = `${JSON.stringify(report, null, 2)}\n`
+	const artifactPath = testInfo.outputPath("service-map-react-render-report.json")
+	await writeFile(artifactPath, json)
+	await testInfo.attach("service-map-react-render-report", {
+		path: artifactPath,
+		contentType: "application/json",
+	})
+	if (process.env.MAPLE_PERF_REPORT) await writeFile(process.env.MAPLE_PERF_REPORT, json)
+
+	console.log("[perf] react:", JSON.stringify(report))
+
+	// These are deliberately broad regression rails. The JSON report and A/B
+	// comparator carry the useful before/after signal; CI only rejects render
+	// cascades large enough to be unambiguously unhealthy on any runner.
+	expect(report.initial.commits, "initial React commits").toBeGreaterThan(0)
+	expect(report.metricRefresh.commits, "metric-refresh React commits").toBeGreaterThan(0)
+	expect(report.metricRefresh.commits, "metric-refresh render cascade").toBeLessThan(80)
+	expect(report.topologyChange.commits, "topology-change React commits").toBeGreaterThan(0)
+	expect(report.topologyChange.commits, "topology-change render cascade").toBeLessThan(80)
+	expect(report.viewportPan.commits, "viewport-pan React commits").toBeGreaterThan(0)
+	expect(report.viewportPan.commits, "viewport-pan render cascade").toBeLessThan(800)
+	expect(report.viewportPanCommitsPerFrame, "viewport-pan commits per frame").toBeLessThan(4)
+})
+
+test("service map renders filter/SMIL-free and animates smoothly under heavy traffic", async ({ page }) => {
 	await page.goto(BENCH_URL)
 	await page.waitForFunction(() => window.__smBench?.ready === true, undefined, { timeout: 60_000 })
 
@@ -83,6 +151,12 @@ test("service map renders filter/SMIL-free and animates smoothly under heavy tra
 	const idle = await page.evaluate(() => window.__smBench!.run({ durationMs: 4000, pan: false }))
 	const pan = await page.evaluate(() => window.__smBench!.run({ durationMs: 4000, pan: true }))
 
+	// Time-to-ready includes the async worker-ELK layout pass — tracked (not
+	// gated: CI runners are too noisy) so layout-cost regressions are visible.
+	const readyMs = await page.evaluate(() => window.__smBench!.readyMs)
+	console.log("[perf] readyMs:", readyMs)
+	test.info().annotations.push({ type: "perf-ready-ms", description: String(readyMs) })
+
 	// Surfaced in CI output + attached to the report for before/after tracking.
 	console.log("[perf] idle:", JSON.stringify(idle))
 	console.log("[perf] pan: ", JSON.stringify(pan))
@@ -115,4 +189,19 @@ test("service map renders filter/SMIL-free and animates smoothly under heavy tra
 		expect(pan.fps, "pan fps").toBeGreaterThan(35)
 		expect(pan.frameP95, "pan p95 frame time (ms)").toBeLessThan(70)
 	}
+})
+
+test("low-traffic filter actually removes edges from the DOM", async ({ page }) => {
+	await page.goto(BENCH_URL)
+	await page.waitForFunction(() => window.__smBench?.ready === true, undefined, { timeout: 60_000 })
+	const baselineEdges = await page.evaluate(() => document.querySelectorAll(".react-flow__edge").length)
+
+	// The bench generator draws edge rates uniformly from [50, 500] rps, so a
+	// realistic 1–5% threshold filters nothing — use 50% of peak to cut ~half.
+	await page.goto(`${BENCH_URL}&minTraffic=50`)
+	await page.waitForFunction(() => window.__smBench?.ready === true, undefined, { timeout: 60_000 })
+	const filteredEdges = await page.evaluate(() => document.querySelectorAll(".react-flow__edge").length)
+
+	expect(filteredEdges, "filtered graph has fewer edges").toBeLessThan(baselineEdges)
+	expect(filteredEdges, "filtered graph still has edges").toBeGreaterThan(0)
 })

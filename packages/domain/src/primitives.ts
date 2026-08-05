@@ -81,14 +81,19 @@ export type IngestKeyId = Schema.Schema.Type<typeof IngestKeyId>
 export const ApiKeyId = MapleUuidId("@maple/ApiKeyId", "API Key ID")
 export type ApiKeyId = Schema.Schema.Type<typeof ApiKeyId>
 
+export const PostgresTransactionId = Schema.String.check(Schema.isTrimmed(), Schema.isPattern(/^\d+$/)).pipe(
+	Schema.brand("@maple/PostgresTransactionId"),
+	Schema.annotate({
+		identifier: "@maple/PostgresTransactionId",
+		title: "Postgres Transaction ID",
+		description:
+			"Optional ElectricSQL reconciliation metadata encoded as an unsigned decimal string. Public API consumers that do not use ElectricSQL can ignore it.",
+	}),
+)
+export type PostgresTransactionId = Schema.Schema.Type<typeof PostgresTransactionId>
+
 export const ScrapeTargetId = MapleUuidId("@maple/ScrapeTargetId", "Scrape Target ID")
 export type ScrapeTargetId = Schema.Schema.Type<typeof ScrapeTargetId>
-
-export const CloudflareLogpushConnectorId = MapleUuidId(
-	"@maple/CloudflareLogpushConnectorId",
-	"Cloudflare Logpush Connector ID",
-)
-export type CloudflareLogpushConnectorId = Schema.Schema.Type<typeof CloudflareLogpushConnectorId>
 
 export const AlertDestinationId = MapleUuidId("@maple/AlertDestinationId", "Alert Destination ID")
 export type AlertDestinationId = Schema.Schema.Type<typeof AlertDestinationId>
@@ -105,6 +110,9 @@ export type AlertDeliveryEventId = Schema.Schema.Type<typeof AlertDeliveryEventI
 export const ErrorIssueId = MapleUuidId("@maple/ErrorIssueId", "Error Issue ID")
 export type ErrorIssueId = Schema.Schema.Type<typeof ErrorIssueId>
 
+export const IssueEscalationId = MapleUuidId("@maple/IssueEscalationId", "Issue Escalation ID")
+export type IssueEscalationId = Schema.Schema.Type<typeof IssueEscalationId>
+
 export const ErrorIncidentId = MapleUuidId("@maple/ErrorIncidentId", "Error Incident ID")
 export type ErrorIncidentId = Schema.Schema.Type<typeof ErrorIncidentId>
 
@@ -119,6 +127,9 @@ export type AnomalyIncidentId = Schema.Schema.Type<typeof AnomalyIncidentId>
 
 export const AiTriageRunId = MapleUuidId("@maple/AiTriageRunId", "AI Triage Run ID")
 export type AiTriageRunId = Schema.Schema.Type<typeof AiTriageRunId>
+
+export const InvestigationId = MapleUuidId("@maple/InvestigationId", "Investigation ID")
+export type InvestigationId = Schema.Schema.Type<typeof InvestigationId>
 
 export const AuthMode = Schema.Literals(["clerk", "self_hosted"]).annotate({
 	identifier: "@maple/AuthMode",
@@ -152,7 +163,13 @@ export const ScrapeIntervalSeconds = Schema.Number.check(
 )
 export type ScrapeIntervalSeconds = Schema.Schema.Type<typeof ScrapeIntervalSeconds>
 
-export const ScrapeAuthType = Schema.Literals(["none", "bearer", "basic", "token"]).annotate({
+export const ScrapeAuthType = Schema.Literals([
+	"none",
+	"bearer",
+	"basic",
+	"token",
+	"planetscale_oauth",
+]).annotate({
 	identifier: "@maple/ScrapeAuthType",
 	title: "Scrape Auth Type",
 })

@@ -1,19 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
 import { Result, useAtomRefresh, useAtomSet, useAtomValue } from "@/lib/effect-atom"
-import { effectRoute } from "@effect-router/core"
 import { Exit } from "effect"
 import { useMemo, useState } from "react"
-import { toast } from "sonner"
+import { toastManager } from "@maple/ui/components/ui/toast"
 
-import { CreateIngestAttributeMappingRequest, type RecommendationIssue } from "@maple/domain/http"
+import type { V2Recommendation } from "@maple/domain/http/v2"
 
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
 import {
 	ingestAttributeMappingsListAtom,
 	recommendationIssuesListAtom,
 } from "@/lib/services/atoms/ingestion-atoms"
-import { formatRelativeTime } from "@/lib/format"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
 
 import { Badge } from "@maple/ui/components/ui/badge"
 import { Button } from "@maple/ui/components/ui/button"
@@ -30,24 +29,29 @@ import { cn } from "@maple/ui/lib/utils"
 import {
 	ArrowRotateAnticlockwiseIcon,
 	BoltIcon,
-	CheckIcon,
 	CircleCheckIcon,
 	CircleXmarkIcon,
 	CodeIcon,
-	CopyIcon,
 	PulseIcon,
 	XmarkIcon,
 } from "@/components/icons"
+import { CopyButton } from "@maple/ui/components/ui/copy-button"
+import { DetailRail } from "@maple/ui/components/detail-rail"
 
-export const Route = effectRoute(createFileRoute("/recommendations/$recommendationKey"))({
+/** This rail runs a narrower label column than the shared default. */
+const Row = (props: Omit<React.ComponentProps<typeof DetailRail.Row>, "labelWidth">) => (
+	<DetailRail.Row labelWidth="64px" {...props} />
+)
+
+export const Route = createFileRoute("/recommendations/$recommendationKey")({
 	component: RecommendationDetailPage,
 })
 
 const INGESTION_HREF = "/settings?tab=ingestion"
 const MONO = "font-mono text-[0.92em] text-muted-foreground"
 
-type IssueKind = RecommendationIssue["kind"]
-type IssueStatus = RecommendationIssue["status"]
+type IssueKind = V2Recommendation["kind"]
+type IssueStatus = V2Recommendation["status"]
 type BusyAction = "apply" | "dismiss" | "reopen" | null
 
 const KIND_BADGE: Record<IssueKind, { label: string; variant: "success" | "warning" | "info" }> = {
@@ -56,10 +60,7 @@ const KIND_BADGE: Record<IssueKind, { label: string; variant: "success" | "warni
 	naming: { label: "Naming", variant: "info" },
 }
 
-const STATUS_BADGE: Record<
-	IssueStatus,
-	{ label: string; variant: "success" | "secondary" | "outline" }
-> = {
+const STATUS_BADGE: Record<IssueStatus, { label: string; variant: "success" | "secondary" | "outline" }> = {
 	open: { label: "Open", variant: "outline" },
 	dismissed: { label: "Dismissed", variant: "secondary" },
 	applied: { label: "Applied", variant: "success" },
@@ -82,14 +83,14 @@ const MODE = {
 } as const
 
 /** The recommendation rendered as a sentence with mono-styled attribute keys. */
-function recSentence(issue: RecommendationIssue) {
+function recSentence(issue: V2Recommendation) {
 	if (issue.kind === "double-emission") {
 		return (
 			<>
 				<span className="text-foreground font-medium">Standardize on</span>{" "}
-				<code className={MONO}>{issue.canonicalKey}</code>
+				<code className={MONO}>{issue.canonical_key}</code>
 				<span className="text-muted-foreground"> — spans also emit </span>
-				<code className={MONO}>{issue.sourceKey}</code>
+				<code className={MONO}>{issue.source_key}</code>
 			</>
 		)
 	}
@@ -97,16 +98,15 @@ function recSentence(issue: RecommendationIssue) {
 		return (
 			<>
 				<span className="text-foreground font-medium">Rename non-conforming key</span>{" "}
-				<code className={MONO}>{issue.sourceKey}</code>
+				<code className={MONO}>{issue.source_key}</code>
 			</>
 		)
 	}
 	return (
 		<>
 			<span className="text-foreground font-medium">Rename</span>{" "}
-			<code className={MONO}>{issue.sourceKey}</code>{" "}
-			<span className="text-muted-foreground">→</span>{" "}
-			<code className={MONO}>{issue.canonicalKey}</code>
+			<code className={MONO}>{issue.source_key}</code> <span className="text-muted-foreground">→</span>{" "}
+			<code className={MONO}>{issue.canonical_key}</code>
 		</>
 	)
 }
@@ -119,62 +119,71 @@ function RecommendationDetailPage() {
 	// Applying a recommendation creates a mapping, so refresh the mappings list too.
 	const refreshMappings = useAtomRefresh(ingestAttributeMappingsListAtom)
 
-	const createMutation = useAtomSet(
-		MapleApiAtomClient.mutation("ingestAttributeMappings", "create"),
-		{ mode: "promiseExit" },
+	const createMutation = useAtomSet(MapleApiV2AtomClient.mutation("attributeMappings", "create"), {
+		mode: "promiseExit",
+	})
+	const dismissMutation = useAtomSet(
+		MapleApiV2AtomClient.mutation("instrumentationRecommendations", "dismiss"),
+		{
+			mode: "promiseExit",
+		},
 	)
-	const dismissMutation = useAtomSet(MapleApiAtomClient.mutation("recommendationIssues", "dismiss"), {
-		mode: "promiseExit",
-	})
-	const reopenMutation = useAtomSet(MapleApiAtomClient.mutation("recommendationIssues", "reopen"), {
-		mode: "promiseExit",
-	})
+	const reopenMutation = useAtomSet(
+		MapleApiV2AtomClient.mutation("instrumentationRecommendations", "reopen"),
+		{
+			mode: "promiseExit",
+		},
+	)
 
 	const [busy, setBusy] = useState<BusyAction>(null)
 
 	const issue = useMemo(
 		() =>
 			Result.builder(listResult)
-				.onSuccess((r) => r.issues.find((i) => i.id === recommendationKey) ?? null)
+				.onSuccess((r) => r.data.find((i) => i.id === recommendationKey) ?? null)
 				.orElse(() => null),
 		[listResult, recommendationKey],
 	)
 
-	async function handleApply(target: RecommendationIssue) {
-		if (target.kind !== "rename" || !target.canonicalKey) return
+	async function handleApply(target: V2Recommendation) {
+		if (target.kind !== "rename" || !target.canonical_key) return
+		const canonicalKey = target.canonical_key
 		setBusy("apply")
 		const result = await createMutation({
-			payload: new CreateIngestAttributeMappingRequest({
-				name: `Rename ${target.sourceKey} → ${target.canonicalKey}`,
-				sourceContext: "span",
-				sourceKey: target.sourceKey,
-				targetKey: target.canonicalKey,
+			payload: {
+				name: `Rename ${target.source_key} → ${canonicalKey}`,
+				source_context: "span",
+				source_key: target.source_key,
+				target_key: canonicalKey,
 				operation: "copy",
-			}),
+			},
 		})
 		if (Exit.isSuccess(result)) {
-			toast.success(`Mapping created — ${target.sourceKey} → ${target.canonicalKey}`)
+			toastManager.add({
+				title: `Mapping created — ${target.source_key} → ${canonicalKey}`,
+				type: "success",
+			})
 			refreshIssues()
 			refreshMappings()
 		} else {
-			toast.error("Failed to create mapping")
+			toastManager.add({ title: "Failed to create mapping", type: "error" })
 		}
 		setBusy(null)
 	}
 
-	async function handleDismiss(target: RecommendationIssue) {
+	async function handleDismiss(target: V2Recommendation) {
 		setBusy("dismiss")
 		const result = await dismissMutation({ params: { id: target.id } })
 		if (Exit.isSuccess(result)) refreshIssues()
-		else toast.error("Failed to dismiss recommendation")
+		else toastManager.add({ title: "Failed to dismiss recommendation", type: "error" })
 		setBusy(null)
 	}
 
-	async function handleReopen(target: RecommendationIssue) {
+	async function handleReopen(target: V2Recommendation) {
 		setBusy("reopen")
 		const result = await reopenMutation({ params: { id: target.id } })
 		if (Exit.isSuccess(result)) refreshIssues()
-		else toast.error("Failed to reopen recommendation")
+		else toastManager.add({ title: "Failed to reopen recommendation", type: "error" })
 		setBusy(null)
 	}
 
@@ -207,75 +216,84 @@ function DetailView({
 	onDismiss,
 	onReopen,
 }: {
-	issue: RecommendationIssue
+	issue: V2Recommendation
 	busy: BusyAction
 	onApply: () => void
 	onDismiss: () => void
 	onReopen: () => void
 }) {
 	const status = STATUS_BADGE[issue.status]
-	const isApplyable = issue.kind === "rename" && Boolean(issue.canonicalKey)
+	const isApplyable = issue.kind === "rename" && Boolean(issue.canonical_key)
 	const isLive = issue.status === "applied" || issue.status === "resolved"
 
 	return (
-		<DashboardLayout
-			breadcrumbs={[
-				{ label: "Ingestion", href: INGESTION_HREF },
-				{ label: `Recommendation #${issue.number}` },
-			]}
-			titleContent={
-				<div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-					<h1 className="font-display text-xl font-semibold tracking-tight sm:text-2xl">
-						{recSentence(issue)}
-					</h1>
-					<Badge variant={status.variant} size="lg">
-						{status.label}
-					</Badge>
-				</div>
-			}
-			description={`Opened ${formatRelativeTime(issue.openedAt)} · ${issue.usageCount.toLocaleString()} spans · 24h`}
-			rightSidebar={
-				<DetailSidebar
-					issue={issue}
-					busy={busy}
-					isApplyable={isApplyable}
-					isLive={isLive}
-					onApply={onApply}
-					onDismiss={onDismiss}
-					onReopen={onReopen}
-				/>
-			}
-		>
-			<div className="max-w-3xl space-y-6">
-				<Summary issue={issue} />
-				<ChangeBreakdown issue={issue} />
-				<CautionCallout issue={issue} isApplyable={isApplyable} />
-				{isApplyable && issue.canonicalKey ? (
-					<MappingBlock issue={issue} isLive={isLive} />
-				) : (
-					<SdkFixBlock issue={issue} />
-				)}
-			</div>
-		</DashboardLayout>
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[
+					{ label: "Ingestion", href: INGESTION_HREF },
+					{ label: `Recommendation #${issue.number}` },
+				]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header
+							titleContent={
+								<div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+									<DashboardLayout.Title>{recSentence(issue)}</DashboardLayout.Title>
+									<Badge variant={status.variant} size="lg">
+										{status.label}
+									</Badge>
+								</div>
+							}
+							description={`Opened ${formatRelativeTime(issue.opened_at)} · ${issue.usage_count.toLocaleString()} spans · 24h`}
+						/>
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>
+						<div className="max-w-3xl space-y-6">
+							<Summary issue={issue} />
+							<ChangeBreakdown issue={issue} />
+							<CautionCallout issue={issue} isApplyable={isApplyable} />
+							{isApplyable && issue.canonical_key ? (
+								<MappingBlock issue={issue} isLive={isLive} />
+							) : (
+								<SdkFixBlock issue={issue} />
+							)}
+						</div>
+					</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+				<DashboardLayout.RightPanel>
+					<DetailSidebar
+						issue={issue}
+						busy={busy}
+						isApplyable={isApplyable}
+						isLive={isLive}
+						onApply={onApply}
+						onDismiss={onDismiss}
+						onReopen={onReopen}
+					/>
+				</DashboardLayout.RightPanel>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
 	)
 }
 
 /** Plain-language explanation of the recommendation, with mono-styled keys. */
-function Summary({ issue }: { issue: RecommendationIssue }) {
+function Summary({ issue }: { issue: V2Recommendation }) {
 	let body: React.ReactNode
 	if (issue.kind === "double-emission") {
 		body = (
 			<>
-				Your spans emit both <code className={MONO}>{issue.sourceKey}</code> and{" "}
-				<code className={MONO}>{issue.canonicalKey}</code>. Standardize on{" "}
-				<code className={MONO}>{issue.canonicalKey}</code> in your SDK — an ingest mapping can't
+				Your spans emit both <code className={MONO}>{issue.source_key}</code> and{" "}
+				<code className={MONO}>{issue.canonical_key}</code>. Standardize on{" "}
+				<code className={MONO}>{issue.canonical_key}</code> in your SDK — an ingest mapping can't
 				merge them because the canonical key already exists on your spans.
 			</>
 		)
 	} else if (issue.kind === "naming") {
 		body = (
 			<>
-				<code className={MONO}>{issue.sourceKey}</code> doesn't follow OpenTelemetry's lowercase{" "}
+				<code className={MONO}>{issue.source_key}</code> doesn't follow OpenTelemetry's lowercase{" "}
 				<code className={MONO}>dotted.snake_case</code> convention. Rename it where your spans are
 				created so it conforms to the semantic conventions.
 			</>
@@ -283,10 +301,10 @@ function Summary({ issue }: { issue: RecommendationIssue }) {
 	} else {
 		body = (
 			<>
-				<code className={MONO}>{issue.sourceKey}</code> is a deprecated or non-conforming
+				<code className={MONO}>{issue.source_key}</code> is a deprecated or non-conforming
 				OpenTelemetry attribute key. Maple can rewrite it to{" "}
-				<code className={MONO}>{issue.canonicalKey}</code> at ingest time so newly ingested spans
-				use the current semantic-convention name.
+				<code className={MONO}>{issue.canonical_key}</code> at ingest time so newly ingested spans use
+				the current semantic-convention name.
 			</>
 		)
 	}
@@ -294,7 +312,7 @@ function Summary({ issue }: { issue: RecommendationIssue }) {
 }
 
 /** Before → after card — the deprecated key today vs. the key Maple writes. */
-function ChangeBreakdown({ issue }: { issue: RecommendationIssue }) {
+function ChangeBreakdown({ issue }: { issue: V2Recommendation }) {
 	const labels = {
 		rename: { from: "Deprecated key on your spans today", to: "Canonical key Maple will write" },
 		"double-emission": {
@@ -320,20 +338,20 @@ function ChangeBreakdown({ issue }: { issue: RecommendationIssue }) {
 					<div className="min-w-0 flex-1">
 						<p className="text-xs text-muted-foreground">{labels.from}</p>
 						<code className="font-mono text-sm break-all text-foreground line-through decoration-muted-foreground/40">
-							{issue.sourceKey}
+							{issue.source_key}
 						</code>
 					</div>
 					<span className="shrink-0 pt-0.5 text-xs tabular-nums text-muted-foreground">
-						{issue.usageCount.toLocaleString()} spans · 24h
+						{issue.usage_count.toLocaleString()} spans · 24h
 					</span>
 				</div>
-				{issue.canonicalKey ? (
+				{issue.canonical_key ? (
 					<div className="flex items-start gap-3 border-t border-border/60 px-4 py-3">
 						<CircleCheckIcon size={16} className="mt-0.5 shrink-0 text-success" />
 						<div className="min-w-0 flex-1">
 							<p className="text-xs text-muted-foreground">{labels.to}</p>
 							<code className="font-mono text-sm break-all text-foreground">
-								{issue.canonicalKey}
+								{issue.canonical_key}
 							</code>
 						</div>
 					</div>
@@ -345,19 +363,13 @@ function ChangeBreakdown({ issue }: { issue: RecommendationIssue }) {
 }
 
 /** Orange "Please note" caution, mirroring the reference layout. */
-function CautionCallout({
-	issue,
-	isApplyable,
-}: {
-	issue: RecommendationIssue
-	isApplyable: boolean
-}) {
+function CautionCallout({ issue, isApplyable }: { issue: V2Recommendation; isApplyable: boolean }) {
 	const text =
-		isApplyable && issue.canonicalKey ? (
+		isApplyable && issue.canonical_key ? (
 			<>
 				Applying creates an ingest mapping that copies{" "}
-				<code className={MONO}>{issue.sourceKey}</code> →{" "}
-				<code className={MONO}>{issue.canonicalKey}</code> on newly ingested spans. Existing spans
+				<code className={MONO}>{issue.source_key}</code> →{" "}
+				<code className={MONO}>{issue.canonical_key}</code> on newly ingested spans. Existing spans
 				aren't rewritten, and the mapping never overwrites a target that already exists.
 			</>
 		) : (
@@ -376,17 +388,8 @@ function CautionCallout({
 }
 
 /** The exact ingest mapping Apply creates — the analog of the reference page's SQL block. */
-function MappingBlock({ issue, isLive }: { issue: RecommendationIssue; isLive: boolean }) {
-	const [copied, setCopied] = useState(false)
-	const snippet = `WHEN span attribute \`${issue.sourceKey}\` is present\nCOPY → \`${issue.canonicalKey}\``
-
-	const onCopy = () => {
-		void navigator.clipboard.writeText(snippet).then(() => {
-			setCopied(true)
-			toast.success("Copied mapping")
-			setTimeout(() => setCopied(false), 1500)
-		})
-	}
+function MappingBlock({ issue, isLive }: { issue: V2Recommendation; isLive: boolean }) {
+	const snippet = `WHEN span attribute \`${issue.source_key}\` is present\nCOPY → \`${issue.canonical_key}\``
 
 	return (
 		<section>
@@ -396,21 +399,13 @@ function MappingBlock({ issue, isLive }: { issue: RecommendationIssue; isLive: b
 					<span className="text-xs text-muted-foreground">
 						{isLive ? "This mapping is live" : "Ingest attribute mapping"}
 					</span>
-					<Button
-						variant="ghost"
-						size="icon-sm"
-						onClick={onCopy}
-						aria-label="Copy mapping"
-						title="Copy"
-					>
-						{copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-					</Button>
+					<CopyButton value={snippet} label="Mapping" size="icon-sm" tooltip />
 				</div>
 				<div className="space-y-1.5 px-4 py-3 font-mono text-[13px] leading-relaxed">
 					<div className="flex items-baseline gap-3">
 						<span className="w-12 shrink-0 text-muted-foreground">when</span>
 						<span className="break-all">
-							span attribute <span className="text-foreground">{issue.sourceKey}</span> is
+							span attribute <span className="text-foreground">{issue.source_key}</span> is
 							present
 						</span>
 					</div>
@@ -418,7 +413,7 @@ function MappingBlock({ issue, isLive }: { issue: RecommendationIssue; isLive: b
 						<span className="w-12 shrink-0 text-muted-foreground">copy</span>
 						<span className="break-all">
 							<span className="text-muted-foreground">→</span>{" "}
-							<span className="text-success">{issue.canonicalKey}</span>
+							<span className="text-success">{issue.canonical_key}</span>
 						</span>
 					</div>
 				</div>
@@ -427,17 +422,17 @@ function MappingBlock({ issue, isLive }: { issue: RecommendationIssue; isLive: b
 	)
 }
 
-function SdkFixBlock({ issue }: { issue: RecommendationIssue }) {
+function SdkFixBlock({ issue }: { issue: V2Recommendation }) {
 	return (
 		<section>
 			<SectionHeader label="How to fix" />
 			<div className="rounded-md border bg-muted/40 px-4 py-3">
 				<p className="text-sm leading-relaxed text-muted-foreground">
-					Rename <code className={MONO}>{issue.sourceKey}</code>
-					{issue.canonicalKey ? (
+					Rename <code className={MONO}>{issue.source_key}</code>
+					{issue.canonical_key ? (
 						<>
 							{" "}
-							to <code className={MONO}>{issue.canonicalKey}</code>
+							to <code className={MONO}>{issue.canonical_key}</code>
 						</>
 					) : (
 						<> to a lowercase, dotted semantic-convention key</>
@@ -463,7 +458,7 @@ function DetailSidebar({
 	onDismiss,
 	onReopen,
 }: {
-	issue: RecommendationIssue
+	issue: V2Recommendation
 	busy: BusyAction
 	isApplyable: boolean
 	isLive: boolean
@@ -478,7 +473,7 @@ function DetailSidebar({
 
 	return (
 		<div className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l bg-card/30">
-			<SidebarGroup label="Details">
+			<DetailRail.Group label="Details">
 				<Row label="Status">
 					<Badge variant={status.variant}>{status.label}</Badge>
 				</Row>
@@ -492,23 +487,21 @@ function DetailSidebar({
 					</Badge>
 				</Row>
 				<Row label="Spans">
-					<span className="tabular-nums text-foreground">
-						{issue.usageCount.toLocaleString()}
-					</span>
+					<span className="tabular-nums text-foreground">{issue.usage_count.toLocaleString()}</span>
 				</Row>
-				<Row label="Opened" title={new Date(issue.openedAt).toLocaleString()}>
+				<Row label="Opened" title={new Date(issue.opened_at).toLocaleString()}>
 					<span className="tabular-nums text-muted-foreground">
-						{formatRelativeTime(issue.openedAt)}
+						{formatRelativeTime(issue.opened_at)}
 					</span>
 				</Row>
-				<Row label="Key" title={issue.sourceKey}>
+				<Row label="Key" title={issue.source_key}>
 					<code className="truncate font-mono text-xs text-muted-foreground">
-						{issue.sourceKey}
+						{issue.source_key}
 					</code>
 				</Row>
-			</SidebarGroup>
+			</DetailRail.Group>
 
-			<SidebarGroup label="How this resolves">
+			<DetailRail.Group label="How this resolves">
 				<ul className="flex flex-col gap-1.5 text-xs leading-relaxed text-muted-foreground">
 					{[
 						"the deprecated key stops appearing on your spans",
@@ -523,9 +516,9 @@ function DetailSidebar({
 						</li>
 					))}
 				</ul>
-			</SidebarGroup>
+			</DetailRail.Group>
 
-			<SidebarGroup label="Action">
+			<DetailRail.Group label="Action">
 				{isLive ? (
 					<div className="flex flex-col gap-3">
 						<p className="flex items-center gap-2 text-sm text-success">
@@ -570,17 +563,13 @@ function DetailSidebar({
 								it for you.
 							</p>
 						)}
-						<Button
-							className="w-full"
-							onClick={onDismiss}
-							loading={busy === "dismiss"}
-						>
+						<Button className="w-full" onClick={onDismiss} loading={busy === "dismiss"}>
 							<XmarkIcon size={15} />
 							Dismiss recommendation
 						</Button>
 					</div>
 				)}
-			</SidebarGroup>
+			</DetailRail.Group>
 		</div>
 	)
 }
@@ -591,12 +580,19 @@ function DetailSidebar({
 
 function ShellLayout({ children }: { children: React.ReactNode }) {
 	return (
-		<DashboardLayout
-			breadcrumbs={[{ label: "Ingestion", href: INGESTION_HREF }, { label: "Recommendation" }]}
-			title="Recommendation"
-		>
-			{children}
-		</DashboardLayout>
+		<DashboardLayout.Root>
+			<DashboardLayout.Breadcrumbs
+				items={[{ label: "Ingestion", href: INGESTION_HREF }, { label: "Recommendation" }]}
+			/>
+			<DashboardLayout.Body>
+				<DashboardLayout.Content>
+					<DashboardLayout.Sticky>
+						<DashboardLayout.Header title="Recommendation" />
+					</DashboardLayout.Sticky>
+					<DashboardLayout.Scroll>{children}</DashboardLayout.Scroll>
+				</DashboardLayout.Content>
+			</DashboardLayout.Body>
+		</DashboardLayout.Root>
 	)
 }
 
@@ -664,25 +660,5 @@ function SectionHeader({ label }: { label: string }) {
 		<h2 className="mb-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
 			{label}
 		</h2>
-	)
-}
-
-function SidebarGroup({ label, children }: { label: string; children: React.ReactNode }) {
-	return (
-		<section className="flex flex-col gap-2 border-b border-border/40 p-4 last:border-b-0">
-			<h3 className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-				{label}
-			</h3>
-			<div className="flex flex-col gap-1">{children}</div>
-		</section>
-	)
-}
-
-function Row({ label, title, children }: { label: string; title?: string; children: React.ReactNode }) {
-	return (
-		<div title={title} className="grid min-h-8 grid-cols-[64px_1fr] items-center gap-x-3 py-0.5">
-			<span className="text-xs text-muted-foreground">{label}</span>
-			<div className="flex min-w-0 items-center justify-end">{children}</div>
-		</div>
 	)
 }

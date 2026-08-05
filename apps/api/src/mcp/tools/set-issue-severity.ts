@@ -6,10 +6,10 @@ import {
 	type McpToolRegistrar,
 } from "./types"
 import { Effect, Option, Schema } from "effect"
-import { createDualContent } from "../lib/structured-output"
-import { resolveTenant } from "../lib/query-warehouse"
-import { resolveActorId } from "../lib/resolve-actor"
-import { ErrorsService } from "@/services/ErrorsService"
+import { createDualContent } from "@/mcp/lib/structured-output"
+import { resolveTenant } from "@/mcp/lib/query-warehouse"
+import { resolveActorId } from "@/mcp/lib/resolve-actor"
+import { ErrorsService } from "@/services/errors/ErrorsService"
 import { ErrorIssueId, IssueSeverity } from "@maple/domain/http"
 
 const decodeIssueId = Schema.decodeUnknownOption(ErrorIssueId)
@@ -34,18 +34,16 @@ export function registerSetIssueSeverityTool(server: McpToolRegistrar) {
 					`Invalid issue_id: '${issue_id}'. Must be a UUID from list_error_issues.`,
 				)
 			}
-			let target: IssueSeverity | null
-			if (severity === "none") {
-				target = null
-			} else {
-				const decoded = decodeSeverity(severity)
-				if (Option.isNone(decoded)) {
-					return validationError(
-						`Invalid severity: '${severity}'. Must be one of: critical, high, medium, low, none.`,
-					)
-				}
-				target = decoded.value
+			// `none` clears the severity (null); any other value must decode to a
+			// valid IssueSeverity or we bail with a validation error.
+			const decodedSeverity: Option.Option<IssueSeverity | null> =
+				severity === "none" ? Option.some(null) : decodeSeverity(severity)
+			if (Option.isNone(decodedSeverity)) {
+				return validationError(
+					`Invalid severity: '${severity}'. Must be one of: critical, high, medium, low, none.`,
+				)
 			}
+			const target = decodedSeverity.value
 
 			const actorId = yield* resolveActorId(tenant)
 			// API-key-backed agent identities write with "ai" precedence so they
@@ -60,7 +58,7 @@ export function registerSetIssueSeverityTool(server: McpToolRegistrar) {
 						(error) =>
 							new McpQueryError({
 								message: error.message,
-								pipe: "set_issue_severity",
+								pipeName: "set_issue_severity",
 								cause: error,
 							}),
 					),

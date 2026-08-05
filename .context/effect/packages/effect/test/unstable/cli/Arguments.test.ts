@@ -1,5 +1,5 @@
 import { assert, describe, expect, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path, PlatformError, Ref, Result } from "effect"
+import { Effect, FileSystem, Layer, Option, Path, PlatformError, Ref, Result, Stdio } from "effect"
 import { TestConsole } from "effect/testing"
 import { Argument, CliOutput, Command, Flag } from "effect/unstable/cli"
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
@@ -32,6 +32,11 @@ const CliOutputLayer = CliOutput.layer(
     colors: false
   })
 )
+const StdioLayer = Stdio.layerTest({})
+const ChildProcessSpawnerLayer = Layer.succeed(
+  ChildProcessSpawner.ChildProcessSpawner,
+  ChildProcessSpawner.make(() => Effect.die("Not implemented"))
+)
 
 const TestLayer = Layer.mergeAll(
   ConsoleLayer,
@@ -39,7 +44,8 @@ const TestLayer = Layer.mergeAll(
   PathLayer,
   TerminalLayer,
   CliOutputLayer,
-  Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, ChildProcessSpawner.make(() => Effect.die("Not implemented")))
+  StdioLayer,
+  ChildProcessSpawnerLayer
 )
 
 describe("Command arguments", () => {
@@ -150,7 +156,7 @@ describe("Command arguments", () => {
       expect(errorText).toMatchInlineSnapshot(`
         "
         ERROR
-          Invalid value for argument <count>: "not-a-number". Expected: Failed to parse integer: Expected an integer, got NaN"
+          Invalid value for argument <count>: "not-a-number". Expected a string representing a finite number, got "not-a-number""
       `)
     }).pipe(Effect.provide(TestLayer)))
 

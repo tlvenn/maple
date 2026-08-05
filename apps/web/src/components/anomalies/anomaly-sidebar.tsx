@@ -2,20 +2,22 @@ import { Link } from "@tanstack/react-router"
 import type { AnomalyIncidentDocument } from "@maple/domain/http"
 import { Button } from "@maple/ui/components/ui/button"
 import { cn } from "@maple/ui/lib/utils"
-import { getServiceColorClass } from "@maple/ui/lib/colors"
 
 import { LinkIcon } from "@/components/icons"
 import { shortIssueId } from "@/components/errors/issue-id"
-import { formatRelativeTime } from "@/lib/format"
+import { formatRelativeTime } from "@maple/ui/lib/time-format"
 import {
 	deviation,
 	formatSignalValue,
+	isStaleOpenIncident,
 	RESOLVE_REASON_LABEL,
 	SEVERITY_TONE,
 	SIGNAL_LABEL,
 	severityToneFor,
 	TRIAGE_STATUS_CHIP,
 } from "./anomaly-format"
+import { ServiceDot } from "@maple/ui/components/service-dot"
+import { DetailRail } from "@maple/ui/components/detail-rail"
 
 export function AnomalySidebar({
 	incident,
@@ -31,6 +33,7 @@ export function AnomalySidebar({
 	onUnlink: () => void
 }) {
 	const isOpen = incident.status === "open"
+	const isStale = isStaleOpenIncident(incident)
 	const tone = severityToneFor(incident)
 	const dev = deviation(incident)
 	const triageChip = TRIAGE_STATUS_CHIP[incident.triageStatus]
@@ -38,14 +41,26 @@ export function AnomalySidebar({
 
 	return (
 		<div className="flex h-full w-72 shrink-0 flex-col overflow-y-auto border-l bg-card/30">
-			<SidebarGroup label="Actions">
+			<DetailRail.Group label="Actions">
 				{isOpen ? (
-					<Button size="sm" variant="outline" className="w-full" onClick={onResolve} disabled={busy}>
+					<Button
+						size="sm"
+						variant="outline"
+						className="w-full"
+						onClick={onResolve}
+						disabled={busy}
+					>
 						Resolve anomaly
 					</Button>
 				) : null}
 				{incident.errorIssueId === null ? (
-					<Button size="sm" variant="outline" className="w-full" onClick={onOpenLinkDialog} disabled={busy}>
+					<Button
+						size="sm"
+						variant="outline"
+						className="w-full"
+						onClick={onOpenLinkDialog}
+						disabled={busy}
+					>
 						<LinkIcon size={13} />
 						Link issue
 					</Button>
@@ -54,81 +69,99 @@ export function AnomalySidebar({
 						Unlink {shortIssueId(incident.errorIssueId)}
 					</Button>
 				)}
-			</SidebarGroup>
+			</DetailRail.Group>
 
-			<SidebarGroup label="Details">
-				<Row label="Signal">
+			<DetailRail.Group label="Details">
+				<DetailRail.Row label="State">
+					<span className="text-right text-sm text-foreground">
+						{isStale
+							? `stale · last seen ${formatRelativeTime(incident.lastTriggeredAt)}`
+							: isOpen
+								? "open"
+								: "resolved"}
+					</span>
+				</DetailRail.Row>
+				<DetailRail.Row label="Signal">
 					<span className="text-sm text-foreground">{SIGNAL_LABEL[incident.signalType]}</span>
-				</Row>
-				<Row label="Severity">
-					<span className={cn("text-sm font-medium", isOpen ? tone.text : "text-muted-foreground")}>
+				</DetailRail.Row>
+				<DetailRail.Row label="Severity">
+					<span
+						className={cn(
+							"text-sm font-medium",
+							isOpen && !isStale ? tone.text : "text-muted-foreground",
+						)}
+					>
 						{incident.severity}
 					</span>
-				</Row>
-				<Row label="Service" title={incident.serviceName}>
+				</DetailRail.Row>
+				<DetailRail.Row label="Service" title={incident.serviceName}>
 					<span className="flex min-w-0 items-center gap-2">
-						<span
-							aria-hidden
-							className={cn(
-								"size-1.5 shrink-0 rounded-full",
-								getServiceColorClass(incident.serviceName),
-							)}
-						/>
+						<ServiceDot serviceName={incident.serviceName} className="size-1.5" />
 						<span className="truncate text-sm text-foreground">{incident.serviceName}</span>
 					</span>
-				</Row>
-				<Row label="Environment">
+				</DetailRail.Row>
+				<DetailRail.Row label="Environment">
 					<span className="text-sm text-foreground">{incident.deploymentEnv || "—"}</span>
-				</Row>
-				<Row label="Detector" title={incident.detectorKey}>
+				</DetailRail.Row>
+				<DetailRail.Row label="Detector" title={incident.detectorKey}>
 					<code className="block max-w-full truncate font-mono text-xs text-muted-foreground">
 						{incident.detectorKey}
 					</code>
-				</Row>
+				</DetailRail.Row>
 				{incident.fingerprintHash !== null ? (
-					<Row label="Fingerprint" title={incident.fingerprintHash}>
+					<DetailRail.Row label="Fingerprint" title={incident.fingerprintHash}>
 						<code className="block max-w-full truncate font-mono text-xs text-muted-foreground">
 							{incident.fingerprintHash}
 						</code>
-					</Row>
+					</DetailRail.Row>
 				) : null}
-			</SidebarGroup>
+			</DetailRail.Group>
 
-			<SidebarGroup label="Values">
-				<Row label="Observed">
-					<span className={cn("font-mono text-sm tabular-nums", isOpen ? tone.text : "text-foreground")}>
+			<DetailRail.Group label="Values">
+				<DetailRail.Row label="Observed">
+					<span
+						className={cn(
+							"font-mono text-sm tabular-nums",
+							isOpen && !isStale ? tone.text : "text-foreground",
+						)}
+					>
 						{fmt(incident.lastObservedValue)}
 					</span>
-				</Row>
-				<Row label="At open">
+				</DetailRail.Row>
+				<DetailRail.Row label="At open">
 					<span className="font-mono text-sm tabular-nums text-muted-foreground">
 						{fmt(incident.openedValue)}
 					</span>
-				</Row>
-				<Row label="Baseline">
+				</DetailRail.Row>
+				<DetailRail.Row label="Baseline">
 					<span className="font-mono text-sm tabular-nums text-muted-foreground">
 						{fmt(incident.baselineMedian)}
 					</span>
-				</Row>
-				<Row label="Threshold">
+				</DetailRail.Row>
+				<DetailRail.Row label="Threshold">
 					<span className="font-mono text-sm tabular-nums text-muted-foreground">
 						{fmt(incident.thresholdValue)}
 					</span>
-				</Row>
-				<Row label="Deviation">
-					<span className={cn("font-mono text-sm tabular-nums", isOpen ? tone.text : "text-foreground")}>
+				</DetailRail.Row>
+				<DetailRail.Row label="Deviation">
+					<span
+						className={cn(
+							"font-mono text-sm tabular-nums",
+							isOpen && !isStale ? tone.text : "text-foreground",
+						)}
+					>
 						{dev.label}
 					</span>
-				</Row>
-				<Row label="Samples">
+				</DetailRail.Row>
+				<DetailRail.Row label="Samples">
 					<span className="font-mono text-sm tabular-nums text-muted-foreground">
 						{incident.lastSampleCount.toLocaleString()}
 					</span>
-				</Row>
-			</SidebarGroup>
+				</DetailRail.Row>
+			</DetailRail.Group>
 
 			{incident.fingerprints.length > 1 ? (
-				<SidebarGroup label={`Grouped errors · ${incident.fingerprints.length}`}>
+				<DetailRail.Group label={`Grouped errors · ${incident.fingerprints.length}`}>
 					{incident.fingerprints.map((fingerprint) => (
 						<div
 							key={fingerprint.fingerprintHash}
@@ -162,51 +195,58 @@ export function AnomalySidebar({
 								)}
 							</span>
 							<span className="font-mono text-xs tabular-nums text-muted-foreground">
-								{fingerprint.resolvedAt !== null
-									? "resolved"
-									: fmt(fingerprint.lastValue)}
+								{fingerprint.resolvedAt !== null ? "resolved" : fmt(fingerprint.lastValue)}
 							</span>
 						</div>
 					))}
-				</SidebarGroup>
+				</DetailRail.Group>
 			) : null}
 
-			<SidebarGroup label="Timing">
-				<Row label="First triggered" title={new Date(incident.firstTriggeredAt).toLocaleString()}>
+			<DetailRail.Group label="Timing">
+				<DetailRail.Row
+					label="First triggered"
+					title={new Date(incident.firstTriggeredAt).toLocaleString()}
+				>
 					<span className="text-right text-sm tabular-nums text-foreground">
 						{formatRelativeTime(incident.firstTriggeredAt)}
 					</span>
-				</Row>
+				</DetailRail.Row>
 				{incident.reopenCount > 0 && incident.lastReopenedAt !== null ? (
-					<Row label="Reopened" title={new Date(incident.lastReopenedAt).toLocaleString()}>
+					<DetailRail.Row
+						label="Reopened"
+						title={new Date(incident.lastReopenedAt).toLocaleString()}
+					>
 						<span className="text-right text-sm tabular-nums text-muted-foreground">
 							{formatRelativeTime(incident.lastReopenedAt)}
 							{incident.reopenCount > 1 ? ` (×${incident.reopenCount})` : ""}
 						</span>
-					</Row>
+					</DetailRail.Row>
 				) : null}
-				<Row label="Last triggered" title={new Date(incident.lastTriggeredAt).toLocaleString()}>
+				<DetailRail.Row
+					label="Last triggered"
+					title={new Date(incident.lastTriggeredAt).toLocaleString()}
+				>
 					<span className="text-right text-sm tabular-nums text-foreground">
 						{formatRelativeTime(incident.lastTriggeredAt)}
 					</span>
-				</Row>
+				</DetailRail.Row>
 				{incident.resolvedAt !== null ? (
-					<Row label="Resolved" title={new Date(incident.resolvedAt).toLocaleString()}>
+					<DetailRail.Row label="Resolved" title={new Date(incident.resolvedAt).toLocaleString()}>
 						<span className="text-right text-sm tabular-nums text-muted-foreground">
 							{formatRelativeTime(incident.resolvedAt)}
 						</span>
-					</Row>
+					</DetailRail.Row>
 				) : null}
 				{incident.resolveReason !== null ? (
-					<Row label="Reason">
+					<DetailRail.Row label="Reason">
 						<span className="text-right text-sm text-muted-foreground">
 							{RESOLVE_REASON_LABEL[incident.resolveReason]}
 						</span>
-					</Row>
+					</DetailRail.Row>
 				) : null}
-			</SidebarGroup>
+			</DetailRail.Group>
 
-			<SidebarGroup label="Triage">
+			<DetailRail.Group label="Triage">
 				{triageChip ? (
 					<span
 						className={cn(
@@ -219,27 +259,7 @@ export function AnomalySidebar({
 				) : (
 					<p className="text-xs text-muted-foreground">No AI triage has run for this incident.</p>
 				)}
-			</SidebarGroup>
-		</div>
-	)
-}
-
-function SidebarGroup({ label, children }: { label: string; children: React.ReactNode }) {
-	return (
-		<section className="flex flex-col gap-2 border-b border-border/40 p-4 last:border-b-0">
-			<h3 className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-				{label}
-			</h3>
-			<div className="flex flex-col gap-1">{children}</div>
-		</section>
-	)
-}
-
-function Row({ label, title, children }: { label: string; title?: string; children: React.ReactNode }) {
-	return (
-		<div title={title} className="grid min-h-8 grid-cols-[88px_1fr] items-center gap-x-3 py-0.5">
-			<span className="text-xs text-muted-foreground">{label}</span>
-			<div className="flex min-w-0 items-center justify-end">{children}</div>
+			</DetailRail.Group>
 		</div>
 	)
 }

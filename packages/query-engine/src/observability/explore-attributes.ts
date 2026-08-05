@@ -75,11 +75,14 @@ export const exploreAttributeValues = Effect.fn("Observability.exploreAttributeV
 	const executor = yield* WarehouseExecutor
 
 	const pipeName =
-		input.scope === "resource"
-			? ("resource_attribute_values" as const)
-			: ("span_attribute_values" as const)
+		input.source === "metrics"
+			? ("metric_attribute_values" as const)
+			: input.scope === "resource"
+				? ("resource_attribute_values" as const)
+				: ("span_attribute_values" as const)
 
 	yield* Effect.annotateCurrentSpan({
+		source: input.source,
 		scope: input.scope ?? "span",
 		key: input.key,
 		service: input.service ?? "all",
@@ -98,7 +101,7 @@ export const exploreAttributeValues = Effect.fn("Observability.exploreAttributeV
 		{ profile: "discovery" },
 	)
 
-	yield* Effect.annotateCurrentSpan("resultCount", result.data.length)
+	yield* Effect.annotateCurrentSpan("result.rowCount", result.data.length)
 
 	return pipe(
 		result.data,

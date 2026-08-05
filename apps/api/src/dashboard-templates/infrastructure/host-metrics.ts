@@ -7,16 +7,18 @@ import {
 	paramKey,
 	paramValue,
 	templateId,
-} from "../helpers"
-import type { TemplateDefinition, WidgetDef } from "../types"
+} from "@/dashboard-templates/helpers"
+import type { TemplateDefinition, WidgetDef } from "@/dashboard-templates/types"
 
+// Host identity (`host.name`) lives on ResourceAttributes — the metrics
+// query-builder reaches it via the `resource.` prefix.
 function hostWhere(hostName?: string): string {
-	return hostName ? `host.name = "${hostName}"` : ""
+	return hostName ? `resource.host.name = "${hostName}"` : ""
 }
 
 function widgets(hostName?: string): WidgetDef[] {
 	const where = hostWhere(hostName)
-	const groupBy = ["host.name"]
+	const groupBy = ["resource.host.name"]
 	return [
 		{
 			id: "cpu",
@@ -30,21 +32,25 @@ function widgets(hostName?: string): WidgetDef[] {
 				groupBy: ["attr.state"],
 			}),
 			display: { title: "CPU by State", ...CHART_DISPLAY_AREA, unit: "percent" },
-			layout: { x: 0, y: 0, w: 6, h: 4 },
+			layout: { x: 0, y: 0, w: 6, h: 6 },
 		},
 		{
 			id: "memory",
 			visualization: "chart",
 			dataSource: metricsTimeseries({
+				// A non-monotonic Sum, not a Gauge — `metricType` picks the warehouse table, so
+				// `gauge` here read `metrics_gauge` and rendered an empty widget.
 				id: "host-memory",
 				name: "Memory",
 				metricName: "system.memory.usage",
-				metricType: "gauge",
+				metricType: "sum",
+				aggregation: "avg",
+				isMonotonic: false,
 				whereClause: where,
 				groupBy: ["attr.state"],
 			}),
 			display: { title: "Memory by State", ...CHART_DISPLAY_AREA, unit: "bytes" },
-			layout: { x: 6, y: 0, w: 6, h: 4 },
+			layout: { x: 6, y: 0, w: 6, h: 6 },
 		},
 		{
 			id: "disk-io",
@@ -60,7 +66,7 @@ function widgets(hostName?: string): WidgetDef[] {
 				groupBy: ["attr.direction"],
 			}),
 			display: { title: "Disk I/O", ...CHART_DISPLAY_AREA, unit: "bytes" },
-			layout: { x: 0, y: 4, w: 6, h: 4 },
+			layout: { x: 0, y: 6, w: 6, h: 6 },
 		},
 		{
 			id: "network",
@@ -76,7 +82,7 @@ function widgets(hostName?: string): WidgetDef[] {
 				groupBy: ["attr.direction"],
 			}),
 			display: { title: "Network I/O", ...CHART_DISPLAY_AREA, unit: "bytes" },
-			layout: { x: 6, y: 4, w: 6, h: 4 },
+			layout: { x: 6, y: 6, w: 6, h: 6 },
 		},
 		{
 			id: "load-average",
@@ -90,7 +96,7 @@ function widgets(hostName?: string): WidgetDef[] {
 				groupBy,
 			}),
 			display: { title: "Load Average (1m)", ...CHART_DISPLAY_LINE, unit: "number" },
-			layout: { x: 0, y: 8, w: 6, h: 4 },
+			layout: { x: 0, y: 12, w: 6, h: 6 },
 		},
 		{
 			id: "filesystem",
@@ -104,7 +110,7 @@ function widgets(hostName?: string): WidgetDef[] {
 				groupBy: ["attr.mountpoint"],
 			}),
 			display: { title: "Filesystem Utilization", ...CHART_DISPLAY_LINE, unit: "percent" },
-			layout: { x: 6, y: 8, w: 6, h: 4 },
+			layout: { x: 6, y: 12, w: 6, h: 6 },
 		},
 	]
 }
@@ -115,7 +121,14 @@ export const hostMetricsTemplate: TemplateDefinition = {
 	description: "CPU, memory, disk I/O, network, load average, and filesystem usage per host.",
 	category: "infrastructure",
 	tags: ["host", "infra"],
-	requirements: ["OpenTelemetry hostmetricsreceiver"],
+	requirement: {
+		kind: "metrics",
+		label: "OpenTelemetry hostmetricsreceiver",
+		collector: "the OpenTelemetry hostmetricsreceiver",
+		setupLabel: "the host metrics receiver",
+		hint: "Run it on each host and every widget fills in on its own.",
+	},
+	requiredMetricPrefixes: ["system."],
 	parameters: [
 		{
 			key: paramKey("host_name"),

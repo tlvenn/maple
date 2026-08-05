@@ -7,10 +7,10 @@ import {
 	type McpToolRegistrar,
 	type McpToolResult,
 } from "./types"
-import { resolveTimeRange } from "../lib/time"
+import { resolveTimeRange } from "@/mcp/lib/time"
 import { Effect, Match, Schema } from "effect"
 import { resolveTenant } from "@/mcp/lib/query-warehouse"
-import { QueryEngineService } from "@/services/QueryEngineService"
+import { QueryEngineService } from "@/services/warehouse/QueryEngineService"
 import {
 	MetricType,
 	QuerySpec,
@@ -25,7 +25,8 @@ import {
 	type MetricsTimeseriesQuery,
 	type MetricsBreakdownQuery,
 } from "@maple/query-engine"
-import { formatQueryResult } from "../lib/format-query-result"
+import { formatQueryResult } from "@/mcp/lib/format-query-result"
+import { warehouseErrorText, warehouseHandlers } from "@/mcp/lib/map-warehouse-error"
 import {
 	CommitSha,
 	DeploymentEnvironment,
@@ -154,8 +155,11 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 
 			const rawSpec: QuerySpecType = Match.value(params.source).pipe(
 				Match.when("traces", (): QuerySpecType => {
-					const attributeFilters: Array<{ key: string; value?: string; mode: "equals" | "exists" }> =
-						[]
+					const attributeFilters: Array<{
+						key: string
+						value?: string
+						mode: "equals" | "exists"
+					}> = []
 					if (params.attribute_key) {
 						attributeFilters.push({
 							key: params.attribute_key,
@@ -170,7 +174,9 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 						...(params.span_name && { spanName: asSpanName(params.span_name) }),
 						...(params.root_spans_only && { rootSpansOnly: params.root_spans_only }),
 						...(params.environments && {
-							environments: splitCsv(params.environments).map((env) => asDeploymentEnvironment(env)),
+							environments: splitCsv(params.environments).map((env) =>
+								asDeploymentEnvironment(env),
+							),
 						}),
 						...(params.commit_shas && {
 							commitShas: splitCsv(params.commit_shas).map((sha) => asCommitSha(sha)),
@@ -233,7 +239,9 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 							LogsTimeseriesQuery["groupBy"]
 						>
 						if (!params.group_by)
-							decisions.push(`group_by: defaulted to "none" (available: service, severity, none)`)
+							decisions.push(
+								`group_by: defaulted to "none" (available: service, severity, none)`,
+							)
 						return {
 							kind: "timeseries",
 							source: "logs",
@@ -280,7 +288,9 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 						...(params.service_name && { serviceName: asServiceName(params.service_name) }),
 						...(params.group_by === "attribute" &&
 							params.attribute_key && { groupByAttributeKey: params.attribute_key }),
-						...(metricsAttributeFilters.length > 0 && { attributeFilters: metricsAttributeFilters }),
+						...(metricsAttributeFilters.length > 0 && {
+							attributeFilters: metricsAttributeFilters,
+						}),
 					}
 
 					if (!params.metric)
@@ -294,7 +304,9 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 							MetricsTimeseriesQuery["groupBy"]
 						>
 						if (!params.group_by)
-							decisions.push(`group_by: defaulted to "none" (available: service, attribute, none)`)
+							decisions.push(
+								`group_by: defaulted to "none" (available: service, attribute, none)`,
+							)
 						return {
 							kind: "timeseries",
 							source: "metrics",
@@ -305,12 +317,13 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 						} satisfies MetricsTimeseriesQuery
 					}
 					const metricsMetric = (params.metric ?? "avg") as MetricsBreakdownQuery["metric"]
-					if (!params.group_by) decisions.push(`group_by: defaulted to "service"`)
+					if (!params.group_by)
+						decisions.push(`group_by: defaulted to "service" (available: service, attribute)`)
 					return {
 						kind: "breakdown",
 						source: "metrics",
 						metric: metricsMetric,
-						groupBy: "service",
+						groupBy: params.group_by === "attribute" ? "attribute" : "service",
 						filters,
 						...(params.limit && { limit: params.limit }),
 					} satisfies MetricsBreakdownQuery
@@ -323,7 +336,7 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 				catch: (error) =>
 					new McpQueryError({
 						message: `Invalid query specification:\n${String(error)}`,
-						pipe: "query_data",
+						pipeName: "query_data",
 						cause: error,
 					}),
 			})
@@ -367,22 +380,11 @@ export function registerQueryDataTool(server: McpToolRegistrar) {
 							Effect.succeed(taggedErrorResult(error._tag, error.message)),
 						"@maple/http/errors/QueryEngineTimeoutError": (error) =>
 							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseQueryError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseUpstreamError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseAuthError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseConfigError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseClientError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseSchemaDriftError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseQuotaExceededError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
-						"@maple/http/errors/WarehouseValidationError": (error) =>
-							Effect.succeed(taggedErrorResult(error._tag, error.message)),
+						// Shared 9-tag warehouse table; warehouseErrorText appends the
+						// schema-apply hint for schema drift, matching the other MCP tools.
+						...warehouseHandlers((error) =>
+							Effect.succeed(taggedErrorResult(error._tag, warehouseErrorText(error))),
+						),
 					}),
 				)
 

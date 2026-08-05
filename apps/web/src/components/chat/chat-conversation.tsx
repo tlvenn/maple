@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { useAgent } from "agents/react"
-import { useAgentChat } from "@cloudflare/ai-chat/react"
-import { autoTransformMessages } from "@cloudflare/ai-chat/ai-chat-v5-migration"
-import { useAuth } from "@clerk/clerk-react"
-import { chatAgentUrl } from "@/lib/services/common/chat-agent-url"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Exit } from "effect"
+import { useMountEffect } from "@/hooks/use-mount-effect"
+import { toastManager } from "@maple/ui/components/ui/toast"
+import { useAtomSet } from "@/lib/effect-atom"
+import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { useMapleChat, type FailedSend } from "@/hooks/use-maple-chat"
 import { useTypeAnywhereFocus } from "@/hooks/use-type-anywhere-focus"
-import { alertPromptSuggestions, type AlertContext } from "./alert-context"
-import { AlertAttachmentCard } from "./alert-attachment-card"
 import {
-	widgetFixAutoPrompt,
-	widgetFixSuggestions,
-	type WidgetFixContext,
-} from "./widget-fix-context"
+	investigationNoun,
+	investigationSuggestions,
+	type InvestigationContext,
+} from "./investigation-context"
+import { InvestigationAttachmentCard } from "./investigation-attachment-card"
+import { widgetFixAutoPrompt, widgetFixSuggestions, type WidgetFixContext } from "./widget-fix-context"
 import { WidgetFixAttachmentCard } from "./widget-fix-attachment-card"
 import {
 	deriveAutoContexts,
@@ -20,15 +21,9 @@ import {
 	type AutoContext,
 	type PageContextPayload,
 } from "./auto-contexts"
+import type { ChatContext } from "./context-preamble"
 import { PageContextChips } from "./page-context-chips"
-import {
-	Conversation,
-	ConversationContent,
-	ConversationEmptyState,
-	ConversationScrollButton,
-} from "@/components/ai-elements/conversation"
-import { Message, MessageContent } from "@/components/ai-elements/message"
-import { RichText } from "@/components/ai-elements/rich-text"
+import { ChatTranscript, findDiagnosisMessageId } from "./chat-transcript"
 import {
 	PromptInput,
 	PromptInputTextarea,
@@ -36,55 +31,11 @@ import {
 	PromptInputSubmit,
 } from "@/components/ai-elements/prompt-input"
 import { Suggestions, Suggestion } from "@/components/ai-elements/suggestion"
-import { Shimmer } from "@/components/ai-elements/shimmer"
-import { ThinkingIndicator } from "@/components/ai-elements/thinking-indicator"
-import { Tool } from "@/components/ai-elements/tool"
-import { ToolGroup } from "@/components/ai-elements/tool-group"
-import { ApprovalCard } from "./approval-card"
-import type { UIMessage } from "ai"
-
-type ToolPart = {
-	type: string
-	toolCallId: string
-	toolName?: string
-	state: string
-	input?: unknown
-	output?: unknown
-	errorText?: string
-	approval?: { id: string }
-}
-
-function isToolPart(part: UIMessage["parts"][number]): boolean {
-	return part.type.startsWith("tool-") || part.type === "dynamic-tool"
-}
-
-function toolNameFor(part: ToolPart): string {
-	if (part.type.startsWith("tool-")) return part.type.replace(/^tool-/, "")
-	return part.toolName ?? "unknown"
-}
-
-function isPendingApproval(part: ToolPart): boolean {
-	return part.state === "approval-requested" && part.approval?.id != null
-}
-
-function deriveToolStatus(state: string): "running" | "completed" | "error" {
-	if (state === "output-available") return "completed"
-	if (state === "output-error" || state === "output-denied") return "error"
-	return "running"
-}
-
-function shouldShowThinkingIndicator(
-	message: UIMessage,
-	isLoading: boolean,
-	isLastMessage: boolean,
-): boolean {
-	if (!isLoading || !isLastMessage || message.role !== "assistant") return false
-	const parts = message.parts
-	if (parts.length === 0) return true
-	const lastPart = parts[parts.length - 1]
-	if (lastPart.type === "text" && (lastPart as { state?: string }).state === "streaming") return false
-	return true
-}
+import { StatusMarker } from "@/components/ai-elements/status-marker"
+import { Button } from "@maple/ui/components/ui/button"
+import { trackProduct } from "@/lib/analytics"
+import { makeChatApplyPayload } from "./chat-apply-payload"
+import type { AiTriageResult } from "@maple/domain/http"
 
 const DEFAULT_SUGGESTIONS = [
 	"What's the overall system health?",
@@ -98,9 +49,29 @@ interface ChatConversationProps {
 	isActive: boolean
 	onFirstMessage?: (tabId: string, text: string) => void
 	onLoadingChange?: (tabId: string, loading: boolean) => void
-	mode?: "alert" | "widget-fix"
-	alertContext?: AlertContext
+	mode?: "widget-fix" | "investigation"
+	investigationContext?: InvestigationContext
 	widgetFixContext?: WidgetFixContext
+	/** Render the conversation with no composer, and say why. */
+	readOnly?: false | "shared" | "resolved"
+	/**
+	 * The backend already seeded this conversation with its subject (an
+	 * investigation's autonomous pass sends the snapshot server-side), so the
+	 * client must not repeat it in a first-message preamble.
+	 */
+	subjectSeededByServer?: boolean
+	/**
+	 * Pin the subject above the thread. Off where the surrounding page already
+	 * states the subject — the investigation page's own header does, and repeating
+	 * it costs a screenful at the top of every thread.
+	 */
+	showAttachmentCard?: boolean
+	/** Preserved DB report for migrated/pruned conversations without a tool marker. */
+	fallbackDiagnosis?: AiTriageResult | null
+	/** Message to open the transcript on, from a `?m=` permalink. */
+	focusMessageId?: string
+	/** Builds a shareable permalink for a message; omit where the thread isn't shareable. */
+	permalinkFor?: (messageId: string) => string
 }
 
 export function ChatConversation({
@@ -109,12 +80,21 @@ export function ChatConversation({
 	onFirstMessage,
 	onLoadingChange,
 	mode,
-	alertContext,
+	investigationContext,
 	widgetFixContext,
+	readOnly = false,
+	subjectSeededByServer = false,
+	showAttachmentCard = true,
+	fallbackDiagnosis = null,
+	focusMessageId,
+	permalinkFor,
 }: ChatConversationProps) {
-	const { orgId, getToken } = useAuth()
 	const textareaRef = useRef<HTMLTextAreaElement>(null)
-	useTypeAnywhereFocus(textareaRef, isActive)
+	const regionRef = useRef<HTMLDivElement>(null)
+	// Scoped to this conversation's own region: on a full page (an investigation)
+	// a window-wide listener swallows every global shortcut, so typing `?` for the
+	// shortcut sheet silently drops a question mark into the composer instead.
+	useTypeAnywhereFocus(textareaRef, isActive && !readOnly, regionRef)
 
 	const referrerPath = useMemo(() => readChatReferrer(), [tabId])
 	const derivedContexts = useMemo<AutoContext[]>(
@@ -136,40 +116,23 @@ export function ChatConversation({
 			return next
 		})
 
-	const agentName = orgId ? `${orgId}:${tabId}` : tabId
-	const agent = useAgent({
-		agent: "ChatAgent",
-		name: agentName,
-		host: chatAgentUrl,
-		query: async () => ({ token: (await getToken()) ?? null }),
-		queryDeps: [orgId],
-	})
-
-	const prepareSendMessagesRequest = useMemo(
-		() => async (opts: { headers?: HeadersInit }) => {
-			const token = await getToken()
-			const headers = new Headers(opts.headers ?? {})
-			if (token) headers.set("Authorization", `Bearer ${token}`)
-			const out: Record<string, string> = {}
-			headers.forEach((value, key) => {
-				out[key] = value
-			})
-			return { headers: out }
-		},
-		[getToken],
-	)
-
-	const body = useMemo<Record<string, unknown>>(() => {
-		const base: Record<string, unknown> = { orgId }
-		if (mode === "alert" && alertContext) {
-			base.mode = "alert"
-			base.alertContext = alertContext
+	// Per-conversation context, folded into the first message preamble by the
+	// adapter (Flue's `agents.send` carries only a message string). Skipped
+	// entirely when the backend seeded the conversation itself — repeating the
+	// subject would spend the model's window on context it already has.
+	const context = useMemo<ChatContext | undefined>(() => {
+		if (subjectSeededByServer) return undefined
+		const base: ChatContext = {}
+		if (mode === "investigation" && investigationContext) {
+			base.mode = "investigation"
+			base.investigationContext = investigationContext
 		}
 		if (mode === "widget-fix" && widgetFixContext) {
 			base.mode = "widget-fix"
 			base.widgetFixContext = widgetFixContext
 		}
-		if (mode !== "widget-fix" && activeContexts.length > 0 && referrerPath) {
+		// An explicit subject (investigation/widget-fix) supersedes implicit page context.
+		if (mode !== "widget-fix" && mode !== "investigation" && activeContexts.length > 0 && referrerPath) {
 			const payload: PageContextPayload = {
 				pathname: referrerPath,
 				contexts: activeContexts,
@@ -177,300 +140,254 @@ export function ChatConversation({
 			base.pageContext = payload
 		}
 		return base
-	}, [orgId, mode, alertContext, widgetFixContext, activeContexts, referrerPath])
+	}, [subjectSeededByServer, mode, investigationContext, widgetFixContext, activeContexts, referrerPath])
 
-	const getInitialMessages = useMemo(
-		() =>
-			async ({
-				url,
-			}: {
-				agent: string
-				name: string
-				url?: string
-			}) => {
-				const token = await getToken()
-				const baseUrl = url ?? agent.getHttpUrl()
-				const getMessagesUrl = new URL(baseUrl)
-				getMessagesUrl.pathname += "/get-messages"
-				const response = await fetch(getMessagesUrl.toString(), {
-					headers: token ? { Authorization: `Bearer ${token}` } : {},
-				})
-				if (!response.ok) return []
-				const text = await response.text()
-				if (!text.trim()) return []
-				try {
-					const parsed = JSON.parse(text) as unknown
-					return Array.isArray(parsed) ? autoTransformMessages(parsed) : []
-				} catch {
-					return []
+	const { sessionId, messages, status, isLoading, historyReady, failedSends, sendMessage, stop, canStop } =
+		useMapleChat({ tabId, context })
+	const diagnosisMessageId = useMemo(() => findDiagnosisMessageId(messages), [messages])
+
+	// Apply an approved proposal via Maple's authenticated API (propose-then-apply).
+	const applyProposal = useAtomSet(MapleApiAtomClient.mutation("chat", "apply"), {
+		mode: "promiseExit",
+	})
+	const [resolvedApprovals, setResolvedApprovals] = useState<Map<string, "applied" | "denied">>(
+		() => new Map(),
+	)
+	// These three reach `ChatTranscript`'s memoized rows as props, so a fresh identity per render
+	// would defeat the memo and re-render the whole transcript on every streamed batch.
+	const resolveApproval = useCallback((toolCallId: string, outcome: "applied" | "denied") => {
+		setResolvedApprovals((prev) => {
+			const next = new Map(prev)
+			next.set(toolCallId, outcome)
+			return next
+		})
+	}, [])
+	const handleDeny = useCallback(
+		(toolCallId: string) => resolveApproval(toolCallId, "denied"),
+		[resolveApproval],
+	)
+	const handleApprove = useCallback(
+		async (messageId: string, toolCallId: string, tool: string, input: unknown) => {
+			// `sessionId` + `messageId` + `toolCallId` are what let the server settle the proposal in the
+			// durable transcript, so the card resolves on every device and the model's next turn knows
+			// the mutation happened.
+			const exit = await applyProposal({
+				payload: makeChatApplyPayload(tool, input, { sessionId, messageId, toolCallId }),
+			})
+			if (Exit.isSuccess(exit)) {
+				if (exit.value.isError) {
+					toastManager.add({ title: exit.value.content || `Couldn't apply ${tool}`, type: "error" })
+					return
 				}
-			},
-		[agent, getToken],
+				resolveApproval(toolCallId, "applied")
+				toastManager.add({ title: "Change applied", type: "success" })
+			} else {
+				toastManager.add({ title: `Failed to apply ${tool}`, type: "error" })
+			}
+		},
+		[applyProposal, sessionId, resolveApproval],
 	)
 
-	const { messages, sendMessage, status, addToolApprovalResponse } = useAgentChat({
-		agent,
-		body,
-		getInitialMessages,
-		prepareSendMessagesRequest,
-	})
-
-	const [hasSettled, setHasSettled] = useState(false)
-	useEffect(() => {
-		setHasSettled(false)
-	}, [agentName])
-	useEffect(() => {
-		if (messages.length > 0) {
-			setHasSettled(true)
-			return
-		}
-		const t = setTimeout(() => setHasSettled(true), 600)
-		return () => clearTimeout(t)
-	}, [messages.length, agentName])
-
-	const isLoading = status === "streaming" || status === "submitted"
 	useEffect(() => {
 		onLoadingChange?.(tabId, isLoading)
 	}, [tabId, isLoading, onLoadingChange])
 	useEffect(() => {
 		return () => onLoadingChange?.(tabId, false)
 	}, [tabId, onLoadingChange])
-	const isAlertMode = mode === "alert" && !!alertContext
+	const isInvestigationMode = mode === "investigation" && !!investigationContext
 	const isWidgetFixMode = mode === "widget-fix" && !!widgetFixContext
 	const suggestions = useMemo(() => {
-		if (isAlertMode) return alertPromptSuggestions(alertContext!)
+		if (isInvestigationMode) return investigationSuggestions(investigationContext!)
 		if (isWidgetFixMode) return widgetFixSuggestions(widgetFixContext!)
 		const routeAware = suggestionsForContexts(activeContexts)
 		return routeAware ?? DEFAULT_SUGGESTIONS
-	}, [isAlertMode, alertContext, isWidgetFixMode, widgetFixContext, activeContexts])
+	}, [isInvestigationMode, investigationContext, isWidgetFixMode, widgetFixContext, activeContexts])
 
 	const handleSend = (text: string) => {
 		if (!text.trim() || isLoading) return
 		if (messages.length === 0 && onFirstMessage) {
 			onFirstMessage(tabId, text.trim().slice(0, 40))
 		}
-		sendMessage({ text: text.trim() })
+		// The message text stays out of the event — the transcript already has it,
+		// and a prompt is the last thing that should be duplicated into a
+		// LowCardinality-adjacent analytics column.
+		trackProduct("chat_message_sent", { turn: messages.length === 0 ? "first" : "followup" })
+		sendMessage(text.trim())
 	}
 
-	const widgetFixAutoSentRef = useRef<string | null>(null)
-	useEffect(() => {
-		if (!isWidgetFixMode || !isActive) return
-		if (!hasSettled || isLoading) return
-		if (messages.length > 0) return
-		if (widgetFixAutoSentRef.current === tabId) return
-		widgetFixAutoSentRef.current = tabId
-		handleSend(widgetFixAutoPrompt)
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [isWidgetFixMode, isActive, hasSettled, isLoading, messages.length, tabId])
+	// Auto-send the fix prompt once a fresh widget-fix conversation is ready.
+	// Mounting the zero-DOM trigger IS the one-shot (see `WidgetFixAutoSendTrigger`):
+	// the gate below decides when to fire, replacing the prior ref-latch +
+	// `eslint-disable` effect. Sending bumps `messages.length`, which unmounts it.
+	const shouldAutoSendWidgetFix =
+		!readOnly && isWidgetFixMode && isActive && historyReady && !isLoading && messages.length === 0
 
 	return (
-		<div className="flex h-full flex-col">
-			{isAlertMode && <AlertAttachmentCard alert={alertContext!} />}
+		<div ref={regionRef} className="flex h-full min-h-0 flex-col">
+			{shouldAutoSendWidgetFix ? (
+				<WidgetFixAutoSendTrigger onFire={() => handleSend(widgetFixAutoPrompt)} />
+			) : null}
+			{isInvestigationMode && showAttachmentCard && (
+				<InvestigationAttachmentCard ctx={investigationContext!} />
+			)}
 			{isWidgetFixMode && <WidgetFixAttachmentCard ctx={widgetFixContext!} />}
-			<Conversation className="flex-1 min-h-0">
-				<ConversationContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-6">
-					{!hasSettled && messages.length === 0 ? (
+			<ChatTranscript
+				messages={messages}
+				isLoading={isLoading}
+				resolvedApprovals={resolvedApprovals}
+				onApprove={handleApprove}
+				onDeny={handleDeny}
+				fallbackDiagnosis={fallbackDiagnosis && !diagnosisMessageId ? fallbackDiagnosis : null}
+				diagnosisMessageId={diagnosisMessageId}
+				focusMessageId={focusMessageId}
+				permalinkFor={permalinkFor}
+				readOnly={readOnly}
+				emptyState={
+					!historyReady ? (
 						<ConversationLoadingSkeleton />
-					) : messages.length === 0 ? (
-						isAlertMode ? (
-							<div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
-								<p className="text-xs uppercase tracking-[0.14em] text-muted-foreground/70">
-									Ready to investigate
-								</p>
-								<p className="max-w-sm text-sm text-muted-foreground">
-									The alert above is attached to every message in this thread. Start with a
-									suggestion or ask your own question.
-								</p>
-							</div>
-						) : isWidgetFixMode ? (
-							<div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
-								<p className="text-xs uppercase tracking-[0.14em] text-muted-foreground/70">
-									Diagnosing widget…
-								</p>
-								<p className="max-w-sm text-sm text-muted-foreground">
-									Maple AI is reading the broken widget config and the validation error.
-									It will propose a corrected widget JSON for you to approve.
-								</p>
-							</div>
-						) : (
-							<ConversationEmptyState
-								title="Maple AI"
-								description="Ask me about your traces, logs, errors, and services."
-							>
-								<div className="mt-4 flex flex-col items-center gap-3">
-									<div className="space-y-1 text-center">
-										<h3 className="text-sm font-medium">Maple AI</h3>
-										<p className="text-muted-foreground text-sm">
-											Ask me about your traces, logs, errors, and services.
-										</p>
-									</div>
-									<Suggestions className="mt-2 justify-center">
-										{suggestions.map((s) => (
-											<Suggestion
-												key={s}
-												suggestion={s}
-												onClick={() => handleSend(s)}
-											/>
-										))}
-									</Suggestions>
-								</div>
-							</ConversationEmptyState>
-						)
+					) : readOnly === "shared" ? (
+						<EmptyNotice title="Shared conversation">
+							This shared conversation is unavailable or empty. It may have been deleted, or
+							belong to a different workspace than the one you're signed in to.
+						</EmptyNotice>
+					) : readOnly === "resolved" ? (
+						<EmptyNotice title="Resolved">
+							This investigation was resolved before anything was recorded. Reopen it to pick
+							the thread back up.
+						</EmptyNotice>
+					) : isInvestigationMode ? (
+						<InvestigationLead ctx={investigationContext!} />
+					) : isWidgetFixMode ? (
+						<EmptyNotice title="Diagnosing widget…">
+							Maple AI is reading the broken widget config and the validation error. It will
+							propose a corrected widget JSON for you to approve.
+						</EmptyNotice>
 					) : (
-						<>
-							{messages.map((message, messageIndex) => {
-								const isLastMessage = messageIndex === messages.length - 1
-								return (
-									<Message key={message.id} from={message.role}>
-										<MessageContent>
-											{(() => {
-												const nodes: ReactNode[] = []
-												let toolBuf: ToolPart[] = []
-												const flushTools = () => {
-													if (toolBuf.length === 0) return
-													const buf = toolBuf
-													toolBuf = []
-													if (buf.length === 1) {
-														const t = buf[0]!
-														nodes.push(
-															<Tool
-																key={t.toolCallId ?? `tool-${nodes.length}`}
-																toolName={toolNameFor(t)}
-																toolCallId={t.toolCallId}
-																state={t.state}
-																input={t.input}
-																output={t.output}
-																errorText={t.errorText}
-															/>,
-														)
-														return
-													}
-													const runningCount = buf.filter(
-														(t) => deriveToolStatus(t.state) === "running",
-													).length
-													const errorCount = buf.filter(
-														(t) => deriveToolStatus(t.state) === "error",
-													).length
-													nodes.push(
-														<ToolGroup
-															key={`group-${buf[0]!.toolCallId ?? nodes.length}`}
-															count={buf.length}
-															runningCount={runningCount}
-															errorCount={errorCount}
-															defaultOpen={runningCount > 0}
-														>
-															{buf.map((t) => (
-																<Tool
-																	key={t.toolCallId}
-																	toolName={toolNameFor(t)}
-																	toolCallId={t.toolCallId}
-																	state={t.state}
-																	input={t.input}
-																	output={t.output}
-																	errorText={t.errorText}
-																/>
-															))}
-														</ToolGroup>,
-													)
-												}
-												for (let i = 0; i < message.parts.length; i++) {
-													const part = message.parts[i]!
-													if (part.type === "text") {
-														flushTools()
-														nodes.push(<RichText key={`text-${i}`}>{part.text}</RichText>)
-														continue
-													}
-													if (isToolPart(part)) {
-														const tp = part as ToolPart
-														if (isPendingApproval(tp)) {
-															flushTools()
-															nodes.push(
-																<ApprovalCard
-																	key={tp.toolCallId ?? `approval-${i}`}
-																	toolName={toolNameFor(tp)}
-																	input={tp.input}
-																	approvalId={tp.approval!.id}
-																	onApprove={(id) =>
-																		addToolApprovalResponse({
-																			id,
-																			approved: true,
-																		})
-																	}
-																	onDeny={(id) =>
-																		addToolApprovalResponse({
-																			id,
-																			approved: false,
-																		})
-																	}
-																/>,
-															)
-															continue
-														}
-														toolBuf.push(tp)
-														continue
-													}
-												}
-												flushTools()
-												return nodes
-											})()}
-											{shouldShowThinkingIndicator(
-												message,
-												isLoading,
-												isLastMessage,
-											) && <ThinkingIndicator />}
-										</MessageContent>
-									</Message>
-								)
-							})}
-							{isLoading && messages[messages.length - 1]?.role === "user" && (
-								<Message from="assistant">
-									<MessageContent>
-										<Shimmer>Thinking…</Shimmer>
-									</MessageContent>
-								</Message>
-							)}
-						</>
-					)}
-				</ConversationContent>
-				<ConversationScrollButton />
-			</Conversation>
+						<div className="flex flex-col items-center gap-3">
+							<div className="space-y-1 text-center">
+								<h3 className="font-medium text-sm">Maple AI</h3>
+								<p className="text-muted-foreground text-sm">
+									Ask me about your traces, logs, errors, and services.
+								</p>
+							</div>
+							<Suggestions className="mt-2 justify-center">
+								{suggestions.map((s) => (
+									<Suggestion key={s} suggestion={s} onClick={() => handleSend(s)} />
+								))}
+							</Suggestions>
+						</div>
+					)
+				}
+			/>
 
-			<div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
-				{(messages.length > 0 || isAlertMode || isWidgetFixMode) && (
-					<Suggestions className="mb-3">
-						{suggestions.map((s) => (
-							<Suggestion key={s} suggestion={s} onClick={() => handleSend(s)} />
-						))}
-					</Suggestions>
-				)}
-				{!isWidgetFixMode && (
-					<PageContextChips contexts={activeContexts} onDismiss={dismissContext} />
-				)}
-				<PromptInput
-					onSubmit={({ text }) => handleSend(text)}
-					className="rounded-lg border shadow-sm"
-				>
-					<PromptInputTextarea
-						ref={textareaRef}
-						placeholder={
-							isAlertMode
-								? "Ask about this alert..."
-								: isWidgetFixMode
-									? "Ask about this widget..."
-									: "Ask about your system..."
-						}
-						disabled={isLoading}
-					/>
-					<PromptInputFooter>
-						<PromptInputSubmit status={status} disabled={isLoading && status !== "streaming"} />
-					</PromptInputFooter>
-				</PromptInput>
-			</div>
+			{!readOnly && (
+				<div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+					{messages.length === 0 && (isInvestigationMode || isWidgetFixMode) && (
+						<Suggestions className="mb-3">
+							{suggestions.map((s) => (
+								<Suggestion key={s} suggestion={s} onClick={() => handleSend(s)} />
+							))}
+						</Suggestions>
+					)}
+					{!isWidgetFixMode && !isInvestigationMode && (
+						<PageContextChips contexts={activeContexts} onDismiss={dismissContext} />
+					)}
+					{failedSends.length > 0 && (
+						<FailedSendNotice
+							failed={failedSends[failedSends.length - 1]!}
+							onRetry={handleSend}
+						/>
+					)}
+					<PromptInput onSubmit={({ text }) => handleSend(text)}>
+						<PromptInputTextarea
+							ref={textareaRef}
+							placeholder={
+								isInvestigationMode
+									? `Ask about this ${investigationNoun(investigationContext!.kind)}…`
+									: isWidgetFixMode
+										? "Ask about this widget…"
+										: "Ask about your system…"
+							}
+						/>
+						<PromptInputFooter>
+							<PromptInputSubmit
+								status={status}
+								onStop={canStop ? stop : undefined}
+								disabled={isLoading && !canStop}
+							/>
+						</PromptInputFooter>
+					</PromptInput>
+				</div>
+			)}
 		</div>
 	)
 }
 
-export function ConversationLoadingSkeleton() {
+/**
+ * What an investigation thread says before it has any turns. The subject's own
+ * status is the whole answer, so this reads it directly rather than letting the
+ * page render a second banner that can disagree with the transcript.
+ */
+function InvestigationLead({ ctx }: { ctx: InvestigationContext }) {
+	if (ctx.status === "investigating") {
+		return <StatusMarker>Gathering evidence…</StatusMarker>
+	}
+	if (ctx.status === "failed") {
+		return (
+			<EmptyNotice title="Autonomous pass failed">
+				Maple couldn't complete the investigation. Retry it from the header, or ask a question to
+				continue by hand.
+			</EmptyNotice>
+		)
+	}
+	return (
+		<EmptyNotice title="Ready to investigate">
+			This {investigationNoun(ctx.kind)} is attached to every message in the thread. Start with a
+			suggestion or ask your own question.
+		</EmptyNotice>
+	)
+}
+
+/**
+ * A send that never reached the server. `useMapleChat` keeps the optimistic
+ * message in the transcript rather than dropping it, so the only thing missing is
+ * a way to try again.
+ */
+function FailedSendNotice({ failed, onRetry }: { failed: FailedSend; onRetry: (text: string) => void }) {
+	return (
+		<div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
+			<span className="min-w-0 truncate text-destructive">
+				Message not sent — {failed.error.message}
+			</span>
+			<Button size="sm" variant="outline" onClick={() => onRetry(failed.message)}>
+				Try again
+			</Button>
+		</div>
+	)
+}
+
+function EmptyNotice({ title, children }: { title: string; children: ReactNode }) {
+	return (
+		<div className="flex flex-col items-center justify-center gap-2 text-center">
+			<p className="text-xs uppercase tracking-[0.14em] text-muted-foreground/70">{title}</p>
+			<p className="max-w-sm text-sm text-muted-foreground">{children}</p>
+		</div>
+	)
+}
+
+/**
+ * Zero-DOM trigger: firing once on mount is how a ready, empty widget-fix
+ * conversation auto-sends its fix prompt. The parent only renders this when the
+ * conditions hold, so mounting is the one-shot (mirrors `AutoRunTrigger`).
+ */
+function WidgetFixAutoSendTrigger({ onFire }: { onFire: () => void }) {
+	useMountEffect(() => {
+		onFire()
+	})
+	return null
+}
+
+function ConversationLoadingSkeleton() {
 	return (
 		<div className="flex flex-col gap-3 py-6" aria-hidden>
 			<div className="h-3 w-1/2 animate-pulse rounded bg-muted" />

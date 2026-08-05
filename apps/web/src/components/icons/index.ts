@@ -7,6 +7,7 @@ export {
 	ArrowDownIcon,
 	ArrowLeftIcon,
 	ArrowRightIcon,
+	ArrowRotateClockwiseIcon,
 	CheckIcon,
 	ChevronDownIcon,
 	ChevronExpandYIcon,
@@ -27,6 +28,8 @@ export {
 	EyeIcon,
 	FireIcon,
 	GlobeIcon,
+	LineHeightIcon,
+	LinkIcon,
 	LoaderIcon,
 	MagnifierIcon,
 	MenuIcon,
@@ -36,6 +39,9 @@ export {
 	PulseIcon,
 	RadioCheckedIcon,
 	SidebarLeftIcon,
+	TabletIcon,
+	TextWrapIcon,
+	ThumbtackIcon,
 	XmarkIcon,
 } from "@maple/ui/components/icons"
 
@@ -43,6 +49,8 @@ export {
 export { ArrowPathIcon } from "./arrow-path"
 export { ArrowRightFromLineIcon } from "./arrow-right-from-line"
 export { ArrowRotateAnticlockwiseIcon } from "./arrow-rotate-anticlockwise"
+export { ArrowTrendDownIcon } from "./arrow-trend-down"
+export { ArrowTrendUpIcon } from "./arrow-trend-up"
 export { ArrowUpIcon } from "./arrow-up"
 export { ArrowUpDownIcon } from "./arrow-up-down"
 export { AwsLambdaIcon } from "./aws-lambda"
@@ -52,40 +60,50 @@ export { BoltIcon } from "./bolt"
 export { BracketsCurlyIcon } from "./brackets-curly"
 export { ChatBubbleSparkleIcon } from "./chat-bubble-sparkle"
 export { ChartBarIcon } from "./chart-bar"
+export { ChartBarHorizontalIcon } from "./chart-bar-horizontal"
 export { ChartBarTrendUpIcon } from "./chart-bar-trend-up"
 export { ChartLineIcon } from "./chart-line"
 export { CirclePercentageIcon } from "./circle-percentage"
 export { CircleQuestionIcon } from "./circle-question"
 export { ClickhouseIcon } from "./clickhouse"
-export { CloudflareIcon } from "./cloudflare"
+export { CloudflareIcon, CloudflareMonoIcon } from "./cloudflare"
+export { ChromeIcon } from "./chrome"
 export { CornerDownLeftIcon } from "./corner-down-left"
+export { CursorIcon } from "./cursor"
 export { CreditCardIcon } from "./credit-card"
 export { CubeIcon } from "./cube"
 export { DiscordIcon } from "./discord"
 export { DotsVerticalIcon } from "./dots-vertical"
 export { DownloadIcon } from "./download"
+export { EdgeIcon } from "./edge"
 export { EnvelopeIcon } from "./envelope"
 export { ExternalLinkIcon } from "./external-link"
 export { FileIcon } from "./file"
+export { FirefoxIcon } from "./firefox"
 export { FloppyDiskIcon } from "./floppy-disk"
 export { FolderIcon } from "./folder"
 export { FolderOpenIcon } from "./folder-open"
 export { GearIcon } from "./gear"
+export { GithubIcon } from "./github"
 export { GridIcon } from "./grid"
 export { GridSquareCirclePlusIcon } from "./grid-square-circle-plus"
 export { GripDotsIcon } from "./grip-dots"
+export { LayersIcon } from "./layers"
+export { TagIcon } from "./tag"
 export { HazelIcon } from "./hazel"
 export { HistoryIcon } from "./history"
 export { HouseIcon } from "./house"
 export { IdBadgeIcon } from "./id-badge"
 export { ImageIcon } from "./image"
+export { KafkaIcon } from "./kafka"
 export { KeyIcon } from "./key"
 export { KeyboardIcon } from "./keyboard"
 export { KubernetesIcon } from "./kubernetes"
 export { LanguageIcon } from "./language"
 export { LayoutLeftIcon } from "./layout-left"
-export { LinkIcon } from "./link"
+export { LayoutRightIcon } from "./layout-right"
 export { LogoutIcon } from "./logout"
+export { MagnifierCheckIcon } from "./magnifier-check"
 export { MaximizeIcon } from "./maximize"
 export { MediaPauseIcon } from "./media-pause"
 export { MediaPlayIcon } from "./media-play"
@@ -93,6 +111,10 @@ export { MinimizeIcon } from "./minimize"
 export { MongodbIcon } from "./mongodb"
 export { MoonIcon } from "./moon"
 export { MysqlIcon } from "./mysql"
+export { NatsIcon } from "./nats"
+export { NodejsIcon } from "./nodejs"
+export { OpenjdkIcon } from "./openjdk"
+export { OperaIcon } from "./opera"
 export { PaletteIcon } from "./palette"
 export { PaperPlaneIcon } from "./paper-plane"
 export { PencilIcon } from "./pencil"
@@ -101,12 +123,15 @@ export { PlayRotateClockwiseIcon } from "./play-rotate-clockwise"
 export { PlusIcon } from "./plus"
 export { PostgresIcon } from "./postgres"
 export { PrometheusIcon } from "./prometheus"
+export { RabbitmqIcon } from "./rabbitmq"
 export { PriorityBarsIcon, PRIORITY_LABEL } from "./priority-bars"
 export type { PriorityLevel } from "./priority-bars"
 export { RedisIcon } from "./redis"
 export { RocketIcon } from "./rocket"
+export { SafariIcon } from "./safari"
 export { ServerIcon } from "./server"
 export { ShieldIcon } from "./shield"
+export { SlackIcon, SlackMonoIcon } from "./slack"
 export { SlidersIcon } from "./sliders"
 export { SquareIcon } from "./square"
 export { SquareTerminalIcon } from "./square-terminal"

@@ -1,9 +1,9 @@
 import { useAuth } from "@clerk/clerk-react"
-import { useCustomer } from "autumn-js/react"
+import { useMapleCustomer } from "@/hooks/use-maple-customer"
 import { Navigate, createFileRoute } from "@tanstack/react-router"
-import { effectRoute } from "@effect-router/core"
 import { Schema } from "effect"
 import { RocketIcon } from "@/components/icons"
+import { BootSplash } from "@/components/boot-splash"
 import { PricingCards } from "@/components/settings/pricing-cards"
 import { hasSelectedPlan } from "@/lib/billing/plan-gating"
 import { TRIAL_DURATION_DAYS } from "@/lib/billing/plans"
@@ -14,7 +14,7 @@ const SelectPlanSearch = Schema.Struct({
 	redirect_url: Schema.optional(Schema.String),
 })
 
-export const Route = effectRoute(createFileRoute("/select-plan"))({
+export const Route = createFileRoute("/select-plan")({
 	component: SelectPlanPage,
 	validateSearch: Schema.toStandardSchemaV1(SelectPlanSearch),
 })
@@ -37,11 +37,11 @@ function SelectPlanPage() {
 
 function SelectPlanPageInner() {
 	const { isLoaded, isSignedIn, orgId } = useAuth()
-	const { data: customer, isLoading: isCustomerLoading } = useCustomer()
+	const { data: customer, isLoading: isCustomerLoading } = useMapleCustomer()
 	const { redirect_url } = Route.useSearch()
 
 	if (!isLoaded || isCustomerLoading) {
-		return null
+		return <BootSplash />
 	}
 
 	const redirectTarget = resolveRedirectTarget(redirect_url)
@@ -80,8 +80,8 @@ function SelectPlanPageInner() {
 						Start your free trial
 					</h1>
 					<p className="text-muted-foreground mt-4 text-sm md:text-base leading-relaxed max-w-lg mx-auto [text-wrap:balance]">
-						Try any paid plan free for {TRIAL_DURATION_DAYS} days. You won't be charged until the
-						trial ends. Cancel anytime.
+						Try Maple free for {TRIAL_DURATION_DAYS} days. You won't be charged until the trial
+						ends. Cancel anytime.
 					</p>
 				</div>
 

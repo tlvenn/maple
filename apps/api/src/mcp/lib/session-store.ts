@@ -3,7 +3,7 @@ import type { McpSchema } from "effect/unstable/ai"
 
 export type SessionPayload = typeof McpSchema.Initialize.payloadSchema.Type
 
-export const SESSION_TTL_SECONDS = 60 * 60 * 24
+const SESSION_TTL_SECONDS = 60 * 60 * 24
 
 export interface SessionsBinding {
 	readonly get: (key: string, type: "json") => Promise<unknown>
@@ -22,7 +22,9 @@ export const preloadSession = (kv: SessionsBinding, sessionId: string): Promise<
 		if (value) sessionStore.set(sessionId, value as SessionPayload)
 	}).pipe(
 		Effect.catchCause((cause) =>
-			Effect.logError("[mcp-session-kv] preload failed", { sessionId, cause }),
+			Effect.logError("[mcp-session-kv] preload failed").pipe(
+				Effect.annotateLogs({ sessionId, cause }),
+			),
 		),
 		Effect.runPromise,
 	)
@@ -33,7 +35,9 @@ export const persistSession = (kv: SessionsBinding, sessionId: string): Promise<
 	return Effect.tryPromise(() =>
 		kv.put(sessionId, JSON.stringify(payload), { expirationTtl: SESSION_TTL_SECONDS }),
 	).pipe(
-		Effect.catchCause((cause) => Effect.logError("[mcp-session-kv] put failed", { sessionId, cause })),
+		Effect.catchCause((cause) =>
+			Effect.logError("[mcp-session-kv] put failed").pipe(Effect.annotateLogs({ sessionId, cause })),
+		),
 		Effect.runPromise,
 	)
 }

@@ -1,16 +1,8 @@
 import { McpSchema, McpServer as EffectMcpServer } from "effect/unstable/ai"
-import { Effect, Layer, Schema, Context } from "effect"
-import { mapleToolDefinitions, toInputSchema, type MapleToolDefinition } from "./tools/registry"
-import type { McpToolError, McpToolRegistrar, McpToolResult } from "./tools/types"
-
-const toErrorMessage = (error: unknown): string => {
-	if (error instanceof Error && "error" in error && (error as any).error != null) {
-		const inner = (error as any).error
-		return inner instanceof Error ? inner.message : String(inner)
-	}
-	if (error instanceof Error) return error.message
-	return String(error)
-}
+import { Context, Effect, Layer } from "effect"
+import { callMcpTool, listMcpTools } from "./dispatcher"
+import { CurrentMcpTenant, resolveHttpMcpTenant } from "./lib/query-warehouse"
+import type { McpToolResult } from "./tools/types"
 
 const toCallToolResult = (result: McpToolResult): typeof McpSchema.CallToolResult.Type =>
 	new McpSchema.CallToolResult({
@@ -21,140 +13,43 @@ const toCallToolResult = (result: McpToolResult): typeof McpSchema.CallToolResul
 		})),
 	})
 
-const toDecodeErrorMessage = (definition: MapleToolDefinition, error: unknown): string => {
-	if (Schema.isSchemaError(error)) {
-		return `${String(error)}. Check the "${definition.name}" tool schema for valid parameter names and types.`
-	}
-	return String(error)
-}
+const toBoundaryErrorResult = (error: { readonly _tag: string; readonly message: string }) =>
+	toCallToolResult({
+		isError: true,
+		content: [{ type: "text", text: `${error._tag}: ${error.message}` }],
+	})
 
+/** Public MCP transport backed by the same dispatcher as internal Worker RPC. */
 export const McpToolsLive = Layer.effectDiscard(
 	Effect.gen(function* () {
 		const server = yield* EffectMcpServer.McpServer
-		yield* Effect.forEach(mapleToolDefinitions, (definition) =>
+		const descriptors = yield* listMcpTools
+		yield* Effect.forEach(descriptors, (descriptor) =>
 			server.addTool({
 				tool: new McpSchema.Tool({
-					name: definition.name,
-					description: definition.description,
-					inputSchema: toInputSchema(definition.schema),
+					name: descriptor.name,
+					description: descriptor.description,
+					inputSchema: descriptor.inputSchema,
 				}),
 				annotations: Context.empty(),
 				handle: (payload) =>
-					Effect.gen(function* () {
-						yield* Effect.annotateCurrentSpan({ tool: definition.name })
-						const decoded = yield* Effect.try({
-							try: () => Schema.decodeUnknownSync(definition.schema)(payload),
-							catch: (error) => error,
-						}).pipe(
-							Effect.mapError((error) => {
-								const errorMessage = toDecodeErrorMessage(definition, error)
-								return { _tag: "@maple/mcp/decode-error" as const, errorMessage }
-							}),
-						)
-
-						return yield* definition.handler(decoded).pipe(
-							Effect.tap(() => Effect.logInfo("Tool completed")),
-							Effect.map(toCallToolResult),
-						)
-					}).pipe(
-						Effect.catchTag("@maple/mcp/decode-error", (error) =>
-							Effect.logWarning("Invalid parameters").pipe(
-								Effect.annotateLogs({ error: error.errorMessage }),
-								Effect.as(
-									toCallToolResult({
-										isError: true,
-										content: [
-											{
-												type: "text",
-												text: `Invalid parameters: ${error.errorMessage}`,
-											},
-										],
-									}),
-								),
+					resolveHttpMcpTenant.pipe(
+						Effect.flatMap((tenant) =>
+							callMcpTool(descriptor.name, payload).pipe(
+								Effect.provideService(CurrentMcpTenant, tenant),
 							),
 						),
+						Effect.map(toCallToolResult),
 						Effect.catchTags({
-							"@maple/mcp/errors/McpQueryError": (error) =>
-								Effect.logError(`Tool error: ${error.message}`).pipe(
-									Effect.annotateLogs({
-										errorTag: error._tag,
-										pipe: error.pipe,
-									}),
-									Effect.as(
-										toCallToolResult({
-											isError: true,
-											content: [
-												{ type: "text", text: `${error._tag}: ${error.message}` },
-											],
-										}),
-									),
-								),
-							"@maple/mcp/errors/McpTenantError": (error) =>
-								Effect.logError(`Tool error: ${error.message}`).pipe(
-									Effect.annotateLogs({ errorTag: error._tag }),
-									Effect.as(
-										toCallToolResult({
-											isError: true,
-											content: [
-												{ type: "text", text: `${error._tag}: ${error.message}` },
-											],
-										}),
-									),
-								),
+							"@maple/internal-rpc/ToolNotFoundError": (error) =>
+								Effect.succeed(toBoundaryErrorResult(error)),
 							"@maple/mcp/errors/McpAuthMissingError": (error) =>
-								Effect.logError(`Auth error: ${error.message}`).pipe(
-									Effect.annotateLogs({ errorTag: error._tag }),
-									Effect.as(
-										toCallToolResult({
-											isError: true,
-											content: [
-												{ type: "text", text: `${error._tag}: ${error.message}` },
-											],
-										}),
-									),
-								),
+								Effect.succeed(toBoundaryErrorResult(error)),
 							"@maple/mcp/errors/McpAuthInvalidError": (error) =>
-								Effect.logError(`Auth error: ${error.message}`).pipe(
-									Effect.annotateLogs({ errorTag: error._tag }),
-									Effect.as(
-										toCallToolResult({
-											isError: true,
-											content: [
-												{ type: "text", text: `${error._tag}: ${error.message}` },
-											],
-										}),
-									),
-								),
+								Effect.succeed(toBoundaryErrorResult(error)),
 							"@maple/mcp/errors/McpInvalidTenantError": (error) =>
-								Effect.logError(
-									`Tenant validation error [${error.field}]: ${error.message}`,
-								).pipe(
-									Effect.annotateLogs({ errorTag: error._tag, field: error.field }),
-									Effect.as(
-										toCallToolResult({
-											isError: true,
-											content: [
-												{
-													type: "text",
-													text: `${error._tag} (${error.field}): ${error.message}`,
-												},
-											],
-										}),
-									),
-								),
+								Effect.succeed(toBoundaryErrorResult(error)),
 						}),
-						Effect.catchDefect((error) =>
-							Effect.logError(`Tool defect: ${toErrorMessage(error)}`).pipe(
-								Effect.as(
-									toCallToolResult({
-										isError: true,
-										content: [{ type: "text", text: `Error: ${toErrorMessage(error)}` }],
-									}),
-								),
-							),
-						),
-						Effect.annotateLogs({ tool: definition.name }),
-						Effect.withSpan("McpTool.handle"),
 					),
 			}),
 		)

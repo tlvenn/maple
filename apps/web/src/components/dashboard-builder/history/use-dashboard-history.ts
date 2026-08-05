@@ -1,16 +1,12 @@
-import { Schema } from "effect"
 import { useAtomSet, useAtomValue } from "@/lib/effect-atom"
-import { MapleApiAtomClient } from "@/lib/services/common/atom-client"
+import { MapleApiV2AtomClient } from "@/lib/services/common/v2-atom-client"
 import { DashboardId, DashboardVersionId } from "@maple/domain/http"
 
-const asDashboardId = Schema.decodeUnknownSync(DashboardId)
-const asDashboardVersionId = Schema.decodeUnknownSync(DashboardVersionId)
+const dashboardVersionsKey = (dashboardId: DashboardId) => `dashboard:${dashboardId}:versions`
 
-export const dashboardVersionsKey = (dashboardId: string) => `dashboard:${dashboardId}:versions`
-
-export function useDashboardVersions(dashboardId: string) {
-	const queryAtom = MapleApiAtomClient.query("dashboards", "listVersions", {
-		params: { dashboardId: asDashboardId(dashboardId) },
+export function useDashboardVersions(dashboardId: DashboardId) {
+	const queryAtom = MapleApiV2AtomClient.query("dashboards", "listVersions", {
+		params: { id: dashboardId },
 		query: { limit: 100 },
 		reactivityKeys: [dashboardVersionsKey(dashboardId)],
 	})
@@ -21,11 +17,11 @@ export function useDashboardVersions(dashboardId: string) {
  * Fetch a single version's full snapshot. The parent must conditionally
  * mount the consuming component — this hook is always called on mount.
  */
-export function useDashboardVersionDetail(dashboardId: string, versionId: string) {
-	const queryAtom = MapleApiAtomClient.query("dashboards", "getVersion", {
+export function useDashboardVersionDetail(dashboardId: DashboardId, versionId: DashboardVersionId) {
+	const queryAtom = MapleApiV2AtomClient.query("dashboards", "retrieveVersion", {
 		params: {
-			dashboardId: asDashboardId(dashboardId),
-			versionId: asDashboardVersionId(versionId),
+			id: dashboardId,
+			version_id: versionId,
 		},
 		reactivityKeys: [`dashboard:${dashboardId}:version:${versionId}`],
 	})
@@ -33,13 +29,13 @@ export function useDashboardVersionDetail(dashboardId: string, versionId: string
 }
 
 export function useRestoreDashboardVersion() {
-	return useAtomSet(MapleApiAtomClient.mutation("dashboards", "restoreVersion"), { mode: "promiseExit" })
+	return useAtomSet(MapleApiV2AtomClient.mutation("dashboards", "restoreVersion"), { mode: "promiseExit" })
 }
 
-export const buildRestorePayload = (dashboardId: string, versionId: string) => ({
+export const buildRestorePayload = (dashboardId: DashboardId, versionId: DashboardVersionId) => ({
 	params: {
-		dashboardId: asDashboardId(dashboardId),
-		versionId: asDashboardVersionId(versionId),
+		id: dashboardId,
+		version_id: versionId,
 	},
 	reactivityKeys: ["dashboards", dashboardVersionsKey(dashboardId)] as const,
 })

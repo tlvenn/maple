@@ -1,3 +1,4 @@
+import { formatNumber, formatStorageBytes } from "@maple/ui/lib/format"
 import { Result } from "@/lib/effect-atom"
 import { FileIcon, GridSquareCirclePlusIcon, ChartLineIcon, DatabaseIcon } from "@/components/icons"
 
@@ -8,29 +9,7 @@ import { useRefreshableAtomValue } from "@/hooks/use-refreshable-atom-value"
 import type { ServiceUsageResponse, ServiceUsageTotals } from "@/api/warehouse/service-usage"
 import { normalizeTimestampInput } from "@/lib/timezone-format"
 
-function formatNumber(num: number): string {
-	if (num >= 1_000_000) {
-		return `${(num / 1_000_000).toFixed(1)}M`
-	}
-	if (num >= 1_000) {
-		return `${(num / 1_000).toFixed(1)}K`
-	}
-	return num.toLocaleString()
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes >= 1_000_000_000) {
-		return `${(bytes / 1_000_000_000).toFixed(2)} GB`
-	}
-	if (bytes >= 1_000_000) {
-		return `${(bytes / 1_000_000).toFixed(2)} MB`
-	}
-	if (bytes >= 1_000) {
-		return `${(bytes / 1_000).toFixed(2)} KB`
-	}
-	return `${bytes} B`
-}
-
+import { formatWarehouseDateTime } from "@maple/query-engine"
 type CardKey = "logs" | "traces" | "metrics" | "dataSize"
 
 const cardConfig: Array<{
@@ -42,7 +21,7 @@ const cardConfig: Array<{
 	{ title: "Total Logs", key: "logs", icon: FileIcon, format: formatNumber },
 	{ title: "Total Traces", key: "traces", icon: GridSquareCirclePlusIcon, format: formatNumber },
 	{ title: "Total Metrics", key: "metrics", icon: ChartLineIcon, format: formatNumber },
-	{ title: "Data Size", key: "dataSize", icon: DatabaseIcon, format: formatBytes },
+	{ title: "Data Size", key: "dataSize", icon: DatabaseIcon, format: formatStorageBytes },
 ]
 
 interface ServiceUsageCardsProps {
@@ -72,8 +51,10 @@ function shiftRangeBack(startTime?: string, endTime?: string) {
 	const duration = end.getTime() - start.getTime()
 	const prevEnd = new Date(start.getTime())
 	const prevStart = new Date(start.getTime() - duration)
-	const fmt = (d: Date) => d.toISOString().replace("T", " ").slice(0, 19)
-	return { startTime: fmt(prevStart), endTime: fmt(prevEnd) }
+	return {
+		startTime: formatWarehouseDateTime(prevStart.getTime()),
+		endTime: formatWarehouseDateTime(prevEnd.getTime()),
+	}
 }
 
 function DeltaChip({ current, previous }: { current: number; previous: number }) {
@@ -133,15 +114,25 @@ export function ServiceUsageCards({ startTime, endTime }: ServiceUsageCardsProps
 			</div>
 		))
 		.onError(() => (
+			// Quiet absence, not four more error blocks — the chart panels below
+			// already carry the full message. Keep the loaded state's card rhythm
+			// with an em-dash in the value slot.
 			<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
 				{cardConfig.map((card) => (
 					<Card key={card.title}>
-						<CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
-							<CardTitle className="text-sm font-medium">{card.title}</CardTitle>
-							<card.icon size={16} className="text-muted-foreground" />
+						<CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-1">
+							<CardTitle className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+								{card.title}
+							</CardTitle>
+							<card.icon size={14} className="text-muted-foreground/70" />
 						</CardHeader>
-						<CardContent>
-							<div className="text-sm text-muted-foreground">Unable to load</div>
+						<CardContent className="pt-0 pb-4">
+							<div className="font-mono text-3xl font-semibold leading-none tracking-tight tabular-nums text-muted-foreground/40">
+								—
+							</div>
+							<div className="mt-2 flex h-[14px] items-center text-xs text-muted-foreground">
+								Couldn&apos;t load
+							</div>
 						</CardContent>
 					</Card>
 				))}

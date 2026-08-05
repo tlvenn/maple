@@ -6,11 +6,19 @@ import { Effect, Schema, type Scope } from "effect"
 import * as ManagedRuntime from "effect/ManagedRuntime"
 import { gunzipSync } from "node:zlib"
 import { TelemetryLayer } from "../core/telemetry"
-import { acquireChdb, type Chdb, type ChdbError } from "./chdb"
-import { buildInsertSql } from "./inserts"
-import { encodeLogs, encodeMetrics, encodeTraces, type EncodedBatch } from "./otlp/encode"
+import { isLoopbackHostname } from "../lib/local-address"
+import { MAPLE_VERSION } from "../version"
+import { acquireChdb, ChdbError, type Chdb } from "./chdb"
+import { buildInsertStatements } from "./inserts"
+import { encodeLogs, encodeMetrics, encodeTraces, type EncodedBatch, OtlpFieldError } from "./otlp/encode"
 import { decodeLogsRequest, decodeMetricsRequest, decodeTraceRequest } from "./otlp/proto"
-import schemaSql from "./schema/local-schema.sql" with { type: "text" }
+import { CURRENT_LOCAL_SCHEMA, LOCAL_SCHEMA_SQL, SCHEMA_FINGERPRINT } from "./schema-identity"
+import { assertCurrentPhysicalSchema } from "./schema-physical"
+import { ensureStoreMarkerDurable } from "./store-version"
+
+/** Fingerprint of the schema this build bootstraps stores with. Re-exported
+ * from this module for the existing archive/checkpoint metadata seam. */
+export { SCHEMA_FINGERPRINT }
 
 /** Resolves a request path to a static asset (the bundled SPA). Returns
  *  `undefined` to fall through to the SPA shell (client-side routing). */
@@ -19,38 +27,95 @@ export interface AssetResolver {
 }
 
 export interface ServerOptions {
+	readonly hostname: string
+	/** URL hostnames permitted to use the embedded UI same-origin. This also
+	 * rejects browser DNS-rebinding hosts that were never advertised. */
+	readonly browserHosts: readonly string[]
+	/** Exact separately hosted UI origin allowed to reach the local listener. */
+	readonly corsOrigin: string
 	readonly port: number
 	readonly dataDir: string
+	readonly configFile?: string
 	/** Serves the bundled SPA; omit to disable the UI (API-only). */
 	readonly assets?: AssetResolver
 }
 
-const CORS_HEADERS = {
-	"access-control-allow-origin": "*",
-	"access-control-allow-methods": "GET, POST, OPTIONS",
-	"access-control-allow-headers": "content-type, content-encoding",
-	// The default-served UI lives at a public origin (local.maple.dev) but queries
-	// this loopback server, so Chrome's Private Network Access gate sends a
-	// preflight with `Access-Control-Request-Private-Network: true` and requires
-	// this header on the response. (`--offline` keeps the UI same-origin and skips
-	// the gate entirely.)
-	"access-control-allow-private-network": "true",
-} as const
+export class ServerBindError extends Schema.TaggedErrorClass<ServerBindError>()(
+	"@maple/cli/ServerBindError",
+	{
+		hostname: Schema.String,
+		port: Schema.Number,
+		message: Schema.String,
+	},
+) {}
+
+export const isBrowserOriginAllowed = (
+	requestUrl: URL,
+	origin: string | null,
+	corsOrigin: string,
+	browserHosts: readonly string[],
+): boolean => {
+	if (origin === null) return true // SDKs, collectors, and other non-browser clients
+	let originUrl: URL
+	try {
+		originUrl = new URL(origin)
+	} catch {
+		return false
+	}
+	if (originUrl.origin === corsOrigin) return true
+	// Loopback aliases and dev-proxy ports are equivalent local origins. Require
+	// both sides to be loopback so this exception cannot weaken LAN DNS-rebinding
+	// protection.
+	if (isLoopbackHostname(originUrl.hostname) && isLoopbackHostname(requestUrl.hostname)) return true
+	// Bun constructs requestUrl from the client's Host header. Keep that behavior:
+	// this comparison is the load-bearing DNS-rebinding check for non-loopback UI traffic.
+	// Compare host (including port), not scheme: a TLS reverse proxy may preserve
+	// Host while forwarding to this HTTP listener. Restrict the hostname to the
+	// bind/connect/advertised set so a DNS-rebinding origin cannot claim itself as
+	// a same-origin embedded dashboard.
+	return originUrl.host === requestUrl.host && browserHosts.includes(originUrl.hostname)
+}
+
+/** Build CORS headers for an origin that has already passed
+ * `isBrowserOriginAllowed`. Echoing it preserves browser OTLP ingest between
+ * loopback aliases and ports without restoring wildcard CORS. */
+export const corsHeadersForAllowedOrigin = (
+	origin: string | null,
+): Readonly<Record<string, string>> | undefined =>
+	origin !== null
+		? {
+				"access-control-allow-origin": origin,
+				"access-control-allow-methods": "GET, POST, OPTIONS",
+				"access-control-allow-headers": "content-type, content-encoding",
+				"access-control-allow-private-network": "true",
+				vary: "Origin",
+			}
+		: undefined
+
+const withCors = (response: Response, headers: Readonly<Record<string, string>> | undefined): Response => {
+	if (headers) for (const [name, value] of Object.entries(headers)) response.headers.set(name, value)
+	return response
+}
 
 const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), {
 		status,
-		headers: { "content-type": "application/json", ...CORS_HEADERS },
+		headers: { "content-type": "application/json" },
 	})
 
 const text = (body: string, status = 200, contentType = "text/plain"): Response =>
-	new Response(body, { status, headers: { "content-type": contentType, ...CORS_HEADERS } })
+	new Response(body, { status, headers: { "content-type": contentType } })
 
 type Signal = "traces" | "logs" | "metrics"
 
 /** Decode an OTLP request body (protobuf by default, JSON when content-type
  *  says so), transparently gunzipping a gzip content-encoding. */
-function decodeOtlp(signal: Signal, raw: Uint8Array, contentType: string, contentEncoding: string | null): unknown {
+function decodeOtlp(
+	signal: Signal,
+	raw: Uint8Array,
+	contentType: string,
+	contentEncoding: string | null,
+): unknown {
 	let bytes = raw
 	if (contentEncoding && contentEncoding.includes("gzip")) {
 		bytes = gunzipSync(raw)
@@ -95,27 +160,41 @@ async function ingest(db: Chdb, signal: Signal, req: Request): Promise<IngestRes
 	try {
 		decoded = decodeOtlp(signal, raw, contentType, contentEncoding)
 	} catch (error) {
-		return { response: text(`decode ${signal}: ${(error as Error).message}`, 400), accepted: 0, requestBytes }
+		return {
+			response: text(`decode ${signal}: ${(error as Error).message}`, 400),
+			accepted: 0,
+			requestBytes,
+		}
 	}
 	let batches: EncodedBatch[]
 	try {
 		batches = encodeFor(signal, decoded)
 	} catch (error) {
-		return { response: text(`encode ${signal}: ${(error as Error).message}`, 500), accepted: 0, requestBytes }
+		// A malformed field is the sender's fault, not ours — reject the batch
+		// with a 400 naming the field instead of silently storing a bad value.
+		const status = error instanceof OtlpFieldError ? 400 : 500
+		const stage = status === 400 ? "decode" : "encode"
+		return {
+			response: text(`${stage} ${signal}: ${(error as Error).message}`, status),
+			accepted: 0,
+			requestBytes,
+		}
 	}
 	let accepted = 0
 	for (const batch of batches) {
 		if (batch.rowCount === 0) continue
-		try {
-			db.exec(buildInsertSql(batch.datasource, batch.ndjson))
-		} catch (error) {
-			return {
-				response: text(`chDB insert (${batch.datasource}): ${(error as Error).message}`, 500),
-				accepted,
-				requestBytes,
+		for (const statement of buildInsertStatements(batch.datasource, batch.ndjson)) {
+			try {
+				db.exec(statement.sql)
+			} catch (error) {
+				return {
+					response: text(`chDB insert (${batch.datasource}): ${(error as Error).message}`, 500),
+					accepted,
+					requestBytes,
+				}
 			}
+			accepted += statement.rowCount
 		}
-		accepted += batch.rowCount
 	}
 	return { response: json({ accepted }), accepted, requestBytes }
 }
@@ -126,7 +205,7 @@ async function ingest(db: Chdb, signal: Signal, req: Request): Promise<IngestRes
  * `force_json_each_row` from the former Rust server: callers POST `compiled.sql`
  * verbatim (`CH.compile(...)` appends `FORMAT JSON`).
  */
-export function forceJsonEachRow(sql: string): string {
+function forceJsonEachRow(sql: string): string {
 	let s = sql.trimEnd()
 	if (s.endsWith(";")) s = s.slice(0, -1).trimEnd()
 	const lower = s.toLowerCase()
@@ -164,8 +243,11 @@ async function handleQuery(db: Chdb, req: Request): Promise<QueryResult> {
 	try {
 		out = db.query(forceJsonEachRow(sql))
 	} catch (error) {
+		// 400, not 500: a failing statement is a problem with the submitted SQL,
+		// and a 5xx would make the shared warehouse executor classify it as a
+		// transient upstream error and retry the identical query.
 		return {
-			response: text(`query failed: ${(error as Error).message}`, 500),
+			response: text(`query failed: ${(error as Error).message}`, 400),
 			rowCount: 0,
 			durationMs: Math.round(performance.now() - started),
 			sql,
@@ -174,8 +256,16 @@ async function handleQuery(db: Chdb, req: Request): Promise<QueryResult> {
 	const durationMs = Math.round(performance.now() - started)
 	// chDB returns JSONEachRow (one JSON object per line). Wrap the lines into a
 	// JSON array without re-parsing each row.
-	const rows = out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0)
-	return { response: text(`[${rows.join(",")}]`, 200, "application/json"), rowCount: rows.length, durationMs, sql }
+	const rows = out
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l.length > 0)
+	return {
+		response: text(`[${rows.join(",")}]`, 200, "application/json"),
+		rowCount: rows.length,
+		durationMs,
+		sql,
+	}
 }
 
 function serveAsset(assets: AssetResolver, pathname: string): Response {
@@ -196,7 +286,7 @@ const truncateSql = (sql: string) => (sql.length > MAX_DB_QUERY_TEXT ? sql.slice
  *  `startServer`). The effect always succeeds with a `Response`. */
 type SpanRunner = <A>(effect: Effect.Effect<A>) => Promise<A>
 
-// A rejected (4xx/5xx) ingest/query response, surfaced through the Effect error
+// A rejected 5xx ingest/query response, surfaced through the Effect error
 // channel. `message` carries the handler's descriptive body so the span records
 // a real `exception.message`; `response` is the original, untouched response we
 // hand back to the client in `recoverResponse`. (Failing with a bare `Response`
@@ -208,19 +298,20 @@ class IngestRejected extends Schema.TaggedErrorClass<IngestRejected>()("@maple/c
 	message: Schema.String,
 }) {}
 
-// The Effect tracer derives span status from the effect's outcome — success →
-// `Ok`, failure → `Error` (conventions say never set the status string by hand
-// in TS). So to mark a 4xx/5xx span `Error`, we fail *inside* the span with an
-// `IngestRejected` carrying the reason, then recover the original response with
-// `Effect.match` *outside* the span — the span has already closed `Error` by then.
-const failIfError = (response: Response): Effect.Effect<Response, IngestRejected> =>
+// The Effect tracer derives span status from the effect's outcome. OTel HTTP
+// Server semantics treat 4xx as a successful server outcome (the caller sent a
+// bad request) and only 5xx as Error. Annotate every rejection, but fail inside
+// the Server span only for 5xx; recover the original response outside the span.
+const recordServerResponse = (response: Response): Effect.Effect<Response, IngestRejected> =>
 	Effect.gen(function* () {
 		if (response.status >= 400) {
 			// Clone to read the body without consuming the response we return below.
 			const body = (yield* Effect.promise(() => response.clone().text())).trim()
 			const message = body.length > 0 ? body : `HTTP ${response.status}`
 			yield* Effect.annotateCurrentSpan({ "error.type": `HTTP ${response.status}` })
-			return yield* Effect.fail(new IngestRejected({ response, status: response.status, message }))
+			if (response.status >= 500) {
+				return yield* new IngestRejected({ response, status: response.status, message })
+			}
 		}
 		return response
 	})
@@ -234,13 +325,15 @@ const ingestSpan = (runSpan: SpanRunner, db: Chdb, signal: Signal, req: Request)
 	runSpan(
 		recoverResponse(
 			Effect.gen(function* () {
-				const { response, accepted, requestBytes } = yield* Effect.promise(() => ingest(db, signal, req))
+				const { response, accepted, requestBytes } = yield* Effect.promise(() =>
+					ingest(db, signal, req),
+				)
 				yield* Effect.annotateCurrentSpan({
 					"http.request.body.size": requestBytes,
 					"maple.ingest.item_count": accepted,
 					"http.response.status_code": response.status,
 				})
-				return yield* failIfError(response)
+				return yield* recordServerResponse(response)
 			}).pipe(
 				Effect.withSpan(`POST /v1/${signal}`, {
 					kind: "server",
@@ -259,7 +352,9 @@ const querySpan = (runSpan: SpanRunner, db: Chdb, req: Request): Promise<Respons
 	runSpan(
 		recoverResponse(
 			Effect.gen(function* () {
-				const { response, rowCount, durationMs, sql } = yield* Effect.promise(() => handleQuery(db, req))
+				const { response, rowCount, durationMs, sql } = yield* Effect.promise(() =>
+					handleQuery(db, req),
+				)
 				yield* Effect.annotateCurrentSpan({
 					"db.system.name": "clickhouse",
 					"db.duration_ms": durationMs,
@@ -267,7 +362,7 @@ const querySpan = (runSpan: SpanRunner, db: Chdb, req: Request): Promise<Respons
 					"http.response.status_code": response.status,
 					...(sql ? { "db.query.text": truncateSql(sql), "db.query.length": sql.length } : {}),
 				})
-				return yield* failIfError(response)
+				return yield* recordServerResponse(response)
 			}).pipe(
 				Effect.withSpan("POST /local/query", {
 					kind: "server",
@@ -284,16 +379,22 @@ const makeFetch =
 	(db: Chdb, options: ServerOptions, runSpan: SpanRunner) =>
 	async (req: Request): Promise<Response> => {
 		const url = new URL(req.url)
-		if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS })
-		if (url.pathname === "/health") return text("OK")
-		if (req.method === "POST") {
-			if (url.pathname === "/v1/traces") return ingestSpan(runSpan, db, "traces", req)
-			if (url.pathname === "/v1/logs") return ingestSpan(runSpan, db, "logs", req)
-			if (url.pathname === "/v1/metrics") return ingestSpan(runSpan, db, "metrics", req)
-			if (url.pathname === "/local/query") return querySpan(runSpan, db, req)
+		const origin = req.headers.get("origin")
+		if (!isBrowserOriginAllowed(url, origin, options.corsOrigin, options.browserHosts)) {
+			return text("browser origin not allowed", 403)
 		}
-		if (req.method === "GET" && options.assets) return serveAsset(options.assets, url.pathname)
-		return text("not found", 404)
+		const corsHeaders = corsHeadersForAllowedOrigin(origin)
+		const respond = (response: Response): Response => withCors(response, corsHeaders)
+		if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders })
+		if (url.pathname === "/health") return respond(text("OK"))
+		if (req.method === "POST") {
+			if (url.pathname === "/v1/traces") return respond(await ingestSpan(runSpan, db, "traces", req))
+			if (url.pathname === "/v1/logs") return respond(await ingestSpan(runSpan, db, "logs", req))
+			if (url.pathname === "/v1/metrics") return respond(await ingestSpan(runSpan, db, "metrics", req))
+			if (url.pathname === "/local/query") return respond(await querySpan(runSpan, db, req))
+		}
+		if (req.method === "GET" && options.assets) return respond(serveAsset(options.assets, url.pathname))
+		return respond(text("not found", 404))
 	}
 
 /** Start the server as a scoped resource. Opens chDB (bootstrapping the schema)
@@ -303,9 +404,40 @@ const makeFetch =
  *  order). Resolves with the bound port once listening. */
 export const startServer = (
 	options: ServerOptions,
-): Effect.Effect<{ readonly port: number }, ChdbError, Scope.Scope> =>
+): Effect.Effect<{ readonly port: number }, ChdbError | ServerBindError, Scope.Scope> =>
 	Effect.gen(function* () {
-		const db = yield* acquireChdb({ dataDir: options.dataDir, schemaSql })
+		const db = yield* acquireChdb({
+			dataDir: options.dataDir,
+			schemaSql: LOCAL_SCHEMA_SQL,
+			configFile: options.configFile,
+		})
+		// `CREATE ... IF NOT EXISTS` does not repair a table whose physical
+		// definition was altered out of band. Inspect the opened store before the
+		// listener is bound; a mismatch fails startup rather than allowing new
+		// query code to run against a partially old layout.
+		yield* Effect.try({
+			try: () => assertCurrentPhysicalSchema(db),
+			catch: (error) =>
+				new ChdbError({
+					message: `local physical-schema verification failed: ${error instanceof Error ? error.message : String(error)}`,
+				}),
+		})
+		yield* Effect.tryPromise({
+			try: () =>
+				ensureStoreMarkerDurable(
+					options.dataDir,
+					{
+						version: CURRENT_LOCAL_SCHEMA.version,
+						digest: CURRENT_LOCAL_SCHEMA.digest,
+						fingerprint: SCHEMA_FINGERPRINT,
+					},
+					MAPLE_VERSION,
+				),
+			catch: (error) =>
+				new ChdbError({
+					message: `could not durably record local-store identity: ${error instanceof Error ? error.message : String(error)}`,
+				}),
+		})
 		// A dedicated runtime carrying the OTel tracer for per-request spans: the
 		// Bun.serve handler runs outside Effect, so each request's span effect is
 		// run through this runtime. Disposed on scope close, which flushes any
@@ -316,10 +448,23 @@ export const startServer = (
 		)
 		const runSpan: SpanRunner = (effect) => telemetry.runPromise(effect)
 		const server = yield* Effect.acquireRelease(
-			Effect.sync(() =>
-				Bun.serve({ port: options.port, hostname: "127.0.0.1", fetch: makeFetch(db, options, runSpan) }),
-			),
-			(s) => Effect.sync(() => s.stop(true)),
+			Effect.try({
+				try: () =>
+					Bun.serve({
+						port: options.port,
+						hostname: options.hostname,
+						fetch: makeFetch(db, options, runSpan),
+					}),
+				catch: (error) =>
+					new ServerBindError({
+						hostname: options.hostname,
+						port: options.port,
+						message: `failed to bind ${options.hostname}:${options.port}: ${error instanceof Error ? error.message : String(error)}`,
+					}),
+			}),
+			(s) => Effect.promise(() => s.stop(true)),
 		)
 		return { port: server.port ?? options.port }
 	})
+
+export const __testables = { recordServerResponse }
